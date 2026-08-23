@@ -1,0 +1,95 @@
+imports:
+  - module: mqtt-ingestion
+    source: openEuler
+    source_path: /root/agent/pi_agnet/mqtt_direct_gauss.py
+    source_hash: 28224dd905703bcd19313c2cc9bd767cdd529c79955d009f59a86062e93dc3eb
+    import_date: 2026-08-23
+    target_path: services/ingestion/mqtt_direct_gauss.py
+    status: imported-uncommitted
+  - module: irrigation-schema
+    source: openEuler
+    source_path: /root/agent/pi_agnet/irrigation_schema.sql
+    source_hash: 3350564b802037379dc31544591e8c91d20bb7f7fca4406c9891f46a0f437067
+    import_date: 2026-08-23
+    target_path: services/ingestion/schema/irrigation_schema.sql
+    status: imported-uncommitted
+  - module: phase1-four-devices
+    source: openEuler
+    source_path: /root/water/phase1_test/
+    source_hashes:
+      water-test-soil1.py: 18be98d30bcfd01b60451ae023508d1484f8834431cefc2965c17c43a1f9953b
+      water-test-soil2.py: e583159947faafa5a37a567f40860c22e544809b843c1f38129f8a389cf3759a
+      water-test-soil3.py: a53ba0934b71b7d68538ba6afb8c281f10be39faa928fabc89faae5a83c75b5d
+      water_test.py: 074e57c4fb1d0b6bd1c911c7675fa40f82925b6c9105f39c7fa94a90bb5328ee
+    import_date: 2026-08-23
+    target_path: services/control/phase1/
+    status: imported-uncommitted
+  - module: phase3-soil1
+    source: openEuler
+    source_path: /root/water/phase3/soil1/
+    source_anchor: decision_brain.py
+    source_hash: 23b294edeb7aa82233f79e85821e84427c8d016e99e92e1c04577483f7a16376
+    import_date: 2026-08-23
+    target_path: services/control/phase3/soil1/
+    status: imported-uncommitted
+  - module: phase3-soil2
+    source: openEuler
+    source_path: /root/water/phase3/soil2/
+    source_anchor: decision_brain.py
+    source_hash: e44c26b5439baa74a671286c1a7292291cdbee1946bea407fece33220c997ea2
+    import_date: 2026-08-23
+    target_path: services/control/phase3/soil2/
+    status: imported-uncommitted
+  - module: phase3-soil3
+    source: openEuler
+    source_path: /root/water/phase3/soil3/
+    source_anchor: decision_brain.py
+    source_hash: 98663f86e91330bda26147fbc0fc284826269909dc40411ae012926e2870a8c9
+    import_date: 2026-08-23
+    target_path: services/control/phase3/soil3/
+    status: imported-uncommitted
+  - module: phase3-soil-test
+    source: openEuler
+    source_path: /root/water/phase3/soil_test/
+    source_anchor: decision_brain.py
+    source_hash: 8cb91e1ce69d6af850ddc99a992158a5c44ca60c428b6594b46a037da617935f
+    import_date: 2026-08-23
+    target_path: services/control/phase3/soil_test/
+    status: imported-uncommitted
+  - module: web
+    source: openEuler
+    source_path: /root/water/web/water_web.py
+    source_hash: 0ced7342c6f945e7eef3ffbc04858a13e1b7d59dfbadf148518ea469c6db189a
+    import_date: 2026-08-23
+    target_path: web/water_web.py
+    status: imported-uncommitted
+  - module: plant-agent
+    source: openEuler
+    source_path: /root/agent/plant_agent/
+    source_anchor: plant_state_builder.py
+    source_hash: ad7e0bcf1606378b4611740e38b3db66a604e2ac4b43f6c689fabd8c3d759419
+    import_date: 2026-08-23
+    target_path: agents/plant_agent/
+    status: imported-uncommitted
+  - module: phase2-agent-tools-handoff-tests
+    source: openEuler
+    source_path: multiple-approved-source-paths
+    source_hash: per-file-manifest-pending
+    import_date: 2026-08-23
+    target_path: experiments/phase2/, agents/openclaw/tools/, services/control/handoff/, tests/
+    status: imported-uncommitted
+excluded:
+  - firmware source and binary: source not located
+  - systemd Unit content: pending sensitive-parameter review
+  - model weights, raw data, runtime state, secrets, logs, backups, virtual environments
+post_import_sanitization:
+  - date: 2026-08-23
+    target_path: agents/plant_agent/agent/vision_agent.py
+    action: replaced an imported plaintext vision API credential with the PLANT_VISION_API_KEY environment-variable contract
+    reason: public repository secret removal
+    status: uncommitted
+  - date: 2026-08-23
+    target_path: experiments/phase2/phase2_predictor/config.py
+    action: replaced imported deployment paths and precise weather coordinates with generic public defaults; WYC_PHASE2_CONFIG remains the override contract
+    reason: public repository deployment-configuration sanitization
+    status: uncommitted

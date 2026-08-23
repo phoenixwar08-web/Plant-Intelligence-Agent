@@ -1,0 +1,26 @@
+{
+  "paths": {
+    "request": "<RUNTIME_DIR>/pred_request.json",
+    "response": "<RUNTIME_DIR>/pred_response.json",
+    "soil_csv": "<DATASET_DIR>/soil.csv",
+    "air_humidity_csv": "<DATASET_DIR>/air_humidity.csv",
+    "model_weights": "<MODEL_DIR>/phase2-model.pth",
+    "state": "<RUNTIME_STATE_DIR>/predictor_state.json"
+  },
+  "weather": {
+    "url": "https://api.open-meteo.com/v1/forecast",
+    "latitude": 0.0,
+    "longitude": 0.0,
+    "default_temperature": 25.0,
+    "default_humidity": 50.0
+  },
+  "service": {
+    "poll_seconds": 0.2,
+    "minimum_history_rows": 12
+  },
+  "model": {
+    "device": "cpu",
+    "num_threads": 1,
+    "num_interop_threads": 1
+  }
+}

@@ -1,0 +1,3 @@
+numpy>=1.21
+requests>=2.26
+torch>=1.10

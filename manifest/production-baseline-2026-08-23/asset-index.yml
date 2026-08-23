@@ -1,0 +1,37 @@
+baseline:
+  collected_at: "2026-08-23"
+  source: "openEuler production environment"
+  scope: "key service and asset index only; not a complete file manifest"
+assets:
+  - id: mqtt-ingestion
+    source_path: "/root/agent/pi_agnet/mqtt_direct_gauss.py"
+    sha256: "28224dd905703bcd19313c2cc9bd767cdd529c79955d009f59a86062e93dc3eb"
+    status: active
+    target: services/ingestion/
+  - id: database-schema
+    source_path: "/root/agent/pi_agnet/irrigation_schema.sql"
+    sha256: "3350564b802037379dc31544591e8c91d20bb7f7fca4406c9891f46a0f437067"
+    status: active-contract
+    target: services/ingestion/schema/
+  - id: phase3-soil3-brain
+    source_path: "/root/water/phase3/soil3/decision_brain.py"
+    sha256: "98663f86e91330bda26147fbc0fc284826269909dc40411ae012926e2870a8c9"
+    status: active
+    target: services/control/phase3/soil3/
+  - id: web
+    source_path: "/root/water/web/water_web.py"
+    sha256: "0ced7342c6f945e7eef3ffbc04858a13e1b7d59dfbadf148518ea469c6db189a"
+    status: active
+    target: web/
+  - id: plant-agent
+    source_path: "/root/agent/plant_agent/"
+    status: candidate-import
+    target: agents/plant_agent/
+  - id: esp32-firmware
+    source_path: null
+    status: source-not-located
+    target: firmware/
+open_risks:
+  - "ESP32 firmware source, build provenance, and device-side safety behavior are unverified."
+  - "MQTT broker authorization is not yet a verified final control boundary."
+  - "Watering event receipt is not equivalent to physical relay, pump, or flow confirmation."

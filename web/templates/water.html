@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>微生境多模态感知与智控平台</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; }
+        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid #334155; }
+        .pulse-glow { animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); } 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); } }
+        .diag-bar { transition: width 0.3s ease; }
+        .judge-step { border-left: 2px solid #22c55e; background: rgba(15, 23, 42, 0.45); }
+    </style>
+</head>
+<body class="h-screen flex flex-col font-sans overflow-hidden relative">
+
+    <header class="flex justify-between items-center p-4 glass-panel border-b border-slate-700 z-10">
+        <div class="flex items-center gap-3">
+            <div class="w-3 h-3 rounded-full bg-emerald-400 pulse-glow" id="status-dot"></div>
+            <h1 class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-400 to-cyan-400 tracking-wide">
+                微生境多模态感知与智控平台
+            </h1>
+        </div>
+        <div class="flex gap-4 items-center">
+            <div class="flex items-center bg-slate-800 border border-slate-600 rounded-lg overflow-hidden shadow-inner h-9">
+                <div class="px-2 bg-slate-700/50 text-slate-400 text-xs h-full flex items-center border-r border-slate-600">当前档案</div>
+                <select id="plant-selector" class="bg-transparent text-emerald-300 text-sm font-bold pl-2 pr-6 py-1 outline-none appearance-none cursor-pointer" onchange="switchDevice()"></select>
+            </div>
+            <span class="px-3 py-1.5 bg-slate-800 border border-slate-600 text-slate-300 rounded text-xs font-mono h-9 flex items-center" id="freshness-badge">
+                通信: <span class="text-emerald-400 ml-1">就绪</span>
+            </span>
+            <span class="px-3 py-1.5 bg-emerald-950/60 border border-emerald-600/70 text-emerald-200 rounded text-xs font-bold h-9 flex items-center">Phase3 控泵</span>
+            <button class="bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-500 px-4 rounded-lg font-bold shadow-[0_0_10px_rgba(79,70,229,0.3)] transition-all ml-1 h-9 text-xs flex items-center gap-1" id="mode-btn" onclick="toggleAutoMode()">
+                🤖 托管: ON
+            </button>
+        </div>
+    </header>
+
+    <main class="flex-1 p-4 grid grid-cols-12 gap-4 overflow-y-auto">
+        <!-- Judge-first explanation layer -->
+        <section class="col-span-12 grid grid-cols-12 gap-4">
+            <div class="glass-panel col-span-7 p-5 rounded-lg border-l-4 border-l-emerald-400">
+                <div class="text-[11px] text-emerald-300 font-bold tracking-wider mb-2">评委视图 · 先看结论，再看数据证据</div>
+                <h2 class="text-2xl font-bold text-white leading-tight" id="judge-headline">反馈学习型自治养护系统</h2>
+                <p class="text-sm text-slate-300 mt-2 leading-relaxed" id="judge-subtitle">
+                    不预设植物品种，通过传感器、浇水结果、失败样本和安全边界，逐步学习这盆植物的安全浇水节奏。
+                </p>
+                <div class="grid grid-cols-3 gap-3 mt-4">
+                    <div class="judge-step rounded p-3">
+                        <div class="text-[11px] text-slate-400">当前结论</div>
+                        <div class="text-lg font-bold text-emerald-200 mt-1" id="judge-mode">等待数据</div>
+                    </div>
+                    <div class="judge-step rounded p-3">
+                        <div class="text-[11px] text-slate-400">湿度位置</div>
+                        <div class="text-lg font-bold text-cyan-100 mt-1" id="judge-position">--</div>
+                    </div>
+                    <div class="judge-step rounded p-3">
+                        <div class="text-[11px] text-slate-400">学习证据</div>
+                        <div class="text-lg font-bold text-blue-100 mt-1" id="judge-evidence">--</div>
+                    </div>
+                </div>
+                <p class="text-sm text-slate-300 mt-4 leading-relaxed" id="judge-action">等待系统状态...</p>
+            </div>
+            <div class="glass-panel col-span-5 p-5 rounded-lg">
+                <h2 class="text-sm font-bold text-slate-200 mb-3 border-b border-slate-700 pb-2">安全边界与异常闭环</h2>
+                <div class="grid grid-cols-2 gap-3 font-mono text-sm">
+                    <div class="bg-slate-900/50 rounded p-3"><div class="text-[11px] text-slate-500">低湿目标线</div><div class="text-xl font-bold text-amber-200" id="judge-target-low">--</div></div>
+                    <div class="bg-slate-900/50 rounded p-3"><div class="text-[11px] text-slate-500">硬安全线</div><div class="text-xl font-bold text-red-200" id="judge-hard-low">--</div></div>
+                    <div class="bg-slate-900/50 rounded p-3"><div class="text-[11px] text-slate-500">成功样本</div><div class="text-xl font-bold text-emerald-200" id="judge-accepted">--</div></div>
+                    <div class="bg-slate-900/50 rounded p-3"><div class="text-[11px] text-slate-500">失败样本</div><div class="text-xl font-bold text-rose-200" id="judge-rejected">--</div></div>
+                </div>
+                <p class="text-xs text-slate-400 mt-3 leading-relaxed">
+                    低于目标线只表示需要恢复或观察；只有跌破硬安全线才进入保命补水。水路异常、渗透等待和人工干预不应污染学习画像。
+                </p>
+            </div>
+        </section>
+
+        <!-- Top 5 sensor cards -->
+        <div class="col-span-12 grid grid-cols-5 gap-4">
+            <div class="glass-panel p-4 rounded-lg border-l-4 border-l-blue-400 relative overflow-hidden">
+                <div class="text-slate-400 text-xs font-bold mb-1 uppercase tracking-wider">土壤湿度</div>
+                <div class="text-3xl font-mono font-bold text-blue-100" id="val-sm">-- <span class="text-sm text-blue-400">%</span></div>
+                <div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">💧</div>
+            </div>
+            <div class="glass-panel p-4 rounded-lg border-l-4 border-l-orange-400 relative overflow-hidden">
+                <div class="text-slate-400 text-xs font-bold mb-1 uppercase tracking-wider">土壤温度</div>
+                <div class="text-3xl font-mono font-bold text-orange-100" id="val-st">-- <span class="text-sm text-orange-400">°C</span></div>
+                <div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">🌡️</div>
+            </div>
+            <div class="glass-panel p-4 rounded-lg border-l-4 border-l-purple-400 relative overflow-hidden">
+                <div class="text-slate-400 text-xs font-bold mb-1 uppercase tracking-wider">土壤电导率</div>
+                <div class="text-3xl font-mono font-bold text-purple-100" id="val-ec">-- <span class="text-sm text-purple-400">mS/cm</span></div>
+                <div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">⚡</div>
+            </div>
+            <div class="glass-panel p-4 rounded-lg border-l-4 border-l-yellow-400 relative overflow-hidden">
+                <div class="text-slate-400 text-xs font-bold mb-1 uppercase tracking-wider">光照强度</div>
+                <div class="text-3xl font-mono font-bold text-yellow-100" id="val-lux">-- <span class="text-sm text-yellow-400">Lx</span></div>
+                <div class="absolute -right-4 -bottom-4 opacity-10 text-6xl">☀️</div>
+            </div>
+            <div class="glass-panel p-4 rounded-lg border-l-4 border-l-cyan-400 relative overflow-hidden">
+                <div class="text-slate-400 text-xs font-bold mb-1 uppercase tracking-wider">空气湿度</div>
+                <div class="text-3xl font-mono font-bold text-cyan-100" id="val-rh">-- <span class="text-sm text-cyan-400">%</span></div>
+            </div>
+        </div>
+
+        <!-- Chart -->
+        <div class="col-span-8 glass-panel p-4 rounded-lg flex flex-col min-h-[500px]">
+            <div class="flex justify-between items-center mb-2">
+                <h2 class="text-sm font-bold text-slate-300">📈 微气候演化与耗水动力学轨迹</h2>
+                <span class="text-[10px] text-slate-500" id="chart-timer">--</span>
+            </div>
+            <div id="mainChart" class="flex-1 w-full h-full"></div>
+        </div>
+
+        <!-- Right panel -->
+        <div class="col-span-4 flex flex-col gap-4 overflow-y-auto pr-2 pb-2">
+            <!-- Profile card -->
+            <div class="glass-panel p-4 rounded-lg border-l-2 border-emerald-500 shrink-0">
+                <div class="flex justify-between items-center mb-3 border-b border-slate-700 pb-2">
+                    <h2 class="text-sm font-bold text-emerald-400">📄 <span id="ui-plant-name">土壤档案</span></h2>
+                    <span id="ui-plant-status" class="bg-emerald-900/50 text-emerald-300 text-[10px] px-2 py-0.5 rounded border border-emerald-500/50">就绪</span>
+                </div>
+                <div class="space-y-2 font-mono text-sm">
+                    <div class="flex justify-between items-end"><span class="text-slate-400 text-xs">饭碗上限 (FC)</span><span class="text-emerald-400 font-bold" id="ui-fc">--</span></div>
+                    <div class="flex justify-between items-end"><span class="text-slate-400 text-xs">低湿目标线</span><span class="text-amber-300 font-bold" id="ui-tl">--</span></div>
+                    <div class="flex justify-between items-end"><span class="text-slate-400 text-xs">硬安全线</span><span class="text-red-300 font-bold" id="ui-hard-low">--</span></div>
+                    <div class="flex justify-between items-end"><span class="text-slate-400 text-xs">喝水效率 (Kp)</span><span class="text-purple-300" id="ui-kp">--</span></div>
+                    <div class="flex justify-between items-end"><span class="text-slate-400 text-xs">低湿区 Kp</span><span class="text-blue-300" id="ui-kp-low">--</span></div>
+                    <div class="flex justify-between items-end"><span class="text-slate-400 text-xs">中湿区 Kp</span><span class="text-blue-300" id="ui-kp-mid">--</span></div>
+                    <div class="flex justify-between items-end"><span class="text-slate-400 text-xs">高湿区 Kp</span><span class="text-blue-300" id="ui-kp-high">--</span></div>
+                    <div class="flex justify-between items-end"><span class="text-slate-400 text-xs">基准盐分 (EC Norm)</span><span class="text-yellow-300" id="ui-ec">--</span></div>
+                    <div class="flex justify-between items-end"><span class="text-slate-400 text-xs">水泵累计运行</span><span class="text-slate-300" id="ui-pump">--</span></div>
+                </div>
+            </div>
+
+            <!-- State engine -->
+            <div class="glass-panel p-4 rounded-lg shrink-0">
+                <h2 class="text-sm font-bold text-slate-300 mb-4 border-b border-slate-700 pb-2">🧠 态势评估引擎</h2>
+                <div class="mb-3">
+                    <div id="state-badge" class="inline-block px-3 py-1 rounded bg-slate-800 border border-slate-600 text-slate-400 font-bold">等待数据...</div>
+                </div>
+                <div id="observe-streak-section" class="pt-3 border-t border-slate-700 bg-slate-900/40 p-2 rounded-lg mt-3 hidden">
+                    <h3 class="text-xs font-bold text-orange-400 mb-2">⚠️ 连续观察计数器</h3>
+                    <div class="flex justify-between text-[10px] text-slate-400 mb-1 font-mono">
+                        <span>连续观察轮次: <span id="diag-streak-text" class="text-orange-300">0</span></span>
+                        <span>触发门槛: <span id="diag-threshold-text" class="text-red-400">24</span></span>
+                    </div>
+                    <div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden relative">
+                        <div id="diag-bar" class="diag-bar bg-orange-500 h-full absolute left-0" style="width: 0%"></div>
+                        <div class="absolute right-[4%] top-0 bottom-0 w-0.5 bg-red-500 z-10"></div>
+                    </div>
+                    <div class="text-[10px] text-slate-500 mt-1 font-mono" id="diag-slope-text">斜率: --</div>
+                </div>
+                <div class="mt-2 text-[10px] text-slate-500 font-mono" id="predictor-status"></div>
+            </div>
+
+            <!-- Strategy arms -->
+            <div class="glass-panel p-4 rounded-lg shrink-0 border-l-2 border-cyan-500">
+                <div class="flex justify-between items-center mb-3 border-b border-slate-700 pb-2">
+                    <h2 class="text-sm font-bold text-cyan-300">浇水方式试探</h2>
+                    <span id="style-mode" class="text-[10px] text-slate-500 font-mono">--</span>
+                </div>
+                <div class="bg-slate-900/50 rounded p-3 mb-3">
+                    <div class="text-[11px] text-slate-500">当前策略臂</div>
+                    <div class="flex justify-between gap-3 items-end mt-1">
+                        <div class="text-lg font-bold text-cyan-100" id="style-current-arm">--</div>
+                        <div class="text-xs text-slate-400 font-mono" id="style-current-water">--</div>
+                    </div>
+                    <div class="text-[11px] text-slate-500 mt-1 font-mono" id="style-current-reason">--</div>
+                </div>
+                <div class="bg-slate-900/50 rounded p-3 mb-3 border border-cyan-900/50">
+                    <div class="flex justify-between items-end">
+                        <div>
+                            <div class="text-[11px] text-slate-500">策略评分器推荐</div>
+                            <div class="text-base font-bold text-emerald-200 mt-1" id="style-recommendation">等待样本</div>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-[10px] text-slate-500">得分</div>
+                            <div class="text-lg font-mono text-emerald-300" id="style-score">--</div>
+                        </div>
+                    </div>
+                    <div class="text-[11px] text-slate-400 mt-2 leading-snug" id="style-score-reason">基于安全性、效率、预测误差和样本量评分。</div>
+                    <div class="text-[10px] text-slate-500 mt-1 font-mono" id="style-hold-ceiling">实验上限: --</div>
+                    <div class="text-[10px] text-slate-500 mt-1 font-mono" id="phase2-reliability">Phase2: --</div>
+                    <div class="text-[10px] text-amber-200 mt-1 font-mono" id="watering-window">浇水时机: --</div>
+                    <div class="text-[10px] text-cyan-200 mt-1 font-mono" id="nightly-advice">夜间学习建议: --</div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs text-slate-400">
+                        <thead class="bg-slate-800/80 text-slate-300">
+                            <tr><th class="px-2 py-1">策略臂</th><th class="px-2 py-1">得分</th><th class="px-2 py-1">判定</th><th class="px-2 py-1">效率/风险</th></tr>
+                        </thead>
+                        <tbody class="font-mono" id="style-arm-table">
+                            <tr><td class="px-2 py-1 text-slate-500" colspan="4">等待策略样本...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Latest trial -->
+            <div class="glass-panel p-4 rounded-lg shrink-0">
+                <h2 class="text-sm font-bold text-slate-300 mb-3 border-b border-slate-700 pb-2">📋 最近一次浇水摘要</h2>
+                <div id="trial-section" class="text-xs text-slate-400 space-y-1 font-mono">
+                    <div class="text-slate-500">暂无浇水记录</div>
+                </div>
+            </div>
+
+            <!-- Anomaly story -->
+            <div class="glass-panel p-4 rounded-lg shrink-0 border-l-2 border-amber-400">
+                <div class="flex justify-between items-center mb-3 border-b border-slate-700 pb-2">
+                    <h2 class="text-sm font-bold text-amber-300">🛠️ 异常闭环案例</h2>
+                    <span id="anomaly-story-badge" class="text-[10px] px-2 py-0.5 rounded border border-slate-600 text-slate-400">等待数据</span>
+                </div>
+                <div id="anomaly-story-section" class="text-xs text-slate-400 space-y-3">
+                    <div class="text-slate-500">等待异常闭环数据...</div>
+                </div>
+            </div>
+
+            <!-- Cost Court -->
+            <div class="glass-panel p-4 rounded-lg shrink-0">
+                <h2 class="text-sm font-bold text-slate-300 mb-3 border-b border-slate-700 pb-2">⚖️ 多目标代价法庭</h2>
+                <p id="decision-text" class="text-xs text-slate-300 mb-3 h-8 leading-snug">等待数据...</p>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs text-slate-400">
+                        <thead class="bg-slate-800/80 text-slate-300"><tr><th class="px-2 py-1">指标</th><th class="px-2 py-1">值</th></tr></thead>
+                        <tbody class="font-mono" id="cost-table">
+                            <tr><td class="px-2 py-1 text-slate-500" colspan="2">等待数据...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div id="freshness-tag" class="fixed bottom-3 right-3 text-[10px] text-slate-600 font-mono z-50">--</div>
+
+    <script>
+        let currentDevice = 'soil3';
+        let autoMode = true;
+        let chartInstance = null;
+        let baseTimeData = [], baseHumiData = [], baseTempData = [], baseEcData = [], baseLuxData = [], baseRhData = [];
+        let fcLine = 0, tlLine = 0, wakeLine = 0, hardLine = 0;
+
+        // ============ Init Chart ============
+        function initChart() {
+            const dom = document.getElementById('mainChart');
+            chartInstance = echarts.init(dom, 'dark', { background: 'transparent' });
+            chartInstance.setOption({
+                tooltip: { trigger: 'axis' },
+                legend: { data: ['土壤湿度', '土壤温度', '光照', '空气湿度'], textStyle: { color: '#94a3b8', fontSize: 11 }, top: 0 },
+                grid: { left: '8%', right: '12%', bottom: '5%', top: '18%', containLabel: true },
+                xAxis: {
+                    type: 'category',
+                    data: [],
+                    boundaryGap: false,
+                    axisLabel: { hideOverlap: true, color: '#94a3b8' },
+                },
+                yAxis: [
+                    { type: 'value', name: '土湿 %', min: 0, max: 100, axisLabel: { color: '#3b82f6' } },
+                    { type: 'value', name: '°C', min: 0, max: 50, offset: 80, splitLine: { show: false }, axisLabel: { color: '#f97316' } },
+                    { type: 'value', name: 'Lx', min: 0, max: 10000, position: 'right', splitLine: { show: false }, axisLabel: { color: '#eab308' } },
+                    { type: 'value', name: '气湿 %', min: 0, max: 100, position: 'right', offset: 80, splitLine: { show: false }, axisLabel: { color: '#06b6d4' } },
+                ],
+                series: [
+                    {
+                        name: '土壤湿度', type: 'line', smooth: true, yAxisIndex: 0,
+                        connectNulls: false,
+                        data: [], itemStyle: { color: '#3b82f6' },
+                        areaStyle: { color: 'rgba(59,130,246,0.1)' },
+                        markLine: {
+                            silent: true, symbol: 'none',
+                            label: { position: 'insideStartTop', formatter: '{b}', fontSize: 10 },
+                            data: [
+                                { yAxis: 0, name: 'FC', lineStyle: { color: '#10b981', type: 'solid', width: 2 } },
+                                { yAxis: 0, name: 'TL', lineStyle: { color: '#ef4444', type: 'dashed', width: 2 } },
+                                { yAxis: 0, name: 'WAKE', lineStyle: { color: '#f59e0b', type: 'dotted', width: 1 } },
+                            ]
+                        }
+                    },
+                    {
+                        name: '土壤温度', type: 'line', smooth: true, yAxisIndex: 1,
+                        connectNulls: false,
+                        data: [], itemStyle: { color: '#f97316' }, lineStyle: { width: 1 },
+                    },
+                    {
+                        name: '光照', type: 'line', smooth: true, yAxisIndex: 2,
+                        connectNulls: false,
+                        data: [], itemStyle: { color: '#eab308' }, lineStyle: { width: 1 },
+                    },
+                    {
+                        name: '空气湿度', type: 'line', smooth: true, yAxisIndex: 3,
+                        connectNulls: false,
+                        data: [], itemStyle: { color: '#06b6d4' }, lineStyle: { width: 1.5, type: 'dashed' },
+                    },
+                ]
+            });
+            window.addEventListener('resize', () => chartInstance && chartInstance.resize());
+        }
+
+        function updateChart(timeArr, humiArr, tempArr, ecArr, luxArr, rhArr) {
+            if (!chartInstance) return;
+            const hasData = timeArr && timeArr.length > 0;
+            const timeDisp = hasData ? timeArr : ['--'];
+            const humiDisp = hasData ? humiArr : [null];
+            const tempDisp = hasData ? tempArr : [null];
+            const luxDisp = hasData ? luxArr : [null];
+            const rhDisp = hasData ? rhArr : [null];
+
+            const markLineData = [];
+            if (fcLine > 0) markLineData.push({ yAxis: fcLine, name: 'FC', lineStyle: { color: '#10b981', type: 'solid', width: 2 } });
+            if (tlLine > 0) markLineData.push({ yAxis: tlLine, name: '目标低线', lineStyle: { color: '#f59e0b', type: 'dashed', width: 2 } });
+            if (hardLine > 0) markLineData.push({ yAxis: hardLine, name: '硬安全线', lineStyle: { color: '#ef4444', type: 'solid', width: 2 } });
+            if (wakeLine > 0 && wakeLine !== tlLine) markLineData.push({ yAxis: wakeLine, name: 'WAKE', lineStyle: { color: '#f59e0b', type: 'dotted', width: 1 } });
+
+            const noonTickIndexes = buildNoonTickIndexes(timeDisp);
+            const showNoonTick = (index) => noonTickIndexes.has(index);
+
+            chartInstance.setOption({
+                xAxis: {
+                    data: timeDisp,
+                    axisTick: { interval: showNoonTick },
+                    axisLabel: {
+                        interval: showNoonTick,
+                        hideOverlap: true,
+                        formatter: (value) => value && value !== '--' ? `${value.slice(0, 5)} 12:00` : value,
+                    },
+                },
+                series: [
+                    {
+                        data: humiDisp,
+                        markLine: { data: markLineData },
+                    },
+                    { data: tempDisp },
+                    { data: luxDisp },
+                    { data: rhDisp },
+                ]
+            });
+        }
+
+        function buildNoonTickIndexes(timeDisp) {
+            const bestByDay = {};
+            timeDisp.forEach((value, index) => {
+                const m = /^(\d{2}-\d{2})\s+(\d{2}):(\d{2})$/.exec(value || '');
+                if (!m) return;
+                const minutes = Number(m[2]) * 60 + Number(m[3]);
+                const distance = Math.abs(minutes - 12 * 60);
+                const day = m[1];
+                if (!bestByDay[day] || distance < bestByDay[day].distance) {
+                    bestByDay[day] = { index, distance };
+                }
+            });
+            return new Set(Object.values(bestByDay).map(item => item.index));
+        }
+
+        // ============ API Call ============
+        let lastFetchFailed = false;
+        async function fetchDashboard() {
+            try {
+                const resp = await fetch(`/api/dashboard?device=${currentDevice}&_=${Date.now()}`);
+                const json = await resp.json();
+                if (!json.ok) { console.warn('API error:', json.msg); return; }
+                lastFetchFailed = false;
+                renderDashboard(json);
+                document.getElementById('freshness-tag').textContent = '刷新: ' + new Date().toLocaleTimeString();
+            } catch(e) {
+                if (!lastFetchFailed) console.error('Dashboard fetch error:', e);
+                lastFetchFailed = true;
+            }
+        }
+
+        async function fetchDevices() {
+            try {
+                const resp = await fetch('/api/devices');
+                const json = await resp.json();
+                if (json.ok && json.devices) {
+                    const sel = document.getElementById('plant-selector');
+                    sel.innerHTML = '';
+                    Object.entries(json.devices).forEach(([k, v]) => {
+                        const opt = document.createElement('option');
+                        opt.value = k;
+                        opt.text = v.name;
+                        if (k === currentDevice) opt.selected = true;
+                        sel.appendChild(opt);
+                    });
+                }
+            } catch(e) { console.warn('Devices fetch error:', e); }
+        }
+
+        async function pumpCmd(cmd) {
+            try {
+                const form = new URLSearchParams();
+                form.append('device', currentDevice);
+                form.append('cmd', cmd);
+                const resp = await fetch('/pump_control', { method: 'POST', body: form });
+                const json = await resp.json();
+                console.log('Pump cmd:', json.msg);
+            } catch(e) { console.error('Pump error:', e); }
+        }
+
+        function switchDevice() {
+            currentDevice = document.getElementById('plant-selector').value;
+            fetchDashboard();
+        }
+
+        function toggleAutoMode() {
+            autoMode = !autoMode;
+            const btn = document.getElementById('mode-btn');
+            if (autoMode) {
+                btn.innerHTML = '🤖 托管: ON';
+                btn.className = 'bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-500 px-4 rounded-lg font-bold shadow-[0_0_10px_rgba(79,70,229,0.3)] transition-all ml-1 h-9 text-xs flex items-center gap-1';
+            } else {
+                btn.innerHTML = '⚠️ 托管: OFF';
+                btn.className = 'bg-slate-700 hover:bg-slate-600 text-slate-300 px-4 rounded-lg font-bold border border-slate-500 transition-all ml-1 h-9 text-xs flex items-center gap-1';
+            }
+        }
+
+        // ============ Render ============
+        function renderDashboard(data) {
+            const s = data.sensors || {};
+            const p = data.params || {};
+            const z = data.zone || {};
+            const st = data.stats || {};
+            const dg = data.diag || {};
+            const lt = data.latest_trial;
+            const li = data.latest_irrigation_event;
+            const ts = data.trial_summary || {};
+            const anomaly = data.anomaly_story || {};
+            const style = data.style_experiment || {};
+            const arms = style.arms || [];
+            const ph1 = data.phase1 || {};
+            const prof = data.profile || {};
+            const zones = prof.zones || {};
+            const hardLow = p.HARD_SAFETY_LOW || 28;
+
+            // Top 5 cards
+            document.getElementById('val-sm').innerHTML = (s.humidity != null ? s.humidity.toFixed(1) : '--') + ' <span class="text-sm text-blue-400">%</span>';
+            document.getElementById('val-st').innerHTML = (s.temperature != null ? s.temperature.toFixed(1) : '--') + ' <span class="text-sm text-orange-400">°C</span>';
+            document.getElementById('val-ec').innerHTML = (s.ec_raw != null ? s.ec_raw.toFixed(2) : '--') + ' <span class="text-sm text-purple-400">mS/cm</span>';
+            document.getElementById('val-lux').innerHTML = (s.lux != null ? Math.round(s.lux) : '--') + ' <span class="text-sm text-yellow-400">Lx</span>';
+            document.getElementById('val-rh').innerHTML = (s.air_humidity != null ? s.air_humidity.toFixed(1) : '--') + ' <span class="text-sm text-cyan-400">%</span>';
+
+            const humiText = s.humidity != null ? s.humidity.toFixed(1) + '%' : '--';
+            let positionText = '等待传感器';
+            if (s.humidity != null && hardLow > 0 && s.humidity < hardLow) {
+                positionText = `${humiText} < 硬安全线`;
+            } else if (s.humidity != null && p.TARGET_LOW > 0 && s.humidity < p.TARGET_LOW) {
+                positionText = `${humiText} < 低湿目标线`;
+            } else if (s.humidity != null && p.M_SAFE_SLEEP > 0 && s.humidity >= p.M_SAFE_SLEEP) {
+                positionText = `${humiText} 在安全休眠区`;
+            } else if (s.humidity != null) {
+                positionText = `${humiText} 在可学习区`;
+            }
+            let headline = '系统在线，按反馈学习节奏决策';
+            if (z.code === 'WATER_DELIVERY_SUSPECT' || z.code === 'EMERGENCY') headline = '系统进入保护态，优先避免错误学习和失控浇水';
+            else if (z.code === 'SOAK_PENDING') headline = '系统正在等待渗透结果，用本次反馈修正模型';
+            else if (z.code === 'NO_DATA') headline = '系统等待有效数据恢复';
+            document.getElementById('judge-headline').textContent = headline;
+            document.getElementById('judge-mode').textContent = z.label || '等待数据';
+            document.getElementById('judge-position').textContent = positionText;
+            document.getElementById('judge-evidence').textContent = `${ts.total || 0} 样本 / ${arms.length || 0} 策略臂`;
+            document.getElementById('judge-action').textContent = decisionSentence(data);
+            document.getElementById('judge-target-low').textContent = p.TARGET_LOW > 0 ? p.TARGET_LOW.toFixed(1) + ' %' : '--';
+            document.getElementById('judge-hard-low').textContent = hardLow > 0 ? hardLow.toFixed(1) + ' %' : '--';
+            document.getElementById('judge-accepted').textContent = ts.accepted != null ? ts.accepted : '--';
+            document.getElementById('judge-rejected').textContent = ts.rejected != null ? ts.rejected : '--';
+
+            // Freshness
+            const fb = document.getElementById('freshness-badge');
+            const sd = document.getElementById('status-dot');
+            if (s.freshness_ok) {
+                fb.innerHTML = '通信: <span class="text-emerald-400 ml-1">MQTT 联机</span>';
+                sd.className = 'w-3 h-3 rounded-full bg-emerald-400 pulse-glow';
+            } else if (s.age_min != null) {
+                fb.innerHTML = `通信: <span class="text-yellow-400 ml-1">离线 ${s.age_min}min</span>`;
+                sd.className = 'w-3 h-3 rounded-full bg-yellow-400';
+            } else {
+                fb.innerHTML = '通信: <span class="text-slate-500 ml-1">等待中</span>';
+                sd.className = 'w-3 h-3 rounded-full bg-slate-600';
+            }
+
+            // Profile
+            document.getElementById('ui-plant-name').textContent = data.name || '土壤档案';
+            document.getElementById('ui-fc').textContent = p.FC > 0 ? p.FC.toFixed(1) + ' %' : '--';
+            document.getElementById('ui-tl').textContent = p.TARGET_LOW > 0 ? p.TARGET_LOW.toFixed(1) + ' %' : '--';
+            document.getElementById('ui-hard-low').textContent = hardLow > 0 ? hardLow.toFixed(1) + ' %' : '--';
+            document.getElementById('ui-kp').textContent = p.K_P > 0 ? p.K_P.toFixed(4) + ' %/s' : '--';
+            document.getElementById('ui-kp-low').textContent = p.K_P_LOW != null ? p.K_P_LOW.toFixed(4) + ' %/s' : '--';
+            document.getElementById('ui-kp-mid').textContent = p.K_P_MID != null ? p.K_P_MID.toFixed(4) + ' %/s' : '--';
+            document.getElementById('ui-kp-high').textContent = p.K_P_HIGH != null ? p.K_P_HIGH.toFixed(4) + ' %/s' : '--';
+            document.getElementById('ui-ec').textContent = p.EC_NORM_25C != null ? p.EC_NORM_25C.toFixed(1) + ' mS/cm' : (p.EC_BASE != null ? p.EC_BASE.toFixed(1) + ' (raw)' : '--');
+            
+            const totalMin = st.total_water_sec ? (st.total_water_sec / 60).toFixed(1) + ' min' : '--';
+            document.getElementById('ui-pump').textContent = st.pump_total_cycles ? `${st.pump_total_cycles} 次 / ${totalMin}` : '--';
+
+            // Status
+            const statusEl = document.getElementById('ui-plant-status');
+            if (z.water_delivery_suspect) {
+                statusEl.textContent = '水路异常';
+                statusEl.className = 'bg-red-900/50 text-red-300 text-[10px] px-2 py-0.5 rounded border border-red-500/50';
+            } else if (s.freshness_ok) {
+                statusEl.textContent = '在线';
+                statusEl.className = 'bg-emerald-900/50 text-emerald-300 text-[10px] px-2 py-0.5 rounded border border-emerald-500/50';
+            } else {
+                statusEl.textContent = '离线';
+                statusEl.className = 'bg-yellow-900/50 text-yellow-300 text-[10px] px-2 py-0.5 rounded border border-yellow-500/50';
+            }
+
+            // Zone badge
+            const badge = document.getElementById('state-badge');
+            const zoneColors = {
+                'SAFE_SLEEP': 'bg-green-900/50 border-green-500 text-green-400',
+                'BATTLE_ZONE': 'bg-orange-900/50 border-orange-500 text-orange-400',
+                'LOW_TARGET': 'bg-amber-900/50 border-amber-500 text-amber-300',
+                'EMERGENCY': 'bg-red-900/50 border-red-500 text-red-400 animate-pulse',
+                'SOAK_PENDING': 'bg-blue-900/50 border-blue-500 text-blue-400',
+                'WATER_DELIVERY_SUSPECT': 'bg-red-900/50 border-red-500 text-red-400',
+                'NO_DATA': 'bg-slate-800 border-slate-600 text-slate-400',
+            };
+            badge.textContent = z.label || '--';
+            badge.className = `inline-block px-3 py-1 rounded border font-bold ${zoneColors[z.code] || 'bg-slate-800 border-slate-600 text-slate-400'}`;
+
+            // Observe streak
+            const streakSec = document.getElementById('observe-streak-section');
+            if (z.code === 'BATTLE_ZONE' && z.observe_streak > 0) {
+                streakSec.classList.remove('hidden');
+                document.getElementById('diag-streak-text').textContent = z.observe_streak;
+                document.getElementById('diag-threshold-text').textContent = dg.observe_threshold || 24;
+                const pct = Math.min(100, (z.observe_streak / (dg.observe_threshold || 24)) * 100);
+                document.getElementById('diag-bar').style.width = pct + '%';
+                document.getElementById('diag-slope-text').textContent = 
+                    `实时斜率: ${dg.recent_slope != null ? dg.recent_slope.toFixed(4) : '--'} %/step  |  触发门槛: ${dg.slope_steep || '--'}`;
+            } else {
+                streakSec.classList.add('hidden');
+            }
+
+            // Predictor status
+            document.getElementById('predictor-status').textContent = 
+                st.predictor_circuit_open ? '⚠ Phase2 预测模型熔断中' : (dg.kp_net_enabled ? 'K_P 净增益修正: ON' : '');
+
+            // Strategy arm evidence
+            document.getElementById('style-mode').textContent = style.mode || '--';
+            document.getElementById('style-current-arm').textContent = style.current_arm_display || '--';
+            const waterText = style.current_arm_water_sec != null ? `${style.current_arm_water_sec}s` : '--';
+            document.getElementById('style-current-water').textContent = waterText;
+            const originalPlan = style.current_arm_original_plan ? `原始计划: ${style.current_arm_original_plan}` : '原始计划: --';
+            const reasonText = style.current_arm_reason ? `原因: ${style.current_arm_reason}` : '原因: --';
+            document.getElementById('style-current-reason').textContent = `${originalPlan} | ${reasonText}`;
+            const rec = style.recommendation || {};
+            document.getElementById('style-recommendation').textContent = rec.display ? `${rec.display} · ${rec.verdict || '--'}` : '等待样本';
+            document.getElementById('style-score').textContent = rec.score != null ? rec.score.toFixed(1) : '--';
+            document.getElementById('style-score-reason').textContent = rec.reason || '基于安全性、效率、预测误差和样本量评分。';
+            const sid = style.style_identification || {};
+            document.getElementById('style-hold-ceiling').textContent = sid.hold_ceiling != null
+                ? `实验上限: ${sid.hold_ceiling.toFixed ? sid.hold_ceiling.toFixed(1) : sid.hold_ceiling}% | 已拦截: ${(sid.blocked_plans || []).length} 个候选`
+                : '实验上限: --';
+            const rel = sid.phase2_reliability || {};
+            const relSamples = rel.sample_count ?? 0;
+            const relMedian = rel.median_error != null
+                ? `${rel.median_error >= 0 ? '+' : ''}${Number(rel.median_error).toFixed(2)}%`
+                : '--';
+            const relFlag = rel.overestimate_suspect ? '疑似高估' : '正常/样本少';
+            document.getElementById('phase2-reliability').textContent =
+                `Phase2: n=${relSamples} 中位误差=${relMedian} ${relFlag} | 软放行:${(sid.soft_veto_plans || []).length}`;
+            const ww = style.watering_window_guard || {};
+            const wwBlocked = (ww.blocked_plans || []).length;
+            const wwPenalized = (ww.penalized_plans || []).length;
+            const wwLevelText = ww.level
+                ? `浇水时机: ${ww.level} | ${ww.reason || '--'} | 拦截${wwBlocked} 降权${wwPenalized}`
+                : '浇水时机: --';
+            document.getElementById('watering-window').textContent = wwLevelText;
+            const advice = data.nightly_learning_advice || style.nightly_learning_advice || {};
+            const sampleQuality = advice.sample_quality || {};
+            const prefer = advice.prefer || {};
+            const avoid = advice.avoid || {};
+            const preferKeys = Object.keys(prefer);
+            const avoidKeys = Object.keys(avoid);
+            let adviceText = advice.active
+                ? `夜间学习建议: 探索${advice.exploration?.bias_delta ?? '--'} Phase2${advice.phase2?.trust_delta ?? '--'}`
+                : `夜间学习建议: ${advice.reason || '--'}`;
+            if (sampleQuality.exclude_new_learning) {
+                adviceText += ` | 样本隔离 ${(sampleQuality.exclusions || []).length}`;
+            }
+            if (preferKeys.length) adviceText += ` | 偏好 ${preferKeys.join('/')}`;
+            if (avoidKeys.length) adviceText += ` | 降权 ${avoidKeys.join('/')}`;
+            document.getElementById('nightly-advice').textContent = adviceText;
+
+            const styleTbody = document.getElementById('style-arm-table');
+            if (arms.length) {
+                styleTbody.innerHTML = arms.slice(0, 6).map(a => {
+                    const isCurrent = a.label === style.current_arm;
+                    const score = a.score != null ? a.score.toFixed(1) : '--';
+                    const verdict = a.verdict || '--';
+                    const efficiency = a.avg_efficiency != null ? `${a.avg_efficiency >= 0 ? '+' : ''}${a.avg_efficiency.toFixed(3)}%/s` : '--';
+                    const risk = (a.overwet_count || a.emergency || a.rejected)
+                        ? `风险:${a.overwet_count || 0}/${a.emergency || 0}/${a.rejected || 0}`
+                        : '风险:0';
+                    const rowClass = isCurrent ? 'bg-cyan-900/30 text-cyan-100' : (a.label === rec.label ? 'bg-emerald-900/20 text-emerald-100' : 'border-b border-slate-700/50');
+                    return `<tr class="${rowClass}">
+                        <td class="px-2 py-1">${a.display || a.label || '--'}</td>
+                        <td class="px-2 py-1">${score}</td>
+                        <td class="px-2 py-1">${verdict}<span class="text-slate-500 ml-1">n=${a.attempts ?? 0}</span></td>
+                        <td class="px-2 py-1">${efficiency}<span class="text-slate-500 ml-1">${risk}</span></td>
+                    </tr>`;
+                }).join('');
+            } else {
+                styleTbody.innerHTML = '<tr><td class="px-2 py-1 text-slate-500" colspan="4">等待策略样本...</td></tr>';
+            }
+
+            // Decision text
+            const decText = document.getElementById('decision-text');
+            if (z.code === 'EMERGENCY') {
+                decText.textContent = `硬安全补水：湿度 ${s.humidity?.toFixed(1) || '--'}% 低于硬安全线(${hardLow?.toFixed(1) || '--'}%)，Phase3 优先保命。`;
+            } else if (z.code === 'LOW_TARGET') {
+                decText.textContent = `低湿目标区：湿度 ${s.humidity?.toFixed(1) || '--'}% 低于目标线(${p.TARGET_LOW?.toFixed(1) || '--'}%)，进入恢复/观察决策，不等同硬危险。`;
+            } else if (z.code === 'SAFE_SLEEP') {
+                decText.textContent = `安全区：湿度 ${s.humidity?.toFixed(1) || '--'}% 高于安全线，无需干预。`;
+            } else if (z.code === 'BATTLE_ZONE') {
+                if (ww.level === 'forbidden' || ww.level === 'avoid') {
+                    decText.textContent = `战区：湿度 ${s.humidity?.toFixed(1) || '--'}%，但当前浇水时机为 ${ww.level}（${ww.reason || '--'}），Phase3 优先观察或只允许必要小水。`;
+                } else {
+                    decText.textContent = `战区：湿度 ${s.humidity?.toFixed(1) || '--'}%，持续观察 ${z.observe_streak} 轮，比较候选策略中。`;
+                }
+            } else if (z.code === 'SOAK_PENDING') {
+                decText.textContent = `渗透等待：已浇 ${z.pending_soak?.water_sec || '--'}s，水分正在下渗扩散。`;
+            } else if (z.code === 'WATER_DELIVERY_SUSPECT') {
+                decText.textContent = '水路异常：连续紧急补水无效，已暂停自动灌溉，请检查水箱/水管/水泵。';
+            } else {
+                decText.textContent = '等待传感器数据...';
+            }
+
+            // Cost table
+            const costTbody = document.getElementById('cost-table');
+            let costHtml = '';
+            if (p.FC > 0 && p.TARGET_LOW > 0 && p.K_P > 0) {
+                const battleZone = (p.FC - p.TARGET_LOW).toFixed(1);
+                costHtml += `<tr class="border-b border-slate-700/50"><td class="px-2 py-1">战区宽度</td><td class="px-2 py-1 text-slate-300">${battleZone} %</td></tr>`;
+                costHtml += `<tr class="border-b border-slate-700/50"><td class="px-2 py-1">低湿目标线</td><td class="px-2 py-1 text-amber-200">${p.TARGET_LOW?.toFixed(2) || '--'} %</td></tr>`;
+                costHtml += `<tr class="border-b border-slate-700/50"><td class="px-2 py-1">硬安全线</td><td class="px-2 py-1 text-red-200">${hardLow?.toFixed(2) || '--'} %</td></tr>`;
+                costHtml += `<tr class="border-b border-slate-700/50"><td class="px-2 py-1">安全休眠线</td><td class="px-2 py-1 text-slate-300">${p.M_SAFE_SLEEP?.toFixed(2) || '--'} %</td></tr>`;
+                costHtml += `<tr class="border-b border-slate-700/50"><td class="px-2 py-1">唤醒线</td><td class="px-2 py-1 text-slate-300">${p.M_WAKE_UP?.toFixed(2) || '--'} %</td></tr>`;
+                costHtml += `<tr class="border-b border-slate-700/50"><td class="px-2 py-1">沤根线</td><td class="px-2 py-1 text-slate-300">${p.RESPIRATION_LIMIT?.toFixed(2) || '--'} %</td></tr>`;
+                costHtml += `<tr><td class="px-2 py-1">全局 K_P</td><td class="px-2 py-1 text-purple-300">${p.K_P.toFixed(5)} %/s</td></tr>`;
+            } else {
+                costHtml = '<tr><td class="px-2 py-1 text-slate-500" colspan="2">等待参数...</td></tr>';
+            }
+            costTbody.innerHTML = costHtml;
+
+            // Latest trial
+            const trialDiv = document.getElementById('trial-section');
+            if (li && li.water_sec != null) {
+                const sourceLabel = li.kind === 'user_openclaw' ? 'OpenClaw 用户浇水' : (li.source || '系统/ MQTT');
+                trialDiv.innerHTML = `
+                    <div class="flex justify-between"><span>类型</span><span class="${li.kind === 'user_openclaw' ? 'text-cyan-300' : 'text-emerald-400'}">${sourceLabel}</span></div>
+                    <div class="flex justify-between"><span>浇水秒数</span><span>${li.water_sec}s</span></div>
+                    <div class="flex justify-between"><span>原因</span><span>${li.reason || '--'}</span></div>
+                    <div class="flex justify-between"><span>操作者</span><span>${li.operator_name || li.operator_id || '--'}</span></div>
+                    <div class="flex justify-between"><span>状态</span><span>${li.status || '--'}</span></div>
+                    <div class="flex justify-between"><span>时间</span><span class="text-slate-500">${li.time || '--'}</span></div>
+                `;
+            } else if (lt && lt.status) {
+                const peakStr = lt.actual_peak_observed != null ? lt.actual_peak_observed.toFixed(1) + '%' : '--';
+                const errorStr = lt.peak_error_observed != null ? lt.peak_error_observed.toFixed(2) + '%' : '--';
+                const tsStr = lt.timestamp ? new Date(lt.timestamp * 1000).toLocaleString('zh-CN') : '--';
+                trialDiv.innerHTML = `
+                    <div class="flex justify-between"><span>状态</span><span class="${lt.status==='accepted'?'text-emerald-400':'text-red-400'}">${lt.status}</span></div>
+                    <div class="flex justify-between"><span>方案</span><span>${lt.plan_label || '--'}</span></div>
+                    <div class="flex justify-between"><span>浇水秒数</span><span>${lt.water_sec != null ? lt.water_sec+'s' : '--'}</span></div>
+                    <div class="flex justify-between"><span>Δm</span><span>${lt.delta_m != null ? '+' + lt.delta_m.toFixed(2) + '%' : '--'}</span></div>
+                    <div class="flex justify-between"><span>预测峰值</span><span>${lt.predicted_peak != null ? lt.predicted_peak.toFixed(1)+'%' : '--'}</span></div>
+                    <div class="flex justify-between"><span>实际峰值</span><span>${peakStr}</span></div>
+                    <div class="flex justify-between"><span>预测误差</span><span class="${lt.peak_error_observed && Math.abs(lt.peak_error_observed)>1?'text-red-400':'text-slate-400'}">${errorStr}</span></div>
+                    <div class="flex justify-between"><span>时间</span><span class="text-slate-500">${tsStr}</span></div>
+                `;
+            } else {
+                trialDiv.innerHTML = '<div class="text-slate-500">暂无浇水记录</div>';
+            }
+
+            // Anomaly story
+            const anomalyDiv = document.getElementById('anomaly-story-section');
+            const anomalyBadge = document.getElementById('anomaly-story-badge');
+            if (anomaly && anomaly.headline) {
+                const badgeText = anomaly.protected ? '保护中' : (anomaly.repaired ? '已修复' : '可追溯');
+                anomalyBadge.textContent = badgeText;
+                anomalyBadge.className = anomaly.protected
+                    ? 'text-[10px] px-2 py-0.5 rounded border border-red-500/50 bg-red-900/40 text-red-200'
+                    : (anomaly.repaired
+                        ? 'text-[10px] px-2 py-0.5 rounded border border-emerald-500/50 bg-emerald-900/40 text-emerald-200'
+                        : 'text-[10px] px-2 py-0.5 rounded border border-amber-500/50 bg-amber-900/30 text-amber-200');
+                const latestFault = anomaly.latest_fault || {};
+                const faultTime = latestFault.timestamp ? new Date(latestFault.timestamp * 1000).toLocaleString('zh-CN') : '--';
+                const faultDelta = latestFault.delta_m != null ? `${Number(latestFault.delta_m).toFixed(2)}%` : '--';
+                const stepsHtml = (anomaly.steps || []).map((step, idx) => `
+                    <div class="flex gap-2">
+                        <div class="w-5 h-5 rounded-full bg-slate-800 border border-amber-500/50 text-amber-200 flex items-center justify-center text-[10px] shrink-0">${idx + 1}</div>
+                        <div>
+                            <div class="text-slate-200 font-bold">${step.name}</div>
+                            <div class="text-[11px] text-slate-500 leading-snug">${step.text}</div>
+                        </div>
+                    </div>
+                `).join('');
+                const suspectHtml = (anomaly.suspects || []).length
+                    ? (anomaly.suspects || []).map(su => `<span class="${su.active ? 'text-red-300' : 'text-emerald-300'}">${su.key}${su.active ? ':active' : ':cleared'}</span>`).join(' / ')
+                    : '<span class="text-slate-500">--</span>';
+                anomalyDiv.innerHTML = `
+                    <div class="bg-slate-900/50 rounded p-3 border border-amber-500/20">
+                        <div class="text-base font-bold text-amber-100">${anomaly.headline}</div>
+                        <div class="mt-1 text-[11px] text-slate-400 leading-relaxed">${anomaly.conclusion}</div>
+                    </div>
+                    <div class="grid grid-cols-3 gap-2 font-mono">
+                        <div class="bg-slate-900/40 rounded p-2"><div class="text-[10px] text-slate-500">故障/复测</div><div class="text-lg text-red-200 font-bold">${anomaly.fault_trial_count || 0}</div></div>
+                        <div class="bg-slate-900/40 rounded p-2"><div class="text-[10px] text-slate-500">无效增湿</div><div class="text-lg text-cyan-200 font-bold">${anomaly.no_gain_count || 0}</div></div>
+                        <div class="bg-slate-900/40 rounded p-2"><div class="text-[10px] text-slate-500">隔离样本</div><div class="text-lg text-amber-200 font-bold">${anomaly.isolated_count || 0}</div></div>
+                    </div>
+                    <div class="space-y-2">${stepsHtml}</div>
+                    <div class="bg-slate-900/40 rounded p-2 font-mono space-y-1">
+                        <div class="flex justify-between"><span>最新故障样本</span><span>${latestFault.status || '--'}</span></div>
+                        <div class="flex justify-between"><span>方案/原因</span><span class="text-slate-300">${latestFault.plan_label || latestFault.reason || '--'}</span></div>
+                        <div class="flex justify-between"><span>秒数 / Δm</span><span>${latestFault.water_sec != null ? latestFault.water_sec + 's' : '--'} / ${faultDelta}</span></div>
+                        <div class="flex justify-between"><span>异常状态</span><span>${suspectHtml}</span></div>
+                        <div class="flex justify-between"><span>时间</span><span class="text-slate-500">${faultTime}</span></div>
+                    </div>
+                `;
+            } else {
+                anomalyBadge.textContent = '无数据';
+                anomalyBadge.className = 'text-[10px] px-2 py-0.5 rounded border border-slate-600 text-slate-400';
+                anomalyDiv.innerHTML = '<div class="text-slate-500">暂无异常闭环数据</div>';
+            }
+
+            // Update chart
+            const ch = data.chart || {};
+            updateChart(ch.time || [], ch.humi || [], ch.temp || [], ch.ec || [], ch.lux || [], ch.rh || []);
+            document.getElementById('chart-timer').textContent = '数据更新: ' + new Date().toLocaleTimeString();
+
+            // Store params for chart
+            fcLine = p.FC || 0;
+            tlLine = p.TARGET_LOW || 0;
+            hardLine = hardLow || 0;
+            wakeLine = p.M_WAKE_UP || tlLine;
+        }
+
+        function decisionSentence(data) {
+            const s = data.sensors || {};
+            const p = data.params || {};
+            const z = data.zone || {};
+            const hardLow = p.HARD_SAFETY_LOW || 28;
+            if (z.code === 'SOAK_PENDING') return `已浇 ${z.pending_soak?.water_sec || '--'}s，系统等待水分下渗后再结算本次经验。`;
+            if (z.code === 'WATER_DELIVERY_SUSPECT') return '连续补水无效时，系统进入水路异常保护，暂停自动灌溉并避免把物理故障学成植物习性。';
+            if (z.code === 'EMERGENCY') return `湿度低于硬安全线 ${hardLow.toFixed(1)}%，Phase3 才会进入保命补水。`;
+            if (z.code === 'LOW_TARGET') return `湿度低于目标线 ${p.TARGET_LOW?.toFixed(1) || '--'}%，系统会结合冷却、水路风险和学习画像决定恢复或继续观察。`;
+            if (z.code === 'SAFE_SLEEP') return '湿度已进入安全休眠区，系统选择观察，避免不必要浇水。';
+            if (z.code === 'BATTLE_ZONE') return `当前在战区学习，系统比较 observe、保守、参考、探索等候选策略，而不是固定阈值开泵。`;
+            return '等待有效传感器数据恢复。';
+        }
+
+        // ============ Boot ============
+        initChart();
+        fetchDevices();
+        fetchDashboard();
+        setInterval(fetchDashboard, 30000); // poll every 30s
+    </script>
+</body>
+</html>
