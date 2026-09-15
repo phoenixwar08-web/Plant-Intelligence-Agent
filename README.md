@@ -1,28 +1,112 @@
-# Plant Intelligence Agent — soil3 production baseline
+# Plant Intelligence Agent
 
-This is a source-controlled reconstruction of the openEuler production system inspected on 2026-09-15, using its soil3 implementation as the current production baseline. It contains safe source and deployment templates only: no credentials, runtime state, logs, backups, camera URLs, or production databases.
+> **Plant Intelligence Agent 是一个面向真实植物长期运行的智能养护系统。项目通过传感器、视觉、控制系统与大小模型协同，使植物智能体能够根据真实环境和植物反馈逐步调整养护策略，而不是长期依赖固定阈值和预设浇水方式。**
 
-## Structure
+## 这是什么项目
 
-- `services/soil3/phase1/`: offline calibration source; not a normal watering executor.
-- `services/soil3/phase2_predictor/`: optional legacy candidate-trajectory predictor.
-- `services/soil3/phase3/`: final safety controller and the only pump authority.
-- `services/soil3/telemetry/`: event/state adaptation without cloud command execution.
-- `ops/`: sanitized systemd and cron templates.
+植物养护并非只由某一个土壤阈值决定。温湿度、光照、植物生长状态、浇水后的响应以及环境变化，都会影响下一次养护决策。
 
-## Execution boundary
+本项目正在建设一套边云协同的植物智能体：云端大模型根据实时状态、环境变化、视觉状态和历史反馈提出策略；现有边缘控制链在安全边界内执行；真实反馈再沉淀为可追踪的经验数据。随着数据积累，后续本地小模型将学习那些能够可靠处理的场景，并把复杂或低置信度场景交回云端模型分析。
+
+当前研究重点是让系统从真实植物反馈中逐步学习和适应，而不是长期依赖固定阈值和预设浇水方式。
+
+## 从状态到学习
 
 ```text
-StrategyRequest -> Validator -> cloud Gate -> Phase3 -> ActionPlan -> MQTT
+传感器 / 摄像头
+      ↓
+植物状态 State
+      ↓
+云端策略模型
+      ↓
+StrategyRequest
+      ↓
+Validator / Cloud Gate
+      ↓
+Phase3
+      ↓
+ActionPlan
+      ↓
+MQTT / 真实设备
+      ↓
+植物反馈
+      ↓
+Episode
+      ↓
+后续小模型训练
 ```
 
-Only Phase3 may publish a real pump command. The cloud model, future vision service, Phase2 predictor, and telemetry modules must not bypass it. Vision and cloud-model services are independent from OpenClaw.
+系统中的各部分各司其职：
 
-## Verification
+| 组件 | 负责内容 |
+| --- | --- |
+| Phase1 | 初始标定与参数识别。 |
+| Phase2 | 预测与候选轨迹能力，为策略分析提供参考。 |
+| Phase3 | 最终安全控制和真实设备执行。 |
+| 云端策略模型 | 当前开发方向：分析状态并生成 `StrategyRequest`，支持动态策略与安全范围内的探索。 |
+| 视觉模型 | 当前开发方向：将植物图片转成结构化视觉状态，补充传感器无法直接表达的生长信息。 |
+| Episode | 当前开发方向：持续记录 `State → Strategy → Action → Feedback`，形成可回溯的真实经验。 |
+
+## 真实执行边界
+
+```text
+StrategyRequest
+→ Validator
+→ Cloud Gate
+→ Phase3
+→ ActionPlan
+→ MQTT
+```
+
+云端模型、视觉模型和后续本地小模型都只能参与状态理解或策略生成，不能直接发布真实水泵命令。Phase3 是当前唯一的真实执行权威；所有进入设备的动作都必须经过这条边界。
+
+## 当前目录
+
+```text
+Plant-Intelligence-Agent/
+├── config/                       示例配置与运行参数入口
+├── docs/                         技术计划与项目文档
+├── ops/                          systemd、cron 等运行模板
+├── services/
+│   └── soil3/
+│       ├── phase1/               初始标定与参数识别代码
+│       ├── phase2_predictor/     预测与候选轨迹代码
+│       ├── phase3/               安全控制、动作计划与设备执行代码
+│       └── telemetry/            状态与事件数据适配代码
+└── tests/                        当前边界检查与后续自动化测试入口
+```
+
+## V1 开发方向
+
+- Unified State Schema
+- 视觉结构化状态
+- 云端策略大模型
+- Strategy Validator
+- 宽松的 Cloud Gate
+- 多步策略执行
+- Episode 与多时间尺度反馈
+- 历史经验回流
+- 面向后续 Qwen3.5-2B 的训练数据
+
+这些能力正在按边云协同和真实反馈闭环的方向建设；其中尚未落地的部分会在相应实现完成后进入实际运行链路。
+
+## 开发原则
+
+- 真实运行数据与源码分离，源码仓库不承载设备运行状态。
+- 凭据、访问地址和其他敏感配置不得提交到 Git。
+- 新模型不能绕过 Phase3 的安全控制与执行边界。
+- 优先复用已有控制链，不重复建设另一条设备控制通道。
+- 每次策略、动作和反馈都应可追踪，为分析与后续训练保留可靠数据。
+
+## 本地开发与验证
+
+建议在项目根目录执行：
 
 ```powershell
 python -m compileall services tests
-pytest -q
+python -m pytest -q
 ```
 
-See [the production baseline](docs/PRODUCTION_BASELINE.md) before deploying any component.
+在运行依赖尚未安装时，先按项目实际环境安装所需 Python 包。`ops/` 中的文件用于部署配置参考；不要将模板中的示例值直接用于真实设备。
+
+详细的边云协同建设计划见 [植物智能体云端大模型接入与边云协同计划书 V3](docs/植物智能体云端大模型接入与边云协同计划书_V3.md)。
