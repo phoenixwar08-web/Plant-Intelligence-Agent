@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the imported multi-device repository with a reviewed, source-controlled, soil3-only representation of the openEuler production code.
+**Goal:** Replace the imported multi-device repository with a reviewed, source-controlled representation of the openEuler production code, using soil3 as the current baseline.
 
 **Architecture:** Treat the openEuler host as the source baseline, but copy only source and sanitized deployment templates. Preserve the active Phase3 safety boundary; Phase2 remains a candidate-trajectory predictor and never publishes MQTT. The resulting repository contains no production state, logs, credentials, OpenClaw execution path, or soil1/soil2/soil_test business code.
 
@@ -67,7 +67,7 @@ Run: `git rm -r agents config deployment experiments firmware scripts services t
 
 Expected: no soil1, soil2, soil_test, OpenClaw, runtime backup, or legacy multi-device source remains tracked.
 
-- [ ] **Step 3: Add the classified soil3-only source tree**
+- [ ] **Step 3: Add the classified soil3-baseline source tree**
 
 Place source files according to the paths above. Rename only filenames needed to make the repository layout clear; do not alter Phase3 decision logic during this import.
 
@@ -86,7 +86,7 @@ Expected: `services/soil3/phase1`, `services/soil3/phase2_predictor`, and `servi
 
 Include the real Phase3 entry point and dependency ordering, but omit SMTP and all `EnvironmentFile` values. Mark Phase2 as optional because it was inactive during baseline inspection.
 
-- [ ] **Step 2: Create a soil3-only configuration example**
+- [ ] **Step 2: Create a soil3-baseline configuration example**
 
 Use placeholders for hosts, topics, database credentials, and camera endpoints. Include `device_code: soil3`; do not include soil1, soil2, or soil_test configuration.
 
@@ -146,4 +146,4 @@ Expected: no legacy device source is staged; documentation may refer to retired 
 
 Run: `git add -A && git commit -m "chore: rebuild repository from soil3 production baseline" && git push origin main`
 
-Expected: GitHub `main` is a soil3-only repository with full prior history preserved by Git.
+Expected: GitHub `main` retains the original project identity while using soil3 as its current production baseline and preserving full prior Git history.

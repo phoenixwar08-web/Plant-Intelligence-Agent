@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-def test_services_tree_has_no_legacy_device_directories() -> None:
+def test_services_tree_uses_the_soil3_baseline() -> None:
     services = Path(__file__).resolve().parents[1] / "services"
     prohibited = ("soil" + "1", "soil" + "2", "soil" + "_test")
     names = [path.name.lower() for path in services.rglob("*")]

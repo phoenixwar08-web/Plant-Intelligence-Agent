@@ -3582,7 +3582,7 @@ class DecisionBrain:
         self.actuator      = ActuatorLayer(cfg, self.sensor)
         self._pending_soak: Optional[PendingSoak] = None
         # The former cross-device experience bridge has deliberately been
-        # removed from this soil3-only repository.  It was optional metadata,
+        # removed from this soil3-baseline repository.  It was optional metadata,
         # never part of the pump authority, and the remaining calls below are
         # guarded by this None value.
         self._experience_validation = None

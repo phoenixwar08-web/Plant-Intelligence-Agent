@@ -1,6 +1,6 @@
 # Plant Intelligence Agent — soil3 production baseline
 
-This is a soil3-only, source-controlled reconstruction of the openEuler production system inspected on 2026-09-15. It contains safe source and deployment templates only: no credentials, runtime state, logs, backups, camera URLs, or production databases.
+This is a source-controlled reconstruction of the openEuler production system inspected on 2026-09-15, using its soil3 implementation as the current production baseline. It contains safe source and deployment templates only: no credentials, runtime state, logs, backups, camera URLs, or production databases.
 
 ## Structure
 

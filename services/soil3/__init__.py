@@ -1,1 +1,1 @@
-"""Soil3-only production baseline."""
+"""Current production baseline derived from the soil3 implementation."""
