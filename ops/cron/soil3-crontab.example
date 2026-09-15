@@ -1,0 +1,2 @@
+# Daily Phase3 audit.  Adapt the virtualenv path before installation.
+10 4 * * * cd /opt/plant-intelligence-agent/services/soil3/phase3 && /opt/plant-intelligence-agent/.venv/bin/python auditor.py >> /var/log/soil3-auditor.log 2>&1

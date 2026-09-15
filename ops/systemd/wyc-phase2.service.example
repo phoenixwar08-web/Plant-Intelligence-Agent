@@ -1,0 +1,15 @@
+[Unit]
+Description=Soil3 Phase2 trajectory predictor (optional)
+After=network.target
+
+[Service]
+Type=simple
+User=plant
+WorkingDirectory=/opt/plant-intelligence-agent
+ExecStart=/opt/plant-intelligence-agent/.venv/bin/python -m services.soil3.phase2_predictor.service
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Soil3 Phase3 safety controller
+After=network.target opengauss.service mqtt_direct_gauss.service
+Wants=opengauss.service mqtt_direct_gauss.service
+
+[Service]
+Type=simple
+User=plant
+WorkingDirectory=/opt/plant-intelligence-agent/services/soil3/phase3
+ExecStart=/opt/plant-intelligence-agent/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

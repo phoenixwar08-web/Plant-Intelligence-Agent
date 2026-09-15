@@ -1,56 +1,23 @@
-# Secrets and deployment-local configuration
 .env
 .env.*
 !.env.example
-secrets/
-*.key
-*.pem
-*.p12
-*.pfx
 
-# Python/runtime artifacts
 __pycache__/
 *.py[cod]
+*.bak*
+*.orig
+
+*.log
+*.csv
+*.db
+*.db-*
+*.lock
+system_state.json
+evolving_params.json
+irrigation_profile.json
+irrigation_trials.json
+pattern_memory.json
+
+.pytest_cache/
 .venv/
 venv/
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-
-# Runtime state, logs, data and backups
-logs/
-state/
-runtime/
-sessions/
-memory/
-media/
-spool/
-*.pid
-*.log
-*.bak
-*.bak_*
-*.orig
-*~
-*.sqlite
-*.db
-*.csv
-*.jsonl
-
-# Deployment-local module configuration; checked example files remain public.
-config/**/config.json
-!config/**/config.example.json
-
-# Model / firmware build artifacts; source and checked manifests are allowed
-*.pth
-*.pt
-*.onnx
-*.bin
-.pio/
-build/
-dist/
-
-# OS/editor files
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/

@@ -1,0 +1,20 @@
+{
+  "device_code": "soil3",
+  "mqtt": {
+    "broker": "MQTT_BROKER_HOST",
+    "pump_topic": "esp32/pump3/cmd"
+  },
+  "database": {
+    "sensor_table": "soil_sensor_readings",
+    "device_code": "soil3"
+  },
+  "phase2": {
+    "request_file": "/dev/shm/pred_request.json",
+    "response_file": "/dev/shm/pred_response.json",
+    "enabled": false
+  },
+  "vision": {
+    "enabled": false,
+    "note": "The future vision service is an independent service."
+  }
+}
