@@ -23,6 +23,14 @@ Read this file and the assigned GitHub Issue first. Then use the smallest releva
 
 Read the affected code before editing it. A local `AGENTS.md` always applies to its directory.
 
+## Actual development and production paths
+
+The shared Windows checkout for this project is `D:\app\codex\Plant-Intelligence-Agent`. Other developers may clone elsewhere; use the repository root they actually opened rather than assuming a local path.
+
+The Linux production project root is `/root/water`. For soil3, production source is `/root/water/app/services/soil3/phase3`, runtime state is `/root/water/runtime/instances/soil3/phase3`, long-term data is `/root/water/data/soil3/phase3`, and logs are `/root/water/logs/soil3/phase3`.
+
+Repository source and production runtime data are separate. Normal development changes the Git checkout only; never infer, create, or edit production runtime/data/log paths unless the Issue explicitly authorizes production work.
+
 ## Scope rules
 
 - The Issue is the modification boundary. Reuse existing capability first; add a module only when the current structure cannot carry the authorized work.
@@ -32,6 +40,14 @@ Read the affected code before editing it. A local `AGENTS.md` always applies to 
 - Do not handle Issue-external production problems, production configuration, databases, or historical data without explicit authorization.
 
 When sources conflict, use this order: explicit Issue scope → local `AGENTS.md` → this file → `PROTOCOLS_AND_BOUNDARIES.md` → `SYSTEM_ARCHITECTURE.md` → other design/history documents. An Issue never overrides Phase3 safety rules, real pump-control boundaries, production-data protection, or database-structure limits.
+
+## Git and pull requests
+
+`main` is the protected integration branch. Agents and collaborators must not directly push or force-push `main`, merge a PR themselves, merge their own PR through the GitHub API, bypass branch/ruleset protection, or close a development Issue without Owner confirmation.
+
+For each Issue, create one independent branch from the latest `main` (for example, `issue-<number>-<short-name>`). Agents may commit and push their own Issue branch, create or update its PR to `main`, and respond to Review feedback. They must not merge it.
+
+Task completion means **PR Ready for Review**. The Owner checks each Review batch for integration concerns and manually merges approved PRs into `main`. Task order, ownership, and acceptance timing are defined only by the current GitHub Issues.
 
 ## Review handoff
 
