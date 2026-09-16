@@ -17,6 +17,8 @@ assignees: []
 
 如果目标目录存在局部 `AGENTS.md`，必须同时遵守。Issue 未明确授权的模块不要修改。
 
+实际开发与生产路径以 `/AGENTS.md` 的“Actual development and production paths”为准；Git checkout、生产源码、runtime、data 和 logs 不可混同。
+
 每个 Issue 使用独立分支和 PR；不得直接 push `main`、自行 merge PR、绕过保护或未经 Owner 确认关闭开发 Issue。完成定义为 PR Ready for Review。
 
 ## 目标

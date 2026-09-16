@@ -1,13 +1,16 @@
-# Soil3 Production Baseline
+# Soil3 Production Paths and Boundary
 
-Inspected: 2026-09-15 on the openEuler host reachable through the private `100.*` address.
+The Linux production project root is `/root/water`. These are current functional locations, not a task schedule or authorization to change production files.
 
-| Component | Machine path | Observed state | Repository treatment |
-| --- | --- | --- | --- |
-| Phase1 calibration | `/root/water/phase1_test/water-test-soil3.py` | service inactive | Retained as offline calibration source only. |
-| Phase2 predictor | `/root/water/wyc/phase2_predictor/` | no process or shared-memory response observed | Retained as an optional candidate-trajectory predictor. |
-| Phase3 controller | `/root/water/phase3/soil3/` | service active | Retained as final safety and MQTT execution authority. |
-| IoT event state | `/root/water/wyc/IOT/` | cloud-agent inactive | Only event/state adaptation is retained. |
+| Purpose | Current machine path | Repository treatment |
+| --- | --- | --- |
+| Phase1 calibration source | `/root/water/app/services/soil3/phase1/` | Offline calibration source only. |
+| Phase2 predictor source | `/root/water/app/services/soil3/phase2_predictor/` | Candidate-trajectory predictor. |
+| Phase3 controller source | `/root/water/app/services/soil3/phase3/` | Final safety and MQTT execution authority. |
+| Soil3 telemetry source | `/root/water/app/services/soil3/telemetry/` | Observation and event adaptation only. |
+| Runtime state | `/root/water/runtime/instances/soil3/phase3/` | Not source code; preserve unless explicitly authorized. |
+| Long-term data | `/root/water/data/soil3/phase3/` | Not source code; preserve unless explicitly authorized. |
+| Logs | `/root/water/logs/soil3/phase3/` | Operational output; do not treat as source. |
 
 ## Safety boundary
 
