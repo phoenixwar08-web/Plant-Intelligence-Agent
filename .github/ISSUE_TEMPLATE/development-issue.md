@@ -17,6 +17,8 @@ assignees: []
 
 如果目标目录存在局部 `AGENTS.md`，必须同时遵守。Issue 未明确授权的模块不要修改。
 
+每个 Issue 使用独立分支和 PR；不得直接 push `main`、自行 merge PR、绕过保护或未经 Owner 确认关闭开发 Issue。完成定义为 PR Ready for Review。
+
 ## 目标
 
 ## 主要工作

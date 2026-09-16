@@ -33,6 +33,14 @@ Read the affected code before editing it. A local `AGENTS.md` always applies to 
 
 When sources conflict, use this order: explicit Issue scope → local `AGENTS.md` → this file → `PROTOCOLS_AND_BOUNDARIES.md` → `SYSTEM_ARCHITECTURE.md` → other design/history documents. An Issue never overrides Phase3 safety rules, real pump-control boundaries, production-data protection, or database-structure limits.
 
+## Git and pull requests
+
+`main` is the protected integration branch. Agents and collaborators must not directly push or force-push `main`, merge a PR themselves, merge their own PR through the GitHub API, bypass branch/ruleset protection, or close a development Issue without Owner confirmation.
+
+For each Issue, create one independent branch from the latest `main` (for example `issue-12-vision-v1`, `issue-13-cloud-strategy`, or `issue-14-replay`). Agents may commit and push their own Issue branch, create or update its PR to `main`, and respond to Review feedback. They must not merge it.
+
+Task completion means **PR Ready for Review**. The Owner checks the PR, integrates the daily three-PR set, and manually merges approved PRs into `main`.
+
 ## Review handoff
 
 After tests and diff review, submit **Review**—do not self-close the Issue. State:
