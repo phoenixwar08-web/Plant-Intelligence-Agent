@@ -1,6 +1,29 @@
-"""Non-executing plant-vision contracts and services."""
-"""Public repository-internal Day 2 Vision V1 API."""
+"""Public repository-internal Day 2 Vision V1 API.
 
-from services.soil3.vision.vision_service import capture_and_analyze_once
+Non-executing: observations are recorded per plant zone and nothing here
+schedules, commands, or controls a device.
+"""
 
-__all__ = ["capture_and_analyze_once"]
+from services.soil3.vision.vision_capture import EvidenceStore, crop_to_zone
+from services.soil3.vision.vision_service import VisionService, capture_and_analyze_once
+from services.soil3.vision.vision_v1 import (
+    OBSERVATION_FIELDS,
+    CaptureOutcome,
+    PlantZone,
+    VisionRunResult,
+    parse_zones,
+    validate_vision_record,
+)
+
+__all__ = [
+    "EvidenceStore",
+    "OBSERVATION_FIELDS",
+    "CaptureOutcome",
+    "PlantZone",
+    "VisionRunResult",
+    "VisionService",
+    "capture_and_analyze_once",
+    "crop_to_zone",
+    "parse_zones",
+    "validate_vision_record",
+]

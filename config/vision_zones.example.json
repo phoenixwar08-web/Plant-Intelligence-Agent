@@ -1,0 +1,14 @@
+{
+  "zones": [
+    {
+      "id": "plant_zone_1",
+      "label": "spider plant",
+      "rect": [0.14, 0.24, 0.48, 0.66]
+    },
+    {
+      "id": "plant_zone_2",
+      "label": "rose",
+      "rect": [0.59, 0.0, 0.34, 0.9]
+    }
+  ]
+}
