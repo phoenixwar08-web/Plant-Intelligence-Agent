@@ -29,6 +29,11 @@ SNAPSHOT_STATE_KEYS = (
     "reservoir_empty_suspect",
     "low_wet_recovery_suspect",
     "sensor_fault",
+    "dynamic_cooldown",
+    "predictor_circuit",
+    "watering_trigger_guard",
+    "recent_response_guard",
+    "hard_safety_low_guard",
     "cloud_protection",
 )
 
