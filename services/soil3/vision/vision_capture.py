@@ -43,14 +43,27 @@ class OpenCvRtspFrameCapture:
         self._capture_factory = capture_factory
 
     def capture_one(self) -> CapturedFrame:
-        stream = self._capture_factory(self._rtsp_url)
         try:
-            if not stream.isOpened():
+            stream = self._capture_factory(self._rtsp_url)
+        except Exception as error:
+            raise CaptureError("RTSP_OPEN_FAILED") from error
+        try:
+            try:
+                opened = stream is not None and stream.isOpened()
+            except Exception as error:
+                raise CaptureError("RTSP_OPEN_FAILED") from error
+            if not opened:
                 raise CaptureError("RTSP_OPEN_FAILED")
-            received, frame = stream.read()
+            try:
+                received, frame = stream.read()
+            except Exception as error:
+                raise CaptureError("RTSP_READ_FAILED") from error
             if not received or frame is None:
                 raise CaptureError("RTSP_READ_FAILED")
-            encoded, jpeg = cv2.imencode(".jpg", frame)
+            try:
+                encoded, jpeg = cv2.imencode(".jpg", frame)
+            except Exception as error:
+                raise CaptureError("JPEG_ENCODE_FAILED") from error
             if not encoded:
                 raise CaptureError("JPEG_ENCODE_FAILED")
             return CapturedFrame(
@@ -58,7 +71,10 @@ class OpenCvRtspFrameCapture:
                 captured_at=datetime.now(timezone.utc),
             )
         finally:
-            stream.release()
+            try:
+                stream.release()
+            except Exception:
+                pass
 
 
 class ImageStore:
@@ -70,16 +86,26 @@ class ImageStore:
     def save(self, jpeg_bytes: bytes, captured_at: datetime) -> ImageEvidence:
         if not jpeg_bytes:
             raise CaptureError("JPEG_INVALID")
-        decoded = cv2.imdecode(np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        try:
+            decoded = cv2.imdecode(np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception as error:
+            raise CaptureError("JPEG_INVALID") from error
         if decoded is None:
             raise CaptureError("JPEG_INVALID")
         image_id = str(uuid4())
         relative = Path("images") / captured_at.date().isoformat() / f"{image_id}.jpg"
         target = self._root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(".tmp")
-        temporary.write_bytes(jpeg_bytes)
-        os.replace(temporary, target)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_bytes(jpeg_bytes)
+            os.replace(temporary, target)
+        except OSError as error:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise CaptureError("IMAGE_STORE_FAILED") from error
         return ImageEvidence(
             image_id=image_id,
             image_path=relative.as_posix(),

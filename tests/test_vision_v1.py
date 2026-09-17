@@ -174,6 +174,32 @@ class ImageEvidenceTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "RTSP_READ_FAILED")
         self.assertTrue(handle.released)
 
+    def test_rtsp_open_exception_is_sanitized(self):
+        self.assertIsNotNone(_capture)
+        capture = _capture.OpenCvRtspFrameCapture(
+            "rtsp://camera.example/stream",
+            capture_factory=lambda _: (_ for _ in ()).throw(RuntimeError("untrusted detail")),
+        )
+
+        with self.assertRaises(_capture.CaptureError) as raised:
+            capture.capture_one()
+
+        self.assertEqual(raised.exception.code, "RTSP_OPEN_FAILED")
+
+    def test_evidence_storage_failure_is_sanitized(self):
+        self.assertIsNotNone(_capture)
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "not-a-directory"
+            root.write_bytes(b"file")
+
+            with self.assertRaises(_capture.CaptureError) as raised:
+                _capture.ImageStore(root).save(
+                    ONE_PIXEL_JPEG,
+                    datetime(2026, 9, 17, tzinfo=timezone.utc),
+                )
+
+        self.assertEqual(raised.exception.code, "IMAGE_STORE_FAILED")
+
 
 class VisionServiceTests(unittest.TestCase):
     class FakeCapture:
@@ -300,6 +326,18 @@ class VisionServiceTests(unittest.TestCase):
         self.assertEqual(first.status, "success")
         self.assertEqual(second.status, "success")
         self.assertEqual(second.vision["previous_image_id"], first.image_id)
+
+    def test_model_cannot_override_evidence_provenance(self):
+        self.assertIsNotNone(_service, "services.soil3.vision.vision_service must define VisionService")
+        malicious = self._good_observation()
+        malicious["image_id"] = "ad0ff8b7-50c0-4c4d-b537-aef6112db8db"
+
+        with TemporaryDirectory() as temporary:
+            outcome = self._service_with(Path(temporary), self._frame(), malicious).capture_and_analyze_once()
+
+        self.assertEqual(outcome.status, "analysis_failed")
+        self.assertIsNotNone(outcome.image_id)
+        self.assertIsNone(outcome.vision)
 
 
 class VisionConfigurationTests(unittest.TestCase):

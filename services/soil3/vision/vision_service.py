@@ -99,7 +99,21 @@ class VisionService:
         return CaptureOutcome(status, evidence.image_id, record, None)
 
     def _attach_evidence(self, raw: Mapping[str, object], evidence, captured_at: datetime) -> dict[str, object]:
+        observation_fields = {
+            "image_quality",
+            "leaf_droop",
+            "leaf_spread",
+            "wilting",
+            "yellowing",
+            "visible_damage",
+            "overall_visual_state",
+            "change_vs_previous",
+            "confidence",
+        }
+        if set(raw) != observation_fields:
+            raise VisionValidationError()
         return {
+            **raw,
             "schema_version": "vision.v1",
             "device_code": self._device_code,
             "image_id": evidence.image_id,
@@ -113,7 +127,6 @@ class VisionService:
                 "name": self._model_name,
                 "prompt_version": "vision.v1",
             },
-            **raw,
         }
 
     def _previous_image_id(self) -> str | None:
