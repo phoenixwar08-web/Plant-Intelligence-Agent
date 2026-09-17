@@ -5,19 +5,59 @@ import base64
 from collections.abc import Mapping
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import requests
 
 from services.soil3.vision.vision_capture import ImageEvidence
 
+# A machine error token, so a provider's human-readable message can never be stored as one.
+_MACHINE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}")
+
 
 class AnalysisError(ValueError):
-    """A sanitised failure to obtain a structured model analysis."""
+    """A sanitised failure to obtain a structured model analysis.
 
-    def __init__(self, code: str) -> None:
+    ``http_status`` and ``provider_error_code`` stay None when no HTTP response was
+    received, so a timeout cannot be mistaken for an authentication or quota problem.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        http_status: int | None = None,
+        provider_error_code: str | None = None,
+    ) -> None:
         self.code = code
+        self.http_status = http_status
+        self.provider_error_code = provider_error_code
         super().__init__(code)
+
+
+def _machine_code(value: Any) -> str | None:
+    return value if isinstance(value, str) and _MACHINE_CODE.fullmatch(value) else None
+
+
+def _provider_error_code(response: Any) -> str | None:
+    """Return one bounded provider error token, or None; the response body is never kept."""
+    try:
+        payload = response.json()
+    except (requests.RequestException, TypeError, ValueError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    error = payload.get("error")
+    candidates: list[Any] = [error] if isinstance(error, str) else []
+    if isinstance(error, Mapping):
+        candidates += [error.get("code"), error.get("type")]
+    candidates += [payload.get("code"), payload.get("error_code")]
+    for candidate in candidates:
+        code = _machine_code(candidate)
+        if code is not None:
+            return code
+    return None
 
 
 _PROMPT = """Return JSON only, with no markdown and no care, watering, or treatment recommendation.
@@ -94,17 +134,25 @@ class QwenVisionAnalyzer:
                 json=payload,
                 timeout=self._timeout_seconds,
             )
-            response.raise_for_status()
-        except requests.Timeout as error:
-            raise AnalysisError("MODEL_TIMEOUT") from error
-        except requests.RequestException as error:
-            raise AnalysisError("MODEL_REQUEST_FAILED") from error
+        except requests.Timeout:
+            # Raised without chaining: a requests error string carries the endpoint URL.
+            raise AnalysisError("MODEL_TIMEOUT") from None
+        except requests.RequestException:
+            raise AnalysisError("MODEL_REQUEST_FAILED") from None
+        status = getattr(response, "status_code", None)
+        http_status = status if isinstance(status, int) else None
+        if http_status is not None and http_status >= 400:
+            raise AnalysisError(
+                "MODEL_REQUEST_FAILED",
+                http_status=http_status,
+                provider_error_code=_provider_error_code(response),
+            )
         try:
             value = json.loads(response.json()["choices"][0]["message"]["content"])
-        except (KeyError, IndexError, TypeError, ValueError) as error:
-            raise AnalysisError("MODEL_INVALID_JSON") from error
+        except (KeyError, IndexError, TypeError, ValueError, requests.RequestException):
+            raise AnalysisError("MODEL_INVALID_JSON", http_status=http_status) from None
         if not isinstance(value, Mapping):
-            raise AnalysisError("MODEL_INVALID_JSON")
+            raise AnalysisError("MODEL_INVALID_JSON", http_status=http_status)
         return dict(value)
 
     def _read(self, evidence: ImageEvidence) -> bytes:

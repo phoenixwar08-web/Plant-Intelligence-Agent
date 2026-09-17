@@ -507,11 +507,20 @@ class VisionServiceTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(failures[0]["plant_zone"], "plant_zone_2")
         self.assertEqual(failures[0]["source_frame_id"], result.frame_id)
+        self.assertNotIn("http_status", failures[0], "a capture failure never reached the provider")
+        self.assertNotIn("provider_error_code", failures[0])
 
     def test_analysis_failure_keeps_the_crop_but_writes_no_record(self):
+        from services.soil3.vision import qwen_vision
+
+        provider_failure = qwen_vision.AnalysisError(
+            "MODEL_REQUEST_FAILED",
+            http_status=429,
+            provider_error_code="throttling_allocation_quota",
+        )
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            result = self._service(root, self._frame(), _service.AnalysisError("MODEL_INVALID_JSON")).capture_and_analyze_once()
+            result = self._service(root, self._frame(), provider_failure).capture_and_analyze_once()
             crops = list((root / "images").rglob("*.jpg"))
             records = list((root / "records").rglob("*.json"))
             failures = sorted((_read_json(path) for path in (root / "failures").rglob("*.json")), key=lambda value: value["plant_zone"])
@@ -521,6 +530,37 @@ class VisionServiceTests(unittest.TestCase):
         self.assertEqual(records, [])
         self.assertEqual([failure["plant_zone"] for failure in failures], ["plant_zone_1", "plant_zone_2"])
         self.assertTrue(all(failure["image_id"] and failure["source_frame_id"] for failure in failures))
+        for failure in failures:
+            self.assertEqual(failure["error_code"], "MODEL_REQUEST_FAILED", "the local classification is kept")
+            self.assertEqual(failure["http_status"], 429)
+            self.assertEqual(failure["provider_error_code"], "throttling_allocation_quota")
+        for outcome in result.outcomes:
+            self.assertEqual(outcome.http_status, 429, "the caller sees the same diagnostics as the record")
+            self.assertEqual(outcome.provider_error_code, "throttling_allocation_quota")
+
+    def test_a_timeout_and_a_local_rejection_are_told_apart_by_nulls(self):
+        from services.soil3.vision import qwen_vision
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._service(root, self._frame(), qwen_vision.AnalysisError("MODEL_TIMEOUT")).capture_and_analyze_once()
+            partial = assessed()
+            for key in _contract.SEVERITY_FIELDS:
+                partial.pop(key)
+            validation = self._service(root, self._frame(), partial).capture_and_analyze_once()
+            failures = sorted((_read_json(path) for path in (root / "failures").rglob("*.json")), key=lambda value: value["error_code"])
+
+        timeout = [failure for failure in failures if failure["error_code"] == "MODEL_TIMEOUT"]
+        self.assertEqual(len(timeout), 2)
+        for failure in timeout:
+            self.assertIsNone(failure["http_status"], "no reply means no status to report")
+            self.assertIsNone(failure["provider_error_code"])
+        rejected = [failure for failure in failures if failure["error_code"] == "INVALID_VISION_RECORD"]
+        self.assertEqual(len(rejected), 2, "the model answered, but the local validator refused")
+        for failure in rejected:
+            self.assertIsNone(failure["http_status"], "a local rejection is not a provider failure")
+            self.assertIsNone(failure["provider_error_code"])
+        self.assertEqual([outcome.error_code for outcome in validation.outcomes], ["INVALID_VISION_RECORD"] * 2)
 
     def test_each_zone_is_tracked_against_its_own_earlier_crop(self):
         with TemporaryDirectory() as temporary:

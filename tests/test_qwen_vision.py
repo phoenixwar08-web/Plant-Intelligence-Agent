@@ -19,14 +19,41 @@ except ModuleNotFoundError:
 
 
 class FakeResponse:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, status_code: int = 200) -> None:
         self._content = content
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         return None
 
     def json(self):
         return {"choices": [{"message": {"content": self._content}}]}
+
+
+LEAKY_DETAIL = "leaked-account-sk-abcdefghijklmnop https://provider.example/v1/chat/completions"
+
+
+class ProviderErrorResponse:
+    """An HTTP failure reply: a status, a machine code, and a message that must never be stored."""
+
+    def __init__(self, status_code: int, payload=None) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return self._payload
+
+
+class ProviderErrorSession:
+    def __init__(self, response: ProviderErrorResponse) -> None:
+        self._response = response
+        self.requests = []
+
+    def post(self, url, **kwargs):
+        self.requests.append({"url": url, **kwargs})
+        return self._response
 
 
 class FakeSession:
@@ -149,16 +176,78 @@ class QwenVisionTests(unittest.TestCase):
             with self.assertRaises(_qwen.AnalysisError) as raised:
                 self._analyzer(root, TimeoutSession()).analyze(self._evidence(root))
         self.assertEqual(raised.exception.code, "MODEL_TIMEOUT")
+        self.assertIsNone(raised.exception.http_status, "a timeout never got a reply")
+        self.assertIsNone(raised.exception.provider_error_code)
 
-    def test_a_provider_error_status_is_sanitized(self):
-        error = requests.HTTPError("403 Client Error")
-        error.response = type("Response", (), {"status_code": 403, "text": "insufficient_quota here"})()
+    def test_a_connection_failure_keeps_the_endpoint_out_of_the_chain(self):
+        error = requests.ConnectionError(f"Failed to establish https://provider.example: {LEAKY_DETAIL}")
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             with self.assertRaises(_qwen.AnalysisError) as raised:
                 self._analyzer(root, FailingSession(error)).analyze(self._evidence(root))
-        self.assertEqual(raised.exception.code, "MODEL_REQUEST_FAILED")
-        self.assertNotIn("insufficient_quota", str(raised.exception))
+        exception = raised.exception
+        self.assertEqual(exception.code, "MODEL_REQUEST_FAILED")
+        self.assertIsNone(exception.http_status)
+        self.assertIsNone(exception.provider_error_code)
+        self.assertIsNone(exception.__cause__, "the requests error text carries the endpoint URL")
+        self.assertNotIn("provider.example", str(exception))
+
+    def test_every_provider_status_is_diagnosable_without_the_response_body(self):
+        cases = (
+            (400, {"error": {"code": "invalid_request_error", "message": LEAKY_DETAIL}}, "invalid_request_error"),
+            (401, {"error": {"message": LEAKY_DETAIL, "code": None, "type": "invalid_authentication_error"}}, "invalid_authentication_error"),
+            (403, {"code": "insufficient_quota", "message": LEAKY_DETAIL}, "insufficient_quota"),
+            (429, {"error": {"code": "throttling_allocation_quota", "message": LEAKY_DETAIL}}, "throttling_allocation_quota"),
+            (500, {"error": "InternalError"}, "InternalError"),
+            (503, None, None),
+        )
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = self._evidence(root)
+            for status_code, payload, expected_code in cases:
+                with self.subTest(status_code=status_code):
+                    session = ProviderErrorSession(ProviderErrorResponse(status_code, payload))
+                    with self.assertRaises(_qwen.AnalysisError) as raised:
+                        self._analyzer(root, session).analyze(evidence)
+                    exception = raised.exception
+                    self.assertEqual(exception.code, "MODEL_REQUEST_FAILED", "the local classification stays stable")
+                    self.assertEqual(exception.http_status, status_code)
+                    self.assertEqual(exception.provider_error_code, expected_code)
+                    self.assertNotIn("leaked", str(exception))
+                    self.assertNotIn("provider.example", str(exception))
+                    self.assertEqual(len(session.requests), 1, "one request per zone, no retry")
+
+    def test_only_a_bounded_machine_token_is_accepted_as_an_error_code(self):
+        shapes = (
+            ({"error": {"message": LEAKY_DETAIL}}, None, "a human message is not an error code"),
+            ({"error": {"code": "too many requests on your account"}}, None, "a code with spaces is rejected"),
+            ({"error": {"code": "x" * 65}}, None, "an unbounded code is rejected"),
+            ({"error": {"code": "bad-key; rm -rf /"}}, None, "punctuation outside the token set is rejected"),
+            ({"code": 401}, None, "a numeric code is not a provider error token"),
+            ([{"code": "RealErrorCode"}], None, "a non-object body carries no code"),
+            ({"error": {"code": "DataInspectionFailed", "message": LEAKY_DETAIL}}, "DataInspectionFailed", "the code wins over the message"),
+        )
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            evidence = self._evidence(root)
+            for payload, expected, reason in shapes:
+                with self.subTest(reason):
+                    session = ProviderErrorSession(ProviderErrorResponse(400, payload))
+                    with self.assertRaises(_qwen.AnalysisError) as raised:
+                        self._analyzer(root, session).analyze(evidence)
+                    self.assertEqual(raised.exception.http_status, 400)
+                    self.assertEqual(raised.exception.provider_error_code, expected, reason)
+                    self.assertNotIn("leaked", str(raised.exception))
+
+    def test_a_reply_that_is_not_the_expected_shape_reports_the_status_it_got(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = FakeSession(FakeResponse("not json", status_code=200))
+            with self.assertRaises(_qwen.AnalysisError) as raised:
+                self._analyzer(root, session).analyze(self._evidence(root))
+        self.assertEqual(raised.exception.code, "MODEL_INVALID_JSON")
+        self.assertEqual(raised.exception.http_status, 200, "the provider did answer")
+        self.assertIsNone(raised.exception.provider_error_code)
 
     def test_a_non_json_answer_is_rejected(self):
         for content in ("not json", '"a string"', "[]", "null"):

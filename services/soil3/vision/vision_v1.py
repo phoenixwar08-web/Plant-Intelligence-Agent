@@ -42,6 +42,8 @@ class CaptureOutcome:
     image_id: str | None
     vision: dict[str, Any] | None
     error_code: str | None
+    http_status: int | None = None
+    provider_error_code: str | None = None
 
 
 @dataclass(frozen=True)

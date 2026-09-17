@@ -86,6 +86,7 @@ Plant-Intelligence-Agent/
 - 原始帧完整保存在 `frames/`，送给模型的只是按归一化 `[x, y, w, h]` 裁出的 `images/` 区域；ROI 只在模型输入阶段生效，不改变留档图片。
 - `change_vs_previous` 只与同一 `plant_zone` 的上一次观测比较，两处植物不会互相追踪。
 - 一个 zone 失败不影响另一个 zone；整轮结果可以是 `success`、`image_unusable`、`analysis_failed`、`capture_failed` 或 `partial`。
+- `analysis_failed` 记录额外带 `http_status` 与 `provider_error_code`：收到 HTTP 响应就记状态码，provider 给出可安全提取的机器错误码（如 `insufficient_quota`）就记该码；超时/连不上时两者为 `null`。本地校验拒绝时两者也是 `null`，以区别于 provider 故障。原始响应体、密钥、完整 URL、Base64 图片、prompt 与模型原文一律不落盘。
 
 每条记录报告 17 个视觉字段：`image_quality`、`target_detected`、`target_ambiguity`、`leaf_droop`、`leaf_spread`、`wilting`、`yellowing`、`visible_damage`、`browning`、`leaf_curl`、`spots_or_lesions`、`leaf_loss`、`stem_posture`、`occlusion`、`overall_visual_state`、`change_vs_previous`、`confidence`。视觉证据不足时字段必须是 `null`，本地校验会拒绝没有证据支撑的结论；`overall_visual_state` 只描述外观（`normal / mild_abnormality / obvious_abnormality / severe_abnormality / unavailable`），不是健康诊断，也不是浇水或处置建议。
 

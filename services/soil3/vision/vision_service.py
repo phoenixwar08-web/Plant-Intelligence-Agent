@@ -1,12 +1,12 @@
 """One-shot, non-control orchestration for Vision V1 across plant zones."""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+from typing import Mapping, Sequence
 from uuid import uuid4
 
 from services.soil3.vision.qwen_vision import AnalysisError, QwenVisionAnalyzer
@@ -79,6 +79,63 @@ def _utc_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _provenance_for(service: "VisionService", raw: Mapping[str, object], zone: PlantZone, evidence: ImageEvidence, frame: CapturedFrame) -> dict[str, object]:
+    """Add server-owned provenance to one model answer; the model never supplies any."""
+    return {
+        **dict(raw),
+        "schema_version": "vision.v1",
+        "device_code": service._device_code,
+        "plant_zone": {"id": zone.zone_id, "rect": list(zone.rect), "label": zone.label},
+        "image_id": evidence.image_id,
+        "image_path": evidence.image_path,
+        "image_sha256": evidence.image_sha256,
+        "source_frame_id": service._frame_id,
+        "source_frame_path": service._frame_path,
+        "source_frame_sha256": service._frame_sha256,
+        "previous_image_id": service._previous_id,
+        "captured_at": _utc_timestamp(frame.captured_at),
+        "analyzed_at": _utc_timestamp(datetime.now(timezone.utc)),
+        "model": {"provider": "qwen", "name": service._model_name, "prompt_version": "vision.v1"},
+    }
+
+
+def _previous_crop(service: "VisionService", zone_id: str) -> tuple[str | None, bytes | None]:
+    """Return the latest earlier crop of this same zone, if it can still be read.
+
+    Zones are tracked separately so two plants never compare against each other. A
+    history record whose image is gone or corrupted is dropped entirely rather than
+    reported as a change the model was never shown, so a failure to read history must
+    never be recorded as a capture or analysis failure of the current attempt.
+    """
+    latest: tuple[str, ImageEvidence] | None = None
+    records_root = service._data_root / "records"
+    if records_root.is_dir():
+        for path in records_root.rglob("*.json"):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, Mapping) or record.get("device_code") != service._device_code:
+                continue
+            if record.get("schema_version") != "vision.v1":
+                continue
+            zone = record.get("plant_zone")
+            if not isinstance(zone, Mapping) or zone.get("id") != zone_id:
+                continue
+            captured_at = record.get("captured_at")
+            evidence = _evidence_from(record)
+            if not isinstance(captured_at, str) or evidence is None:
+                continue
+            if latest is None or captured_at > latest[0]:
+                latest = (captured_at, evidence)
+    if latest is None:
+        return None, None
+    try:
+        return latest[1].image_id, service._store.load(latest[1])
+    except CaptureError:
+        return None, None
+
+
 class VisionService:
     """Observe every configured zone from one frame, isolating per-zone failures."""
 
@@ -102,109 +159,72 @@ class VisionService:
         self._store = store
         self._analyzer = analyzer
         self._model_name = model_name
+        # Provenance of the frame being observed, shared by every zone in one run.
+        self._frame_id: str | None = None
+        self._frame_path: str | None = None
+        self._frame_sha256: str | None = None
+        # The earlier crop of the zone being observed, set by _observe_zone._previous.
+        self._previous_id: str | None = None
 
     def capture_and_analyze_once(self) -> VisionRunResult:
         try:
             frame = self._capture.capture_one()
-            frame_evidence = self._store.save_frame(frame.jpeg_bytes, frame.captured_at)
+            evidence = self._store.save_frame(frame.jpeg_bytes, frame.captured_at)
         except CaptureError as error:
             self._persist_failure("capture_failed", error.code)
             return VisionRunResult("capture_failed", None, ())
 
-        outcomes = tuple(self._observe_zone(zone, frame, frame_evidence) for zone in self._zones)
+        self._frame_id, self._frame_path, self._frame_sha256 = (
+            evidence.image_id,
+            evidence.image_path,
+            evidence.image_sha256,
+        )
+        outcomes = tuple(self._observe_zone(zone, frame) for zone in self._zones)
         distinct = {outcome.status for outcome in outcomes}
-        return VisionRunResult(distinct.pop() if len(distinct) == 1 else "partial", frame_evidence.image_id, outcomes)
+        return VisionRunResult(distinct.pop() if len(distinct) == 1 else "partial", evidence.image_id, outcomes)
 
-    def _observe_zone(self, zone: PlantZone, frame: CapturedFrame, frame_evidence: ImageEvidence) -> CaptureOutcome:
+    def _observe_zone(self, zone: PlantZone, frame: CapturedFrame) -> CaptureOutcome:
+        """Observe one zone, writing every failure record about this zone alone."""
+
+        def _previous() -> bytes | None:
+            self._previous_id, previous_jpeg = _previous_crop(self, zone.zone_id)
+            return previous_jpeg
+
+        def _attach(raw: Mapping[str, object]) -> dict[str, object]:
+            if set(raw) != OBSERVATION_FIELDS:
+                raise VisionValidationError()
+            return _provenance_for(self, raw, zone, evidence, frame)
+
+        def _fail(status: str, error: Exception, image_id: str | None, image_sha256: str | None) -> CaptureOutcome:
+            diagnostics = _provider_diagnostics(error)
+            self._persist_failure(
+                status,
+                error.code,
+                zone=zone,
+                source_frame_id=self._frame_id,
+                image_id=image_id,
+                image_sha256=image_sha256,
+                **diagnostics,
+            )
+            return replace(
+                CaptureOutcome(status, zone.zone_id, image_id, None, error.code),
+                **diagnostics,
+            )
+
         try:
             evidence = self._store.save_crop(crop_to_zone(frame.jpeg_bytes, zone.rect), frame.captured_at)
         except CaptureError as error:
-            self._persist_failure("capture_failed", error.code, zone=zone, frame_evidence=frame_evidence)
-            return CaptureOutcome("capture_failed", zone.zone_id, None, None, error.code)
+            return _fail("capture_failed", error, None, None)
 
-        previous_id, previous_jpeg = self._previous(zone.zone_id)
         try:
-            raw = self._analyzer.analyze(evidence, previous_jpeg)
-            record = validate_vision_record(
-                self._attach_provenance(raw, zone, evidence, frame_evidence, previous_id, frame.captured_at)
-            )
+            raw = self._analyzer.analyze(evidence, _previous())
+            record = validate_vision_record(_attach(raw))
         except (AnalysisError, VisionValidationError) as error:
-            self._persist_failure(
-                "analysis_failed",
-                error.code,
-                zone=zone,
-                frame_evidence=frame_evidence,
-                image_id=evidence.image_id,
-                image_sha256=evidence.image_sha256,
-            )
-            return CaptureOutcome("analysis_failed", zone.zone_id, evidence.image_id, None, error.code)
+            return _fail("analysis_failed", error, evidence.image_id, evidence.image_sha256)
 
         self._persist_record(record)
         status = "image_unusable" if record["image_quality"] == "unusable" else "success"
         return CaptureOutcome(status, zone.zone_id, evidence.image_id, record, None)
-
-    def _attach_provenance(
-        self,
-        raw: Mapping[str, object],
-        zone: PlantZone,
-        evidence: ImageEvidence,
-        frame_evidence: ImageEvidence,
-        previous_id: str | None,
-        captured_at: datetime,
-    ) -> dict[str, object]:
-        if set(raw) != OBSERVATION_FIELDS:
-            raise VisionValidationError()
-        return {
-            **raw,
-            "schema_version": "vision.v1",
-            "device_code": self._device_code,
-            "plant_zone": {"id": zone.zone_id, "rect": list(zone.rect), "label": zone.label},
-            "image_id": evidence.image_id,
-            "image_path": evidence.image_path,
-            "image_sha256": evidence.image_sha256,
-            "source_frame_id": frame_evidence.image_id,
-            "source_frame_path": frame_evidence.image_path,
-            "source_frame_sha256": frame_evidence.image_sha256,
-            "previous_image_id": previous_id,
-            "captured_at": _utc_timestamp(captured_at),
-            "analyzed_at": _utc_timestamp(datetime.now(timezone.utc)),
-            "model": {"provider": "qwen", "name": self._model_name, "prompt_version": "vision.v1"},
-        }
-
-    def _previous(self, zone_id: str) -> tuple[str | None, bytes | None]:
-        """Return the latest earlier observation of this same zone, if its crop is readable.
-
-        Zones are tracked separately so two plants never compare against each other.
-        A history record whose image can no longer be read is dropped entirely rather
-        than reported as a change the model was never shown.
-        """
-        latest: tuple[str, ImageEvidence] | None = None
-        records_root = self._data_root / "records"
-        if records_root.is_dir():
-            for path in records_root.rglob("*.json"):
-                try:
-                    record = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue
-                if not isinstance(record, Mapping) or record.get("device_code") != self._device_code:
-                    continue
-                if record.get("schema_version") != "vision.v1":
-                    continue
-                zone = record.get("plant_zone")
-                if not isinstance(zone, Mapping) or zone.get("id") != zone_id:
-                    continue
-                captured_at = record.get("captured_at")
-                evidence = _evidence_from(record)
-                if not isinstance(captured_at, str) or evidence is None:
-                    continue
-                if latest is None or captured_at > latest[0]:
-                    latest = (captured_at, evidence)
-        if latest is None:
-            return None, None
-        try:
-            return latest[1].image_id, self._store.load(latest[1])
-        except CaptureError:
-            return None, None
 
     def _persist_record(self, record: Mapping[str, object]) -> None:
         timestamp = datetime.fromisoformat(str(record["captured_at"]).replace("Z", "+00:00"))
@@ -217,9 +237,11 @@ class VisionService:
         error_code: str,
         *,
         zone: PlantZone | None = None,
-        frame_evidence: ImageEvidence | None = None,
+        source_frame_id: str | None = None,
         image_id: str | None = None,
         image_sha256: str | None = None,
+        http_status: int | None = None,
+        provider_error_code: str | None = None,
     ) -> None:
         occurred_at = datetime.now(timezone.utc)
         value: dict[str, object] = {
@@ -228,10 +250,14 @@ class VisionService:
             "occurred_at": _utc_timestamp(occurred_at),
             "error_code": error_code,
         }
+        if status == "analysis_failed":
+            # An analysis failure always says what the provider replied, or that it never did.
+            value["http_status"] = http_status
+            value["provider_error_code"] = provider_error_code
         if zone is not None:
             value["plant_zone"] = zone.zone_id
-        if frame_evidence is not None:
-            value["source_frame_id"] = frame_evidence.image_id
+        if source_frame_id is not None:
+            value["source_frame_id"] = source_frame_id
         if image_id is not None:
             value["image_id"] = image_id
             value["image_sha256"] = image_sha256
@@ -244,6 +270,13 @@ class VisionService:
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
         os.replace(temporary, path)
+
+
+def _provider_diagnostics(error: Exception) -> dict[str, object]:
+    """What the provider itself reported, or two nulls when it never answered or only local rules failed."""
+    if isinstance(error, AnalysisError):
+        return {"http_status": error.http_status, "provider_error_code": error.provider_error_code}
+    return {"http_status": None, "provider_error_code": None}
 
 
 def _evidence_from(record: Mapping[str, object]) -> ImageEvidence | None:
