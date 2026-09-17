@@ -18,6 +18,11 @@ try:
 except ModuleNotFoundError:
     _capture = None
 
+try:
+    _service = importlib.import_module("services.soil3.vision.vision_service")
+except ModuleNotFoundError:
+    _service = None
+
 
 _encoded, ONE_PIXEL_JPEG = cv2.imencode(".jpg", np.zeros((1, 1, 3), dtype=np.uint8))
 assert _encoded
@@ -168,6 +173,133 @@ class ImageEvidenceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "RTSP_READ_FAILED")
         self.assertTrue(handle.released)
+
+
+class VisionServiceTests(unittest.TestCase):
+    class FakeCapture:
+        def __init__(self, result) -> None:
+            self._result = result
+
+        def capture_one(self):
+            if isinstance(self._result, Exception):
+                raise self._result
+            return self._result
+
+    class FakeAnalyzer:
+        def __init__(self, result) -> None:
+            self._result = result
+
+        def analyze(self, evidence, previous_image_id):
+            if isinstance(self._result, Exception):
+                raise self._result
+            return dict(self._result)
+
+    @staticmethod
+    def _unusable_observation():
+        return {
+            "image_quality": "unusable",
+            "leaf_droop": None,
+            "leaf_spread": None,
+            "wilting": None,
+            "yellowing": None,
+            "visible_damage": None,
+            "overall_visual_state": "unavailable",
+            "change_vs_previous": "unknown",
+            "confidence": None,
+        }
+
+    @staticmethod
+    def _good_observation(change="unknown"):
+        return {
+            "image_quality": "good",
+            "leaf_droop": "none",
+            "leaf_spread": "normal",
+            "wilting": False,
+            "yellowing": "none",
+            "visible_damage": "none",
+            "overall_visual_state": "healthy",
+            "change_vs_previous": change,
+            "confidence": 0.9,
+        }
+
+    def _service_with(self, root, capture_result, analyzer_result):
+        return _service.VisionService(
+            data_root=root,
+            device_code="soil3",
+            capture=self.FakeCapture(capture_result),
+            image_store=_capture.ImageStore(root),
+            analyzer=self.FakeAnalyzer(analyzer_result),
+        )
+
+    def _frame(self):
+        return _capture.CapturedFrame(
+            jpeg_bytes=ONE_PIXEL_JPEG,
+            captured_at=datetime(2026, 9, 17, tzinfo=timezone.utc),
+        )
+
+    def test_capture_failure_writes_no_image_or_vision(self):
+        self.assertIsNotNone(_service, "services.soil3.vision.vision_service must define VisionService")
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outcome = self._service_with(
+                root,
+                _capture.CaptureError("RTSP_OPEN_FAILED"),
+                self._unusable_observation(),
+            ).capture_and_analyze_once()
+
+            failures = list((root / "failures").rglob("*.json"))
+
+        self.assertEqual(outcome.status, "capture_failed")
+        self.assertIsNone(outcome.image_id)
+        self.assertIsNone(outcome.vision)
+        self.assertEqual(outcome.error_code, "RTSP_OPEN_FAILED")
+        self.assertEqual(len(failures), 1)
+
+    def test_unusable_analysis_persists_a_vision_record(self):
+        self.assertIsNotNone(_service, "services.soil3.vision.vision_service must define VisionService")
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outcome = self._service_with(root, self._frame(), self._unusable_observation()).capture_and_analyze_once()
+            records = list((root / "records").rglob("*.json"))
+
+        self.assertEqual(outcome.status, "image_unusable")
+        self.assertEqual(outcome.vision["image_quality"], "unusable")
+        self.assertEqual(len(records), 1)
+
+    def test_analysis_failure_keeps_image_but_writes_no_vision_record(self):
+        self.assertIsNotNone(_service, "services.soil3.vision.vision_service must define VisionService")
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outcome = self._service_with(
+                root,
+                self._frame(),
+                _service.AnalysisError("MODEL_INVALID_JSON"),
+            ).capture_and_analyze_once()
+            images = list((root / "images").rglob("*.jpg"))
+            records = list((root / "records").rglob("*.json")) if (root / "records").exists() else []
+            failures = list((root / "failures").rglob("*.json"))
+
+        self.assertEqual(outcome.status, "analysis_failed")
+        self.assertIsNotNone(outcome.image_id)
+        self.assertIsNone(outcome.vision)
+        self.assertEqual(len(images), 1)
+        self.assertEqual(len(records), 0)
+        self.assertEqual(len(failures), 1)
+
+    def test_successful_second_record_references_previous_image(self):
+        self.assertIsNotNone(_service, "services.soil3.vision.vision_service must define VisionService")
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self._service_with(root, self._frame(), self._good_observation()).capture_and_analyze_once()
+            second = self._service_with(
+                root,
+                self._frame(),
+                self._good_observation(change="stable"),
+            ).capture_and_analyze_once()
+
+        self.assertEqual(first.status, "success")
+        self.assertEqual(second.status, "success")
+        self.assertEqual(second.vision["previous_image_id"], first.image_id)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 import math
 from pathlib import PurePosixPath
@@ -17,6 +18,16 @@ class VisionValidationError(ValueError):
 
     def __init__(self) -> None:
         super().__init__(self.code)
+
+
+@dataclass(frozen=True)
+class CaptureOutcome:
+    """The result of one observation attempt, whether or not a record exists."""
+
+    status: str
+    image_id: str | None
+    vision: dict[str, Any] | None
+    error_code: str | None
 
 
 REQUIRED_FIELDS = frozenset({
