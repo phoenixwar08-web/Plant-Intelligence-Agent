@@ -15,6 +15,14 @@
   },
   "vision": {
     "enabled": false,
-    "note": "The future vision service is an independent service."
+    "entry_point": "services.soil3.vision.capture_and_analyze_once",
+    "required_environment": [
+      "SOIL3_CAMERA_RTSP_URL",
+      "QWEN_API_KEY",
+      "QWEN_BASE_URL",
+      "QWEN_MODEL",
+      "SOIL3_VISION_DATA_DIR"
+    ],
+    "note": "Vision V1 is an independent observation service. Values are supplied only through environment variables."
   }
 }

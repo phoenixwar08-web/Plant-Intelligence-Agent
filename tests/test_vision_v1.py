@@ -302,5 +302,17 @@ class VisionServiceTests(unittest.TestCase):
         self.assertEqual(second.vision["previous_image_id"], first.image_id)
 
 
+class VisionConfigurationTests(unittest.TestCase):
+    def test_example_config_names_variables_without_secret_values(self):
+        text = Path("config/soil3.example.json").read_text(encoding="utf-8")
+
+        self.assertIn("SOIL3_CAMERA_RTSP_URL", text)
+        self.assertIn("QWEN_API_KEY", text)
+        self.assertIn("QWEN_BASE_URL", text)
+        self.assertIn("QWEN_MODEL", text)
+        self.assertIn("SOIL3_VISION_DATA_DIR", text)
+        self.assertNotIn("rtsp://", text)
+
+
 if __name__ == "__main__":
     unittest.main()

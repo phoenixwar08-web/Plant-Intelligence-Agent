@@ -72,9 +72,25 @@ Plant-Intelligence-Agent/
 │       ├── phase1/               初始标定与参数识别代码
 │       ├── phase2_predictor/     预测与候选轨迹代码
 │       ├── phase3/               安全控制、动作计划与设备执行代码
-│       └── telemetry/            状态与事件数据适配代码
+│       ├── telemetry/            状态与事件数据适配代码
+│       └── vision/               Vision V1 单次观测代码
 └── tests/                        当前边界检查与后续自动化测试入口
 ```
+
+## Vision V1 Day 2
+
+仓库内 Python 接口 `services.soil3.vision.capture_and_analyze_once()` 只完成一次观测：抓取一帧、保存 JPEG 证据和 SHA-256、调用视觉模型、校验并持久化合法的 `vision.v1`。它不提供 HTTP、不启动后台调度、不接入 Episode，也不修改 `state.v1`、Phase3、MQTT 或水泵控制。
+
+每次调用的结果只能是以下四种之一：
+
+| 状态 | 含义 |
+| --- | --- |
+| `capture_failed` | 未取得可保存图片；没有 `image_id`，不会生成 `vision.v1`。 |
+| `image_unusable` | 已保存图片，但无法可靠观察植物；会保存所有观察字段为 `null` 的 `vision.v1`。 |
+| `analysis_failed` | 图片及哈希已保存，但模型、JSON 或本地校验失败；不会生成 `vision.v1`。 |
+| `success` | 图片已保存，且合法 `vision.v1` 已持久化。 |
+
+启用前只在运行环境设置示例配置中列出的变量；不要把摄像头地址或访问密钥写入仓库。真实摄像头/模型冒烟测试是手动、非控制操作，未纳入自动化测试，且需要另行批准。
 
 ## V1 开发方向
 
