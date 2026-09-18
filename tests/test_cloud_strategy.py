@@ -15,6 +15,7 @@ from services.soil3.cloud_strategy.service import (
     MODEL_INPUT_SAFETY_FLAGS,
     MODEL_INPUT_SCALARS,
     MODEL_INPUT_SECTIONS,
+    MODEL_INPUT_TIMESTAMPS,
     append_audit,
     bind_model_response,
     parse_model_json,
@@ -26,6 +27,7 @@ from services.soil3.cloud_strategy.validator import (
     ALLOWED_EXECUTION_FIELDS,
     ALLOWED_EXPECTED_OUTCOME_FIELDS,
     ALLOWED_MODEL_FIELDS,
+    CANONICAL_TIMESTAMP_FIELDS,
     PROMPT_VERSION,
     PROTOCOL_MAX_ACTIONS,
     PROTOCOL_MAX_PUMP_SECONDS,
@@ -40,7 +42,9 @@ from services.soil3.cloud_strategy.validator import (
     STATE_HASH_FIELD,
     StrategyValidator,
     fingerprint,
+    is_canonical_timestamp,
     is_state_hash,
+    normalize_timestamp,
     parse_timestamp,
 )
 from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS, StateBuilder
@@ -120,7 +124,7 @@ def valid_strategy(state):
         "state_observed_at": state["observed_at"],
         "state_generated_at": state["generated_at"],
         STATE_HASH_FIELD: fingerprint(state),
-        "created_at": "2026-09-16T10:00:00+00:00",
+        "created_at": "2026-09-16T10:00:00Z",
         "actions": [
             {"action_id": "a1", "type": "observe"},
             {"action_id": "a2", "type": "wait", "seconds": 1200},
@@ -290,9 +294,26 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn("Not enabled", row)
         for field in ("device_code", "`observed_at`", "state_sha256"):
             self.assertIn(field, row)
+        self.assertIn("not a binding condition", row)
         legend = next(line for line in doc.splitlines() if line.startswith("“Implemented”"))
         self.assertIn("automated tests", legend)
         self.assertNotIn("verified against real data", legend)
+
+    def test_the_three_descriptions_of_the_binding_agree(self):
+        """Doc row, module README, and schema notes must state one binding, not three."""
+        doc = (ROOT / "docs" / "PROTOCOLS_AND_BOUNDARIES.md").read_text(encoding="utf-8")
+        readme = (ROOT / "services" / "soil3" / "cloud_strategy" / "README.md").read_text(
+            encoding="utf-8"
+        )
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        notes = schema["x-state-binding-notes"]
+        for text in (doc, readme, notes):
+            for field in ("device_code", "observed_at", STATE_HASH_FIELD):
+                self.assertIn(field, text)
+            # demoted in every description, not just in code
+            self.assertIn("not a binding condition", text)
+        for field, _ in STATE_BINDINGS:
+            self.assertIn(field, notes)
 
     def test_schema_and_example_config_are_valid_json(self):
         schema_path = (
@@ -451,10 +472,24 @@ class IdentityBindingTests(unittest.TestCase):
         value["state_observed_at"] = "2026-09-16T11:00:00Z"
         self.assertIn("state_observed_at_mismatch", self.validator.validate(value, self.state).reason_codes)
 
-    def test_generated_at_mismatch_is_rejected(self):
+    def test_generated_at_is_traceability_not_a_binding_condition(self):
+        """A strategy may name any generated_at and still bind: the hash is what pins it."""
         value = valid_strategy(self.state)
         value["state_generated_at"] = "2026-09-16T13:00:00Z"
-        self.assertIn("state_generated_at_mismatch", self.validator.validate(value, self.state).reason_codes)
+        result = self.validator.validate(value, self.state)
+        self.assertTrue(result.accepted)
+        self.assertNotIn("state_generated_at_mismatch", result.reason_codes)
+
+    def test_a_different_generated_at_is_still_caught_by_the_hash(self):
+        """Dropping the comparison left no hole: another snapshot hashes differently."""
+        other = copy.deepcopy(self.state)
+        other["generated_at"] = "2026-09-16T13:00:00Z"
+        self.assertNotEqual(fingerprint(self.state), fingerprint(other))
+        result = self.validator.validate(valid_strategy(self.state), other)
+        self.assertFalse(result.accepted)
+        self.assertIn(f"{STATE_HASH_FIELD}_mismatch", result.reason_codes)
+        for field, _ in STATE_BINDINGS:
+            self.assertNotIn(f"{field}_mismatch", result.reason_codes)
 
     def test_null_binding_field_is_rejected(self):
         for field, code in (
@@ -467,18 +502,18 @@ class IdentityBindingTests(unittest.TestCase):
                 self.assertIn(code, self.validator.validate(value, self.state).reason_codes)
 
     def test_state_without_usable_timestamp_is_rejected(self):
-        for state_key, code in (
-            ("observed_at", "state_has_no_usable_observed_at"),
-            ("generated_at", "state_has_no_usable_generated_at"),
-        ):
+        for _, state_key in STATE_BINDINGS:
             with self.subTest(state_key=state_key):
                 state = copy.deepcopy(self.state)
                 state[state_key] = None
                 value = valid_strategy(self.state)
-                self.assertIn(code, self.validator.validate(value, state).reason_codes)
+                self.assertIn(
+                    f"state_has_no_usable_{state_key}",
+                    self.validator.validate(value, state).reason_codes,
+                )
 
     def test_naive_timestamp_is_not_a_binding(self):
-        for field in ("state_observed_at", "state_generated_at"):
+        for field in CANONICAL_TIMESTAMP_FIELDS:
             with self.subTest(field=field):
                 value = valid_strategy(self.state)
                 value[field] = "2026-09-16T10:00:00"
@@ -486,10 +521,12 @@ class IdentityBindingTests(unittest.TestCase):
                     f"invalid_{field}", self.validator.validate(value, self.state).reason_codes
                 )
 
-    def test_same_instant_in_different_notation_binds(self):
+    def test_equivalent_instant_in_another_notation_is_malformed(self):
+        """strategy.v1 carries one notation, so this is a shape defect, not a mismatch."""
         value = valid_strategy(self.state)
         value["state_observed_at"] = "2026-09-16T18:00:00+08:00"
         result = self.validator.validate(value, self.state)
+        self.assertIn("invalid_state_observed_at", result.reason_codes)
         self.assertNotIn("state_observed_at_mismatch", result.reason_codes)
 
     def test_epoch_observed_at_from_producer_binds(self):
@@ -511,10 +548,8 @@ class IdentityBindingTests(unittest.TestCase):
         )
 
     def test_every_declared_binding_pair_targets_a_real_state_field(self):
-        self.assertEqual(
-            [("state_observed_at", "observed_at"), ("state_generated_at", "generated_at")],
-            list(STATE_BINDINGS),
-        )
+        self.assertEqual([("state_observed_at", "observed_at")], list(STATE_BINDINGS))
+        self.assertNotIn("state_generated_at", dict(STATE_BINDINGS))
         for _, state_key in STATE_BINDINGS:
             self.assertIn(state_key, self.state)
 
@@ -783,6 +818,112 @@ class StateProjectionTests(unittest.TestCase):
             project_state_for_model(state),
         )
 
+    def test_projection_hands_the_model_the_canonical_timestamp_form(self):
+        """state.v1 may hold any notation; the one a proposal copies back is fixed."""
+        state = copy.deepcopy(self.state)
+        state["observed_at"] = datetime(2026, 9, 16, 10, 0, tzinfo=timezone.utc).timestamp()
+        state["generated_at"] = "2026-09-16T18:00:01+08:00"
+        projected = project_state_for_model(state)
+        for key in MODEL_INPUT_TIMESTAMPS:
+            with self.subTest(key=key):
+                self.assertTrue(is_canonical_timestamp(projected[key]))
+                # rewriting the notation must not move the instant it names
+                self.assertEqual(parse_timestamp(state[key]), parse_timestamp(projected[key]))
+
+    def test_projection_does_not_invent_an_unparseable_timestamp(self):
+        """Leaving a bad value alone lets the Validator report it as the defect it is."""
+        state = copy.deepcopy(self.state)
+        state["observed_at"] = "yesterday"
+        self.assertEqual("yesterday", project_state_for_model(state)["observed_at"])
+
+
+class TimestampCanonicalizationTests(unittest.TestCase):
+    """strategy.v1 carries one timestamp notation; the service produces it at both ends."""
+
+    def setUp(self):
+        self.state = real_state()
+        self.validator = StrategyValidator()
+
+    def test_every_notation_of_one_instant_normalizes_to_the_producer_form(self):
+        expected = "2026-09-16T10:00:00Z"
+        for candidate in (
+            expected,
+            "2026-09-16T10:00:00+00:00",
+            "2026-09-16T18:00:00+08:00",
+            "2026-09-16T05:00:00-05:00",
+            "2026-09-16T10:00:00.000Z",
+            datetime(2026, 9, 16, 10, 0, tzinfo=timezone.utc).timestamp(),
+            int(datetime(2026, 9, 16, 10, 0, tzinfo=timezone.utc).timestamp()),
+        ):
+            with self.subTest(candidate=str(candidate)):
+                self.assertEqual(expected, normalize_timestamp(candidate))
+                self.assertTrue(is_canonical_timestamp(normalize_timestamp(candidate)))
+
+    def test_no_instant_is_made_up_from_an_unusable_value(self):
+        for candidate in (None, True, "", "   ", "yesterday", "2026-09-16T10:00:00", 10 ** 400):
+            with self.subTest(candidate=repr(candidate)[:14]):
+                self.assertIsNone(normalize_timestamp(candidate))
+                self.assertFalse(is_canonical_timestamp(candidate))
+
+    def test_the_validator_accepts_only_the_canonical_notation(self):
+        for field in CANONICAL_TIMESTAMP_FIELDS:
+            for candidate in (
+                "2026-09-16T10:00:00+00:00",
+                "2026-09-16T18:00:00+08:00",
+                "2026-09-16T10:00:00",
+                1789000000,
+            ):
+                with self.subTest(field=field, candidate=str(candidate)):
+                    value = valid_strategy(self.state)
+                    value[field] = candidate
+                    self.assertIn(
+                        f"invalid_{field}",
+                        self.validator.validate(value, self.state).reason_codes,
+                    )
+
+    def test_a_provider_written_in_another_offset_is_bound_after_normalization(self):
+        """The instant was right and only the notation was not: the chain fixes it."""
+        value = valid_strategy(self.state)
+        value["state_observed_at"] = "2026-09-16T18:00:00+08:00"
+        value["created_at"] = "2026-09-16T18:00:05+08:00"
+        result = run_chain(
+            state=self.state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(value),
+        )
+        self.assertEqual([], result["validation"]["reason_codes"])
+        strategy = result["validation"]["strategy"]
+        self.assertEqual("2026-09-16T10:00:00Z", strategy["state_observed_at"])
+        self.assertEqual("2026-09-16T10:00:05Z", strategy["created_at"])
+
+    def test_an_unusable_provider_timestamp_survives_to_be_rejected(self):
+        value = valid_strategy(self.state)
+        value["state_observed_at"] = "yesterday"
+        result = run_chain(
+            state=self.state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(value),
+        )
+        # reported as the defect it is, rather than papered over with the snapshot's own
+        self.assertEqual(["invalid_state_observed_at"], result["validation"]["reason_codes"])
+        self.assertIn("yesterday", result["raw_model_response"])
+
+    def test_the_chain_record_still_mirrors_the_snapshot_it_loaded(self):
+        """Canonicalization belongs to strategy.v1; the audit record reports the source."""
+        state = copy.deepcopy(self.state)
+        state["observed_at"] = "2026-09-16T18:00:00+08:00"
+        result = run_chain(
+            state=state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(valid_strategy(self.state)),
+        )
+        self.assertEqual([], result["validation"]["reason_codes"])
+        self.assertEqual("2026-09-16T18:00:00+08:00", result["state_observed_at"])
+        self.assertEqual("2026-09-16T10:00:00Z", result["validation"]["strategy"]["state_observed_at"])
+
 
 class AuditRecordTests(unittest.TestCase):
     """Traceable without persisting unbounded, unvalidated model output."""
@@ -987,6 +1128,11 @@ class PromptVersionTests(unittest.TestCase):
         self.assertIn(STATE_HASH_FIELD, text)
         self.assertIn(f"Never write {STATE_HASH_FIELD}", text)
 
+    def test_prompt_file_states_the_one_timestamp_form(self):
+        text = PROMPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("RFC 3339 UTC", text)
+        self.assertIn("2026-09-16T10:00:05Z", text)
+
     def test_previous_prompt_version_is_no_longer_accepted(self):
         state = real_state()
         value = valid_strategy(state)
@@ -1068,6 +1214,44 @@ class ProtocolConsistencyTests(unittest.TestCase):
     def test_required_fields_are_the_same_set_in_both_places(self):
         self.assertEqual(sorted(REQUIRED_FIELDS), sorted(self.schema["required"]))
         self.assertEqual(set(self.schema["properties"]), set(REQUIRED_FIELDS))
+
+    def timestamp_rule(self, field):
+        """Resolve the schema node a timestamp field declares, following a $defs ref."""
+        node = self.schema["properties"][field]
+        ref = node.get("$ref", "")
+        if ref.startswith("#/$defs/"):
+            return self.schema["$defs"][ref[len("#/$defs/") :]]
+        return node
+
+    def test_the_single_timestamp_form_is_declared_once_and_shared(self):
+        declared = {
+            field: self.schema["properties"][field].get("$ref")
+            for field in CANONICAL_TIMESTAMP_FIELDS
+        }
+        self.assertEqual({"#/$defs/rfc3339_utc"}, set(declared.values()), declared)
+
+    def test_the_timestamp_pattern_is_the_form_the_validator_accepts(self):
+        """Schema and Validator must not disagree about which notation is legal again."""
+        pattern = self.timestamp_rule("created_at")["pattern"]
+        self.assertEqual("string", self.timestamp_rule("state_observed_at")["type"])
+        for candidate in ("2026-09-16T10:00:00Z", "2026-09-16T10:00:00.500000Z"):
+            with self.subTest(accepted=candidate):
+                self.assertTrue(is_canonical_timestamp(candidate))
+                self.assertRegex(candidate, pattern)
+        for candidate in (
+            "2026-09-16T10:00:00+00:00",
+            "2026-09-16T18:00:00+08:00",
+            "2026-09-16T10:00:00",
+            "2026-09-16T10:00:00.5Z",
+            "2026-09-16T10:00:00.500Z",
+            "2026-09-16T10:00:00z",
+            "1789000000",
+            1789000000,
+        ):
+            with self.subTest(rejected=str(candidate)):
+                self.assertFalse(is_canonical_timestamp(candidate))
+                if isinstance(candidate, str):
+                    self.assertNotRegex(candidate, pattern)
 
     def test_content_binding_is_declared_the_same_way_in_both_places(self):
         self.assertIn(STATE_HASH_FIELD, REQUIRED_FIELDS)

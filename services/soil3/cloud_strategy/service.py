@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .client import CloudResponse, CloudStrategyError, OpenAICompatibleClient
-from .validator import STATE_HASH_FIELD, StrategyValidator, fingerprint, parse_timestamp
+from .validator import (
+    CANONICAL_TIMESTAMP_FIELDS,
+    STATE_HASH_FIELD,
+    StrategyValidator,
+    fingerprint,
+    normalize_timestamp,
+    parse_timestamp,
+)
 
 
 MODULE_ROOT = Path(__file__).resolve().parent
@@ -21,6 +28,9 @@ AUDIT_RAW_RESPONSE_MAX_CHARS = 4000
 # provenance maps, an extension slot, and raw source labels; forwarding those
 # would widen what leaves the machine for no decision value.
 MODEL_INPUT_SCALARS = ("schema_version", "device_code", "observed_at", "generated_at")
+# The scalars a proposal copies back out, so the projection carries the one notation
+# strategy.v1 accepts even when the state record itself holds another.
+MODEL_INPUT_TIMESTAMPS = ("observed_at", "generated_at")
 MODEL_INPUT_SECTIONS = {
     "soil": ("humidity_percent", "temperature_c", "ec_raw", "light_lux"),
     "air": ("humidity_percent", "temperature_c"),
@@ -51,11 +61,27 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def canonicalize_timestamps(value: Dict[str, Any], keys: tuple) -> Dict[str, Any]:
+    """Rewrite the given keys into the one timestamp notation strategy.v1 carries.
+
+    A value that cannot be parsed is left as it is, so the Validator reports it instead
+    of the service inventing a timestamp.
+    """
+    for key in keys:
+        canonical = normalize_timestamp(value.get(key))
+        if canonical is not None:
+            value[key] = canonical
+    return value
+
+
 def project_state_for_model(state: Dict[str, Any]) -> Dict[str, Any]:
     """Reduce a state.v1 record to the facts a proposal may legitimately use."""
     projected: Dict[str, Any] = {
         key: state[key] for key in MODEL_INPUT_SCALARS if key in state
     }
+    # These two are the fields a proposal copies back out, and state.v1 passes its own
+    # sources through untouched, so the projection hands over the canonical form.
+    canonicalize_timestamps(projected, MODEL_INPUT_TIMESTAMPS)
     for section, keys in MODEL_INPUT_SECTIONS.items():
         block = state.get(section)
         if not isinstance(block, dict):
@@ -181,10 +207,13 @@ def run_chain(
             parse_error = {"code": "invalid_model_json", "message": str(error)}
             validation = {"accepted": False, "reason_codes": ["invalid_model_json"], "strategy": None}
         else:
-            # Trusted attachment. The prompt forbids emitting state_sha256, and a value
-            # the model supplies anyway is overwritten here from the snapshot actually
-            # loaded, so the binding can never come from provider output. An attempt
-            # stays visible in the audit copy of the raw response and its full-text hash.
+            # Boundary rules, applied before any validation. strategy.v1 carries one
+            # timestamp notation however the provider wrote the instant, and
+            # state_sha256 is computed here from the snapshot actually loaded: neither
+            # the provider's formatting nor a provider-supplied hash can choose or move
+            # the binding. An override attempt stays visible in the audit copy of the
+            # raw response and in the hash of the complete response.
+            canonicalize_timestamps(parsed, CANONICAL_TIMESTAMP_FIELDS)
             parsed[STATE_HASH_FIELD] = fingerprint(state)
             try:
                 validator = build_validator(config)

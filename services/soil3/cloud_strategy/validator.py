@@ -40,16 +40,16 @@ REQUIRED_FIELDS = {
     "model",
     "execution",
 }
-# Instant bindings, as (strategy field, state.v1 field). state.v1 emits no identifier
+# Instant binding, as (strategy field, state.v1 field). state.v1 emits no identifier
 # column of its own, so a proposal names which observation moment it answers with the
-# fields the producer actually writes. state_generated_at is carried for traceability and
-# verified by name, so a swapped timestamp reports itself instead of only surfacing as a
-# hash mismatch.
-STATE_BINDINGS = (
-    ("state_observed_at", "observed_at"),
-    ("state_generated_at", "generated_at"),
-)
-# Content binding. The timestamps say which moment a proposal answers; only a hash of
+# field the producer writes for it. state_generated_at is deliberately absent: the
+# snapshot hash covers it, so it stays traceability metadata, not a binding condition.
+STATE_BINDINGS = (("state_observed_at", "observed_at"),)
+# strategy.v1 carries exactly one timestamp form, the RFC 3339 UTC notation state.v1
+# itself writes for generated_at. state.v1 may hold any notation its sources used, so
+# the service normalizes at the boundary and the Validator accepts only this form.
+CANONICAL_TIMESTAMP_FIELDS = ("state_observed_at", "state_generated_at", "created_at")
+# Content binding. The timestamp says which moment a proposal answers; only a hash of
 # the whole snapshot says which record it answers, because state.v1 declares no
 # uniqueness for (device_code, observed_at). The local service computes this field, so
 # provider output can never choose or move it.
@@ -128,8 +128,21 @@ def parse_timestamp(value: Any) -> Optional[datetime]:
     return parsed
 
 
-def _is_datetime(value: Any) -> bool:
-    return isinstance(value, str) and parse_timestamp(value) is not None
+def normalize_timestamp(value: Any) -> Optional[str]:
+    """Render a timestamp in the one notation strategy.v1 carries.
+
+    This mirrors the form the state.v1 producer writes for `generated_at`, so the
+    canonical form is the project's own rather than an invention of this module.
+    """
+    parsed = parse_timestamp(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def is_canonical_timestamp(value: Any) -> bool:
+    """True only when normalizing the value would not change it."""
+    return isinstance(value, str) and normalize_timestamp(value) == value
 
 
 class StrategyValidator:
@@ -187,10 +200,14 @@ class StrategyValidator:
             # A strategy can only ever name soil3, so a diverging state is a wrong
             # input file rather than a mismatch between two free-form values.
             reasons.append("state_is_not_soil3")
+        # strategy.v1 carries one timestamp notation, so an equivalent but differently
+        # written instant is a malformed record rather than a binding mismatch. The
+        # state side stays lenient because state.v1 passes its sources through.
+        for field in CANONICAL_TIMESTAMP_FIELDS:
+            if not is_canonical_timestamp(value.get(field)):
+                reasons.append(f"invalid_{field}")
         for field, state_key in STATE_BINDINGS:
             claimed = parse_timestamp(value.get(field))
-            if claimed is None:
-                reasons.append(f"invalid_{field}")
             actual = parse_timestamp(state.get(state_key))
             if actual is None:
                 reasons.append(f"state_has_no_usable_{state_key}")
@@ -203,8 +220,6 @@ class StrategyValidator:
             reasons.append(f"invalid_{STATE_HASH_FIELD}")
         elif claimed_hash != fingerprint(state):
             reasons.append(f"{STATE_HASH_FIELD}_mismatch")
-        if not _is_datetime(value.get("created_at")):
-            reasons.append("invalid_created_at")
 
         actions = value.get("actions")
         if not isinstance(actions, list) or not actions:

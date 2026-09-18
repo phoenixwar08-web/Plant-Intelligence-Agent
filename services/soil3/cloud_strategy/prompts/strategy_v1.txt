@@ -10,13 +10,15 @@ Required top-level fields you must write. Every object below accepts only the ke
 - device_code: copy exactly from input device_code
 - state_observed_at: copy exactly from input observed_at
 - state_generated_at: copy exactly from input generated_at
-- created_at: timezone-aware ISO 8601 date-time
+- created_at: RFC 3339 UTC with a trailing Z, for example 2026-09-16T10:00:05Z
 - actions: 1 to 12 ordered actions
 - reason_summary: 1 to 8 short factual reason codes or summaries; no chain-of-thought
 - expected_outcome: object with exactly two keys - soil_moisture (one short non-empty string) and risk_notes (array of up to 8 short non-empty strings, or empty)
 - confidence: number from 0 to 1
 - model: object with exactly provider, name, and prompt_version="strategy-prompt.v2"
 - execution: exactly {"mode":"proposal_only","actuator_commands_allowed":false}
+
+Every timestamp in the input projection is already RFC 3339 UTC with a trailing Z, and every timestamp you write must be in that one form: a value with another offset, without a timezone, or as a number is rejected by the local Validator even when it names the right instant.
 
 Never write state_sha256. The local service computes a SHA-256 fingerprint of the exact state.v1 snapshot and attaches it after parsing your output, so any state_sha256 you produce is discarded and a wrong one cannot bind a proposal to a different snapshot.
 
