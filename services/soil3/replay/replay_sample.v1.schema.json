@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plant-agent.local/schemas/replay_sample.v1.schema.json",
+  "title": "soil3 Replay Sample V1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "sample_id",
+    "device_code",
+    "replay_at",
+    "state",
+    "source_summary",
+    "fact_digest",
+    "fact_window",
+    "source_policy"
+  ],
+  "properties": {
+    "schema_version": {"const": "replay_sample.v1"},
+    "sample_id": {"type": "string", "pattern": "^replay-[0-9a-f]{24}$"},
+    "device_code": {"const": "soil3"},
+    "replay_at": {"type": "string", "format": "date-time"},
+    "state": {
+      "type": "object",
+      "required": ["schema_version", "device_code", "generated_at"],
+      "properties": {
+        "schema_version": {"const": "state.v1"},
+        "device_code": {"const": "soil3"}
+      }
+    },
+    "source_summary": {"type": "object"},
+    "fact_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "fact_window": {
+      "type": "object",
+      "required": ["first_sensor_at", "last_sensor_at", "sensor_count", "watering_count"]
+    },
+    "source_policy": {
+      "type": "object",
+      "required": ["cutoff_inclusive", "future_data_excluded", "source_timezone"],
+      "properties": {
+        "cutoff_inclusive": {"const": true},
+        "future_data_excluded": {"const": true},
+        "source_timezone": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "additionalProperties": false
+}
