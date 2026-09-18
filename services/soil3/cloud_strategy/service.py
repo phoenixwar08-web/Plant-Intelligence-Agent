@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import uuid
@@ -9,15 +10,86 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .client import CloudResponse, CloudStrategyError, OpenAICompatibleClient
-from .validator import StrategyValidator
+from .validator import StrategyValidator, parse_timestamp
 
 
 MODULE_ROOT = Path(__file__).resolve().parent
 DEFAULT_PROMPT = MODULE_ROOT / "prompts" / "strategy_v1.txt"
+AUDIT_RAW_RESPONSE_MAX_CHARS = 4000
+
+# Only what a watering proposal can reason about. state.v1 additionally carries
+# provenance maps, an extension slot, and raw source labels; forwarding those
+# would widen what leaves the machine for no decision value.
+MODEL_INPUT_SCALARS = ("schema_version", "device_code", "observed_at", "generated_at")
+MODEL_INPUT_SECTIONS = {
+    "soil": ("humidity_percent", "temperature_c", "ec_raw", "light_lux"),
+    "air": ("humidity_percent", "temperature_c"),
+    "trends": ("humidity_1h", "humidity_3h", "humidity_6h"),
+    "irrigation": ("pump_active", "last_water_at", "last_water_sec", "total_cycles", "total_water_sec"),
+    "safety": ("field_capacity", "target_low", "hard_safety_low"),
+    "data_quality": ("soil_age_sec", "air_age_sec", "phase3_state_age_sec", "watering_history_age_sec"),
+}
+# Mirrors the Phase3 flag names state.v1 copies through; a test asserts the two
+# lists stay equal so a new flag is a deliberate decision, not a silent leak.
+MODEL_INPUT_SAFETY_FLAGS = (
+    "pump_active",
+    "pending_soak",
+    "water_delivery_suspect",
+    "reservoir_empty_suspect",
+    "low_wet_recovery_suspect",
+    "sensor_fault",
+    "dynamic_cooldown",
+    "predictor_circuit",
+    "watering_trigger_guard",
+    "recent_response_guard",
+    "hard_safety_low_guard",
+    "cloud_protection",
+)
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def project_state_for_model(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Reduce a state.v1 record to the facts a proposal may legitimately use."""
+    projected: Dict[str, Any] = {
+        key: state[key] for key in MODEL_INPUT_SCALARS if key in state
+    }
+    for section, keys in MODEL_INPUT_SECTIONS.items():
+        block = state.get(section)
+        if not isinstance(block, dict):
+            continue
+        picked = {key: block[key] for key in keys if key in block}
+        if section == "safety" and isinstance(block.get("flags"), dict):
+            flags = block["flags"]
+            picked["flags"] = {key: flags[key] for key in MODEL_INPUT_SAFETY_FLAGS if key in flags}
+        if picked:
+            projected[section] = picked
+    return projected
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
+
+
+def fingerprint(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def bind_model_response(content: Optional[str]) -> Dict[str, Any]:
+    """Store a bounded copy of the model text plus a fingerprint of the whole thing.
+
+    An unvalidated response is exactly the artifact that may carry smuggled keys, so
+    it is not kept verbatim without limit; the hash still proves what was received.
+    """
+    text = content if isinstance(content, str) else ""
+    return {
+        "raw_model_response": text[:AUDIT_RAW_RESPONSE_MAX_CHARS],
+        "raw_model_response_chars": len(text),
+        "raw_model_response_truncated": len(text) > AUDIT_RAW_RESPONSE_MAX_CHARS,
+        "raw_model_response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -78,6 +150,7 @@ def run_chain(
 ) -> Dict[str, Any]:
     run_id = str(uuid.uuid4())
     started_at = utc_now()
+    model_input = project_state_for_model(state)
     raw_content = fixture_content
     cloud_meta: Dict[str, Any] = {
         "provider": "fixture" if fixture_content is not None else config.get("provider"),
@@ -95,7 +168,7 @@ def run_chain(
             else OpenAICompatibleClient(config, api_key)
         )
         try:
-            response: CloudResponse = client.complete(prompt, state)
+            response: CloudResponse = client.complete(prompt, model_input)
             raw_content = response.content
             cloud_meta = {
                 "provider": response.provider,
@@ -134,15 +207,17 @@ def run_chain(
         "run_id": run_id,
         "started_at": started_at,
         "finished_at": utc_now(),
-        "state_id": state.get("state_id"),
-        "plant_id": state.get("plant_id"),
-        "state_snapshot": state,
+        "device_code": state.get("device_code"),
+        "state_observed_at": state.get("observed_at"),
+        "state_generated_at": state.get("generated_at"),
+        "state_sha256": fingerprint(state),
+        "model_input": model_input,
         "mode": "proposal_only",
         "actuator_commands_allowed": False,
         "cloud": cloud_meta,
         "failure": failure,
         "parse_error": parse_error,
-        "raw_model_response": raw_content,
+        **bind_model_response(raw_content),
         "validation": validation,
     }
 
@@ -163,8 +238,11 @@ def main() -> None:
     if not state_path_value:
         parser.error("--state or config state_path is required")
     state = load_json(Path(state_path_value))
-    if state.get("plant_id") != "soil3" or not state.get("state_id"):
-        raise SystemExit("state input must be a soil3 state with state_id")
+    if state.get("device_code") != "soil3":
+        raise SystemExit("state input must be a soil3 state.v1 record")
+    for field in ("observed_at", "generated_at"):
+        if parse_timestamp(state.get(field)) is None:
+            raise SystemExit(f"state input has no usable {field}")
 
     prompt = args.prompt.read_text(encoding="utf-8")
     fixture_content = args.fixture_response.read_text(encoding="utf-8") if args.fixture_response else None
@@ -176,7 +254,8 @@ def main() -> None:
         json.dumps(
             {
                 "run_id": result["run_id"],
-                "state_id": result["state_id"],
+                "device_code": result["device_code"],
+                "state_observed_at": result["state_observed_at"],
                 "accepted": result["validation"]["accepted"],
                 "reason_codes": result["validation"]["reason_codes"],
                 "audit_path": str(audit_path),

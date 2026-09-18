@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -35,26 +36,54 @@ class OpenAICompatibleClient:
         self.api_key = api_key
         self.session = session
 
-    def complete(self, system_prompt: str, state: Dict[str, Any]) -> CloudResponse:
+    def _request_plan(self, system_prompt: str, model_input: Dict[str, Any]):
+        """Read the runtime config once, converting any defect into a stable error code.
+
+        These keys are only reached after the enabled and api-key gates pass, which is
+        exactly when a malformed runtime config used to raise a bare KeyError out of the
+        chain — no reason code, no audit record. Same fail-closed contract the Validator
+        config already has.
+        """
+        try:
+            base_url = self.config["base_url"]
+            model = self.config["model"]
+            if not isinstance(base_url, str) or not base_url.strip():
+                raise TypeError("base_url must be a non-empty string")
+            if not isinstance(model, str) or not model.strip():
+                raise TypeError("model must be a non-empty string")
+            endpoint = base_url.rstrip("/") + "/chat/completions"
+            payload: Dict[str, Any] = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(model_input, ensure_ascii=False, separators=(",", ":"))},
+                ],
+                "temperature": float(self.config.get("temperature", 0)),
+                "max_tokens": int(self.config.get("max_tokens", 1200)),
+            }
+            timeout = float(self.config.get("timeout_seconds", 30))
+            retries = max(0, int(self.config.get("max_retries", 1)))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise CloudStrategyError("invalid_provider_config", "provider configuration is malformed") from None
+
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise CloudStrategyError("invalid_provider_config", "timeout_seconds must be a positive finite number")
+        if not math.isfinite(payload["temperature"]):
+            raise CloudStrategyError("invalid_provider_config", "temperature must be a finite number")
+        if payload["max_tokens"] < 1:
+            raise CloudStrategyError("invalid_provider_config", "max_tokens must be positive")
+        if self.config.get("json_response_format", True):
+            payload["response_format"] = {"type": "json_object"}
+        return endpoint, payload, timeout, retries
+
+    def complete(self, system_prompt: str, model_input: Dict[str, Any]) -> CloudResponse:
         if not self.config.get("enabled", False):
             raise CloudStrategyError("provider_disabled", "cloud strategy provider is disabled")
         if not self.api_key:
             raise CloudStrategyError("missing_api_key", "cloud strategy API key is not configured")
 
-        endpoint = self.config["base_url"].rstrip("/") + "/chat/completions"
-        payload: Dict[str, Any] = {
-            "model": self.config["model"],
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(state, ensure_ascii=False, separators=(",", ":"))},
-            ],
-            "temperature": float(self.config.get("temperature", 0)),
-            "max_tokens": int(self.config.get("max_tokens", 1200)),
-        }
-        if self.config.get("json_response_format", True):
-            payload["response_format"] = {"type": "json_object"}
+        endpoint, payload, timeout, retries = self._request_plan(system_prompt, model_input)
 
-        retries = max(0, int(self.config.get("max_retries", 1)))
         for attempt in range(retries + 1):
             try:
                 response = self.session.post(
@@ -64,7 +93,7 @@ class OpenAICompatibleClient:
                         "Content-Type": "application/json",
                     },
                     json=payload,
-                    timeout=float(self.config.get("timeout_seconds", 30)),
+                    timeout=timeout,
                 )
             except requests.Timeout as error:
                 if attempt < retries:

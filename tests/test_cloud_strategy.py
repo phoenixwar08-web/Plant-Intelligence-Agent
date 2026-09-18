@@ -1,16 +1,33 @@
 import copy
+import hashlib
 import json
+import os
 import tempfile
 import unittest
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from services.soil3.cloud_strategy.client import CloudStrategyError, OpenAICompatibleClient
-from services.soil3.cloud_strategy.service import append_audit, parse_model_json, run_chain, write_json_atomic
+from services.soil3.cloud_strategy.service import (
+    AUDIT_RAW_RESPONSE_MAX_CHARS,
+    MODEL_INPUT_SAFETY_FLAGS,
+    MODEL_INPUT_SCALARS,
+    MODEL_INPUT_SECTIONS,
+    append_audit,
+    bind_model_response,
+    fingerprint,
+    parse_model_json,
+    project_state_for_model,
+    run_chain,
+    write_json_atomic,
+)
 from services.soil3.cloud_strategy.validator import (
     ALLOWED_EXECUTION_FIELDS,
     ALLOWED_EXPECTED_OUTCOME_FIELDS,
     ALLOWED_MODEL_FIELDS,
+    PROMPT_VERSION,
     PROTOCOL_MAX_ACTIONS,
     PROTOCOL_MAX_PUMP_SECONDS,
     PROTOCOL_MAX_REASON_SUMMARY_ITEMS,
@@ -20,12 +37,16 @@ from services.soil3.cloud_strategy.validator import (
     REQUIRED_EXPECTED_OUTCOME_FIELDS,
     REQUIRED_FIELDS,
     REQUIRED_MODEL_FIELDS,
+    STATE_BINDINGS,
     StrategyValidator,
+    parse_timestamp,
 )
+from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS, StateBuilder
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "services" / "soil3" / "cloud_strategy" / "strategy.v1.schema.json"
+PROMPT_PATH = ROOT / "services" / "soil3" / "cloud_strategy" / "prompts" / "strategy_v1.txt"
 EXAMPLE_CONFIG_PATH = ROOT / "config" / "cloud_strategy.example.json"
 
 
@@ -48,35 +69,87 @@ class FakeSession:
         return self.response
 
 
+def real_state():
+    """A state.v1 record from the actual producer, not a hand-made look-alike.
+
+    strategy.v1 binds to fields state.v1 really writes, so every fixture here goes
+    through StateBuilder: if the producer changes shape, these tests notice.
+    """
+    return StateBuilder("soil3").build(
+        {
+            "observed_at": "2026-09-16T10:00:00Z",
+            "generated_at": "2026-09-16T10:00:01Z",
+            "sensor_readings": [
+                {"timestamp": "2026-09-16T09:55:00Z", "humidity": 31.4, "temperature": 24.1, "ec_raw": 680, "lux": 1200},
+                {"timestamp": "2026-09-16T07:00:00Z", "humidity": 33.0, "temperature": 22.0},
+            ],
+            "system_state": {
+                "pump_active": False,
+                "pump_total_cycles": 42,
+                "total_water_sec_dispensed": 3100,
+                "sensor_fault": 0,
+                "hard_safety_low_guard": 1,
+            },
+            "watering_history": [{"timestamp": "2026-09-15T08:00:00Z", "water_sec": 60}],
+            "environment": {
+                "air": {
+                    "humidity_percent": 58.0,
+                    "temperature_c": 26.4,
+                    "observed_at": "2026-09-16T09:50:00Z",
+                    "source": "environment.air",
+                }
+            },
+            "parameters": {"FC": 38.0, "TARGET_LOW": 40.0, "HARD_SAFETY_LOW": 25.0, "K_P": 1.2},
+        }
+    )
+
+
 def sample_state():
-    return {
-        "schema_version": "state.v1",
-        "state_id": str(uuid.uuid4()),
-        "plant_id": "soil3",
-        "generated_at": "2026-09-16T10:00:00+00:00",
-        "sensors": {"soil_moisture_pct": 38.7},
-        "safety_state": {"sensor_stale": False, "actuator_commands_allowed": False},
-    }
+    return real_state()
 
 
 def valid_strategy(state):
     return {
         "schema_version": "strategy.v1",
         "strategy_id": str(uuid.uuid4()),
-        "state_id": state["state_id"],
-        "plant_id": "soil3",
+        "device_code": state["device_code"],
+        "state_observed_at": state["observed_at"],
+        "state_generated_at": state["generated_at"],
         "created_at": "2026-09-16T10:00:00+00:00",
         "actions": [
             {"action_id": "a1", "type": "observe"},
             {"action_id": "a2", "type": "wait", "seconds": 1200},
             {"action_id": "a3", "type": "stop"},
         ],
-        "reason_summary": ["soil_moisture_declining", "cloud_strategy_shadow_only"],
+        "reason_summary": ["soil_below_target_low", "cloud_strategy_shadow_only"],
         "expected_outcome": {"soil_moisture": "continue_observation", "risk_notes": []},
         "confidence": 0.78,
-        "model": {"provider": "fixture", "name": "fixture", "prompt_version": "strategy-prompt.v1"},
+        "model": {"provider": "fixture", "name": "fixture", "prompt_version": PROMPT_VERSION},
         "execution": {"mode": "proposal_only", "actuator_commands_allowed": False},
     }
+
+
+def chain_config(**overrides):
+    config = {
+        "enabled": True,
+        "provider": "test",
+        "base_url": "https://example.invalid/v1",
+        "model": "test-model",
+        "timeout_seconds": 1,
+        "max_retries": 0,
+        "temperature": 0,
+        "max_tokens": 200,
+        "json_response_format": True,
+        "validator": {
+            "max_actions": 12,
+            "max_pump_seconds": 120,
+            "max_wait_seconds": 86400,
+            "max_total_pump_seconds": 240,
+            "max_total_seconds": 86400,
+        },
+    }
+    config.update(overrides)
+    return config
 
 
 class ValidatorTests(unittest.TestCase):
@@ -107,8 +180,8 @@ class ValidatorTests(unittest.TestCase):
 
     def test_state_mismatch_is_rejected(self):
         value = valid_strategy(self.state)
-        value["state_id"] = str(uuid.uuid4())
-        self.assertIn("state_id_mismatch", self.validator.validate(value, self.state).reason_codes)
+        value["state_observed_at"] = "2026-01-01T00:00:00Z"
+        self.assertIn("state_observed_at_mismatch", self.validator.validate(value, self.state).reason_codes)
 
     def test_action_after_stop_is_rejected(self):
         value = valid_strategy(self.state)
@@ -140,24 +213,7 @@ class ValidatorTests(unittest.TestCase):
 
 class ClientAndChainTests(unittest.TestCase):
     def config(self):
-        return {
-            "enabled": True,
-            "provider": "test",
-            "base_url": "https://example.invalid/v1",
-            "model": "test-model",
-            "timeout_seconds": 1,
-            "max_retries": 0,
-            "temperature": 0,
-            "max_tokens": 200,
-            "json_response_format": True,
-            "validator": {
-                "max_actions": 12,
-                "max_pump_seconds": 120,
-                "max_wait_seconds": 86400,
-                "max_total_pump_seconds": 240,
-                "max_total_seconds": 86400,
-            },
-        }
+        return chain_config()
 
     def test_client_requires_key(self):
         with self.assertRaises(CloudStrategyError) as context:
@@ -203,7 +259,10 @@ class ClientAndChainTests(unittest.TestCase):
         )
         self.assertTrue(result["validation"]["accepted"])
         self.assertFalse(result["actuator_commands_allowed"])
-        self.assertEqual(state, result["state_snapshot"])
+        self.assertEqual(project_state_for_model(state), result["model_input"])
+        self.assertEqual(fingerprint(state), result["state_sha256"])
+        self.assertNotIn("state_snapshot", result)
+        self.assertEqual(state["observed_at"], result["state_observed_at"])
         with tempfile.TemporaryDirectory() as directory:
             path = append_audit(Path(directory), result)
             self.assertEqual(1, len(path.read_text(encoding="utf-8").splitlines()))
@@ -346,42 +405,101 @@ class NumericSafetyTests(unittest.TestCase):
 
 
 class IdentityBindingTests(unittest.TestCase):
+    """A proposal must name the snapshot it came from, using fields that exist."""
+
     def setUp(self):
         self.state = sample_state()
         self.validator = StrategyValidator()
 
-    def test_null_state_id_is_not_a_match(self):
+    def test_real_producer_state_is_bindable(self):
+        result = self.validator.validate(valid_strategy(self.state), self.state)
+        self.assertEqual([], result.reason_codes)
+        self.assertTrue(result.accepted)
+
+    def test_wrong_device_code_is_rejected(self):
         value = valid_strategy(self.state)
+        value["device_code"] = "soil2"
+        self.assertIn("invalid_device_code", self.validator.validate(value, self.state).reason_codes)
+
+    def test_state_from_another_device_is_rejected(self):
         state = copy.deepcopy(self.state)
-        value["state_id"] = None
-        state["state_id"] = None
+        state["device_code"] = "soil3-backup"
+        value = valid_strategy(self.state)
         result = self.validator.validate(value, state)
         self.assertFalse(result.accepted)
-        self.assertIn("invalid_state_id", result.reason_codes)
+        self.assertIn("state_is_not_soil3", result.reason_codes)
 
-    def test_state_without_usable_state_id_is_rejected(self):
-        state = copy.deepcopy(self.state)
-        claimed = state["state_id"]
-        del state["state_id"]
+    def test_observed_at_mismatch_is_rejected(self):
         value = valid_strategy(self.state)
-        value["state_id"] = claimed
+        value["state_observed_at"] = "2026-09-16T11:00:00Z"
+        self.assertIn("state_observed_at_mismatch", self.validator.validate(value, self.state).reason_codes)
+
+    def test_generated_at_mismatch_is_rejected(self):
+        value = valid_strategy(self.state)
+        value["state_generated_at"] = "2026-09-16T13:00:00Z"
+        self.assertIn("state_generated_at_mismatch", self.validator.validate(value, self.state).reason_codes)
+
+    def test_null_binding_field_is_rejected(self):
+        for field, code in (
+            ("state_observed_at", "invalid_state_observed_at"),
+            ("state_generated_at", "invalid_state_generated_at"),
+        ):
+            with self.subTest(field=field):
+                value = valid_strategy(self.state)
+                value[field] = None
+                self.assertIn(code, self.validator.validate(value, self.state).reason_codes)
+
+    def test_state_without_usable_timestamp_is_rejected(self):
+        for state_key, code in (
+            ("observed_at", "state_has_no_usable_observed_at"),
+            ("generated_at", "state_has_no_usable_generated_at"),
+        ):
+            with self.subTest(state_key=state_key):
+                state = copy.deepcopy(self.state)
+                state[state_key] = None
+                value = valid_strategy(self.state)
+                self.assertIn(code, self.validator.validate(value, state).reason_codes)
+
+    def test_naive_timestamp_is_not_a_binding(self):
+        for field in ("state_observed_at", "state_generated_at"):
+            with self.subTest(field=field):
+                value = valid_strategy(self.state)
+                value[field] = "2026-09-16T10:00:00"
+                self.assertIn(
+                    f"invalid_{field}", self.validator.validate(value, self.state).reason_codes
+                )
+
+    def test_same_instant_in_different_notation_binds(self):
+        value = valid_strategy(self.state)
+        value["state_observed_at"] = "2026-09-16T18:00:00+08:00"
+        result = self.validator.validate(value, self.state)
+        self.assertNotIn("state_observed_at_mismatch", result.reason_codes)
+
+    def test_epoch_observed_at_from_producer_binds(self):
+        """state.v1 copies observed_at through untouched, so it can arrive as an epoch."""
+        state = copy.deepcopy(self.state)
+        state["observed_at"] = datetime(2026, 9, 16, 10, 0, tzinfo=timezone.utc).timestamp()
+        value = valid_strategy(self.state)
         result = self.validator.validate(value, state)
-        self.assertFalse(result.accepted)
-        self.assertIn("state_has_no_usable_state_id", result.reason_codes)
+        self.assertNotIn("state_observed_at_mismatch", result.reason_codes)
+        self.assertNotIn("state_has_no_usable_observed_at", result.reason_codes)
 
-    def test_blank_state_id_on_either_side_is_rejected(self):
+    def test_unparseable_observed_at_is_not_a_binding(self):
         state = copy.deepcopy(self.state)
-        state["state_id"] = "   "
+        state["observed_at"] = "yesterday"
         value = valid_strategy(self.state)
-        value["state_id"] = "   "
-        self.assertIn("invalid_state_id", self.validator.validate(value, state).reason_codes)
+        self.assertIn(
+            "state_has_no_usable_observed_at",
+            self.validator.validate(value, state).reason_codes,
+        )
 
-    def test_non_string_state_id_is_rejected(self):
-        state = copy.deepcopy(self.state)
-        state["state_id"] = 12345
-        value = valid_strategy(self.state)
-        value["state_id"] = 12345
-        self.assertIn("invalid_state_id", self.validator.validate(value, state).reason_codes)
+    def test_every_declared_binding_pair_targets_a_real_state_field(self):
+        self.assertEqual(
+            [("state_observed_at", "observed_at"), ("state_generated_at", "generated_at")],
+            list(STATE_BINDINGS),
+        )
+        for _, state_key in STATE_BINDINGS:
+            self.assertIn(state_key, self.state)
 
 
 class ExecutionFieldTests(unittest.TestCase):
@@ -467,6 +585,257 @@ class DescriptiveFieldTests(unittest.TestCase):
                 result = self.validator.validate(value, self.state)
                 self.assertFalse(result.accepted)
                 self.assertIn(f"model_unknown_fields:{key}", result.reason_codes)
+
+
+class StateProjectionTests(unittest.TestCase):
+    """Only the facts a proposal can use may leave the machine."""
+
+    def setUp(self):
+        self.state = real_state()
+
+    def test_projection_carries_only_declared_sections_and_scalars(self):
+        projected = project_state_for_model(self.state)
+        self.assertEqual(
+            set(MODEL_INPUT_SCALARS) & set(self.state), set(projected) - set(MODEL_INPUT_SECTIONS)
+        )
+        for section, keys in MODEL_INPUT_SECTIONS.items():
+            self.assertIn(section, projected)
+            self.assertTrue(
+                set(projected[section]) <= set(keys) | {"flags"},
+                f"{section} carried an undeclared key",
+            )
+
+    def test_provenance_and_extension_blocks_are_never_forwarded(self):
+        projected = project_state_for_model(self.state)
+        for section in ("extensions", "fact_sources", "source_timestamps", "vision"):
+            self.assertNotIn(section, projected)
+
+    def test_runtime_paths_in_state_never_reach_the_model(self):
+        state = copy.deepcopy(self.state)
+        state["extensions"]["water_log"] = "/root/water/phase3.sqlite"
+        state["fact_sources"]["soil"] = "/root/water/state.json"
+        state["source_timestamps"]["phase3_state"] = "/root/water/state_file.json"
+        blob = json.dumps(project_state_for_model(state))
+        for secret in ("root", "sqlite", "water_log", "state_file"):
+            self.assertNotIn(secret, blob)
+
+    def test_unknown_safety_flags_are_dropped(self):
+        state = copy.deepcopy(self.state)
+        state["safety"]["flags"]["custom_shell"] = "rm -rf /"
+        state["safety"]["flags"]["note"] = "/root/water/relay.json"
+        projected = project_state_for_model(state)
+        self.assertNotIn("custom_shell", projected["safety"]["flags"])
+        self.assertNotIn("note", projected["safety"]["flags"])
+        self.assertNotIn("rm -rf", json.dumps(projected))
+
+    def test_safety_flag_allow_list_matches_the_producer(self):
+        self.assertEqual(sorted(PHASE3_SAFETY_FLAG_KEYS), sorted(MODEL_INPUT_SAFETY_FLAGS))
+
+    def test_decision_relevant_flags_survive_projection(self):
+        flags = project_state_for_model(self.state)["safety"]["flags"]
+        self.assertIn("pump_active", flags)
+        self.assertIn("hard_safety_low_guard", flags)
+
+    def test_projection_is_not_a_control_channel(self):
+        blob = json.dumps(project_state_for_model(self.state))
+        for token in ("pump_seconds", "gpio", "relay", "mqtt", "cmd", "manual_water", "action"):
+            self.assertNotIn(token, blob)
+
+    def test_projection_ignores_sections_the_state_does_not_have(self):
+        state = {"schema_version": "state.v1", "device_code": "soil3", "soil": "not-a-dict"}
+        self.assertEqual(
+            {"schema_version": "state.v1", "device_code": "soil3"},
+            project_state_for_model(state),
+        )
+
+
+class AuditRecordTests(unittest.TestCase):
+    """Traceable without persisting unbounded, unvalidated model output."""
+
+    def test_short_response_is_stored_verbatim_with_a_fingerprint(self):
+        text = '{"a":1}'
+        bound = bind_model_response(text)
+        self.assertEqual(text, bound["raw_model_response"])
+        self.assertFalse(bound["raw_model_response_truncated"])
+        self.assertEqual(len(text), bound["raw_model_response_chars"])
+        self.assertEqual(hashlib.sha256(text.encode("utf-8")).hexdigest(), bound["raw_model_response_sha256"])
+
+    def test_oversized_response_is_bounded_but_still_identifiable(self):
+        text = "x" * (AUDIT_RAW_RESPONSE_MAX_CHARS + 5000)
+        bound = bind_model_response(text)
+        self.assertEqual(AUDIT_RAW_RESPONSE_MAX_CHARS, len(bound["raw_model_response"]))
+        self.assertTrue(bound["raw_model_response_truncated"])
+        self.assertEqual(len(text), bound["raw_model_response_chars"])
+        self.assertEqual(hashlib.sha256(text.encode("utf-8")).hexdigest(), bound["raw_model_response_sha256"])
+
+    def test_absent_response_hashes_the_empty_string(self):
+        bound = bind_model_response(None)
+        self.assertEqual("", bound["raw_model_response"])
+        self.assertEqual(0, bound["raw_model_response_chars"])
+        self.assertEqual(hashlib.sha256(b"").hexdigest(), bound["raw_model_response_sha256"])
+
+    def test_chain_record_stores_projection_not_full_snapshot(self):
+        state = real_state()
+        state["extensions"]["water_log"] = "/root/water/phase3.sqlite"
+        result = run_chain(
+            state=state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content="x" * (AUDIT_RAW_RESPONSE_MAX_CHARS + 10),
+        )
+        self.assertNotIn("state_snapshot", result)
+        self.assertNotIn("water_log", json.dumps(result["model_input"]))
+        self.assertTrue(result["raw_model_response_truncated"])
+        self.assertEqual(64, len(result["state_sha256"]))
+
+    def test_fingerprint_is_stable_and_content_sensitive(self):
+        first = fingerprint({"b": 1, "a": [1, 2]})
+        self.assertEqual(first, fingerprint({"a": [1, 2], "b": 1}))
+        self.assertNotEqual(first, fingerprint({"a": [1, 2], "b": 2}))
+
+
+class NoRequestSession:
+    def post(self, *args, **kwargs):
+        raise AssertionError("a malformed config must fail before any request is sent")
+
+
+class ProviderConfigTests(unittest.TestCase):
+    """A broken runtime config fails closed with a code, not a bare traceback."""
+
+    MALFORMED = {
+        "missing base_url": {"del": "base_url"},
+        "missing model": {"del": "model"},
+        "blank base_url": {"base_url": "   "},
+        "non-string base_url": {"base_url": 42},
+        "null timeout": {"timeout_seconds": None},
+        "non-numeric timeout": {"timeout_seconds": "soon"},
+        "zero timeout": {"timeout_seconds": 0},
+        "infinite timeout": {"timeout_seconds": float("inf")},
+        "non-numeric retries": {"max_retries": "lots"},
+        "non-numeric temperature": {"temperature": "warm"},
+        "zero max_tokens": {"max_tokens": 0},
+    }
+
+    def test_every_malformed_config_yields_one_stable_reason_code(self):
+        state = real_state()
+        for label, override in self.MALFORMED.items():
+            with self.subTest(config=label):
+                config = chain_config()
+                if "del" in override:
+                    del config[override["del"]]
+                else:
+                    config.update(override)
+                with mock.patch.dict(os.environ, {"CLOUD_STRATEGY_API_KEY": "secret"}):
+                    result = run_chain(
+                        state=state, config=config, prompt="prompt", session=NoRequestSession()
+                    )
+                self.assertFalse(result["validation"]["accepted"])
+                self.assertEqual(["invalid_provider_config"], result["validation"]["reason_codes"])
+                self.assertEqual("invalid_provider_config", result["failure"]["code"])
+
+    def test_complete_raises_the_wrapped_error_type(self):
+        client = OpenAICompatibleClient(chain_config(base_url=None), "secret", session=NoRequestSession())
+        with self.assertRaises(CloudStrategyError) as context:
+            client.complete("prompt", project_state_for_model(real_state()))
+        self.assertEqual("invalid_provider_config", context.exception.code)
+
+    def test_valid_config_still_reaches_the_provider(self):
+        state = real_state()
+        session = FakeSession(FakeResponse(200, {"choices": [{"message": {"content": "{}"}}]}))
+        client = OpenAICompatibleClient(chain_config(), "secret", session=session)
+        client.complete("prompt", project_state_for_model(state))
+        self.assertEqual(1, len(session.calls))
+
+    def test_broken_validator_config_remains_distinct(self):
+        config = chain_config(validator={"max_actions": 9999})
+        with mock.patch.dict(os.environ, {"CLOUD_STRATEGY_API_KEY": "secret"}):
+            result = run_chain(
+                state=real_state(),
+                config=config,
+                prompt="prompt",
+                fixture_content=json.dumps(valid_strategy(real_state())),
+            )
+        self.assertEqual(["invalid_validator_config"], result["validation"]["reason_codes"])
+
+
+class RealChainIntegrationTests(unittest.TestCase):
+    """The chain on the producer's own record shape, not a hand-made look-alike."""
+
+    def test_chain_closes_on_a_real_state_v1_record(self):
+        state = real_state()
+        result = run_chain(
+            state=state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(valid_strategy(state)),
+        )
+        self.assertEqual([], result["validation"]["reason_codes"])
+        self.assertTrue(result["validation"]["accepted"])
+        self.assertEqual("soil3", result["device_code"])
+        self.assertEqual(state["observed_at"], result["state_observed_at"])
+
+    def test_proposal_built_for_another_snapshot_is_rejected(self):
+        state = real_state()
+        stale = copy.deepcopy(state)
+        stale["observed_at"] = "2026-09-16T02:00:00Z"
+        result = run_chain(
+            state=stale,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(valid_strategy(state)),
+        )
+        self.assertIn("state_observed_at_mismatch", result["validation"]["reason_codes"])
+
+    def test_audit_round_trip_of_a_real_chain_run(self):
+        state = real_state()
+        result = run_chain(
+            state=state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(valid_strategy(state)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = append_audit(Path(directory), result)
+            stored = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        self.assertTrue(stored["validation"]["accepted"])
+        self.assertEqual(state["generated_at"], stored["state_generated_at"])
+        self.assertEqual(fingerprint(state), stored["state_sha256"])
+
+    def test_binding_fields_exist_in_producer_output(self):
+        state = real_state()
+        for _, state_key in STATE_BINDINGS:
+            self.assertIn(state_key, state)
+        self.assertEqual("soil3", state["device_code"])
+
+
+class PromptVersionTests(unittest.TestCase):
+    """Prompt text and its version label must not drift apart again."""
+
+    def test_schema_pin_matches_the_validator_constant(self):
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(PROMPT_VERSION, schema["properties"]["model"]["properties"]["prompt_version"]["const"])
+
+    def test_prompt_file_declares_its_own_version(self):
+        text = PROMPT_PATH.read_text(encoding="utf-8")
+        self.assertIn(f'prompt_version="{PROMPT_VERSION}"', text)
+        self.assertNotIn("strategy-prompt.v1", text)
+
+    def test_prompt_file_describes_the_binding_fields_it_requires(self):
+        text = PROMPT_PATH.read_text(encoding="utf-8")
+        for field, _ in STATE_BINDINGS:
+            self.assertIn(field, text)
+        self.assertIn("device_code", text)
+        self.assertNotIn("state_id", text)
+        self.assertNotIn("plant_id", text)
+
+    def test_previous_prompt_version_is_no_longer_accepted(self):
+        state = real_state()
+        value = valid_strategy(state)
+        value["model"]["prompt_version"] = "strategy-prompt.v1"
+        self.assertIn(
+            "invalid_model_field:prompt_version",
+            StrategyValidator().validate(value, state).reason_codes,
+        )
 
 
 class ProtocolConsistencyTests(unittest.TestCase):

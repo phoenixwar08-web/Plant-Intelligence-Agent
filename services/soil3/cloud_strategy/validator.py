@@ -3,11 +3,13 @@ from __future__ import annotations
 import math
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
 ALLOWED_ACTIONS = {"water", "wait", "observe", "stop"}
+EXPECTED_DEVICE_CODE = "soil3"
+PROMPT_VERSION = "strategy-prompt.v2"
 PROTOCOL_MAX_ACTIONS = 12
 PROTOCOL_MAX_PUMP_SECONDS = 120.0
 PROTOCOL_MAX_WAIT_SECONDS = 86400.0
@@ -24,8 +26,9 @@ ALLOWED_MODEL_FIELDS = REQUIRED_MODEL_FIELDS
 REQUIRED_FIELDS = {
     "schema_version",
     "strategy_id",
-    "state_id",
-    "plant_id",
+    "device_code",
+    "state_observed_at",
+    "state_generated_at",
     "created_at",
     "actions",
     "reason_summary",
@@ -34,6 +37,13 @@ REQUIRED_FIELDS = {
     "model",
     "execution",
 }
+# State bindings, as (strategy field, state.v1 field). state.v1 emits no identifier
+# column of its own, so a proposal points at a snapshot by the pair the producer
+# actually writes: which device, and which observation moment it was built from.
+STATE_BINDINGS = (
+    ("state_observed_at", "observed_at"),
+    ("state_generated_at", "generated_at"),
+)
 
 
 @dataclass(frozen=True)
@@ -69,14 +79,33 @@ def _is_uuid(value: Any) -> bool:
         return False
 
 
-def _is_datetime(value: Any) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
+def parse_timestamp(value: Any) -> Optional[datetime]:
+    """Normalize whatever state.v1 passes through into an aware datetime.
+
+    The producer copies `observed_at` from its input untouched, so a real record can
+    carry an ISO string with a `Z` suffix or a numeric epoch from a telemetry row.
+    Comparing those as text would reject a correct binding, so both sides are parsed.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str) or not value.strip():
+        return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return parsed.tzinfo is not None
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
-        return False
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+def _is_datetime(value: Any) -> bool:
+    return isinstance(value, str) and parse_timestamp(value) is not None
 
 
 class StrategyValidator:
@@ -127,16 +156,22 @@ class StrategyValidator:
             reasons.append("invalid_schema_version")
         if not _is_uuid(value.get("strategy_id")):
             reasons.append("invalid_strategy_id")
-        state_id = value.get("state_id")
-        if not isinstance(state_id, str) or not state_id.strip():
-            reasons.append("invalid_state_id")
-        else:
-            if not isinstance(state.get("state_id"), str) or not str(state.get("state_id")).strip():
-                reasons.append("state_has_no_usable_state_id")
-            elif state_id != state.get("state_id"):
-                reasons.append("state_id_mismatch")
-        if value.get("plant_id") != state.get("plant_id") or value.get("plant_id") != "soil3":
-            reasons.append("plant_id_mismatch")
+        device_code = value.get("device_code")
+        if not isinstance(device_code, str) or device_code != EXPECTED_DEVICE_CODE:
+            reasons.append("invalid_device_code")
+        elif state.get("device_code") != EXPECTED_DEVICE_CODE:
+            # A strategy can only ever name soil3, so a diverging state is a wrong
+            # input file rather than a mismatch between two free-form values.
+            reasons.append("state_is_not_soil3")
+        for field, state_key in STATE_BINDINGS:
+            claimed = parse_timestamp(value.get(field))
+            if claimed is None:
+                reasons.append(f"invalid_{field}")
+            actual = parse_timestamp(state.get(state_key))
+            if actual is None:
+                reasons.append(f"state_has_no_usable_{state_key}")
+            elif claimed is not None and claimed != actual:
+                reasons.append(f"{field}_mismatch")
         if not _is_datetime(value.get("created_at")):
             reasons.append("invalid_created_at")
 
@@ -192,7 +227,7 @@ class StrategyValidator:
             for field in ("provider", "name"):
                 if not isinstance(model.get(field), str) or not model[field].strip():
                     reasons.append(f"invalid_model_field:{field}")
-            if model.get("prompt_version") != "strategy-prompt.v1":
+            if model.get("prompt_version") != PROMPT_VERSION:
                 reasons.append("invalid_model_field:prompt_version")
             unknown_model = sorted(set(model) - ALLOWED_MODEL_FIELDS)
             if unknown_model:

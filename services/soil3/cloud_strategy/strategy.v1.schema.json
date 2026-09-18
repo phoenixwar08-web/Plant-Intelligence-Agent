@@ -11,12 +11,14 @@
     "max_reason_summary_items": 8
   },
   "x-protocol-limit-notes": "JSON Schema cannot express a sum across array items, so the cumulative ceilings are declared here as the single source of truth and asserted against the Validator constants by tests/test_cloud_strategy.py.",
+  "x-state-binding-notes": "state.v1 defines no identifier column, so a proposal binds to the snapshot it was built from by device_code plus state_observed_at, with state_generated_at kept for traceability. Cross-record equality cannot be expressed in JSON Schema and is enforced by the Validator.",
   "type": "object",
   "required": [
     "schema_version",
     "strategy_id",
-    "state_id",
-    "plant_id",
+    "device_code",
+    "state_observed_at",
+    "state_generated_at",
     "created_at",
     "actions",
     "reason_summary",
@@ -28,8 +30,9 @@
   "properties": {
     "schema_version": {"const": "strategy.v1"},
     "strategy_id": {"type": "string", "format": "uuid"},
-    "state_id": {"type": "string", "minLength": 1},
-    "plant_id": {"const": "soil3"},
+    "device_code": {"const": "soil3"},
+    "state_observed_at": {"type": "string", "format": "date-time"},
+    "state_generated_at": {"type": "string", "format": "date-time"},
     "created_at": {"type": "string", "format": "date-time"},
     "actions": {
       "type": "array",
@@ -86,7 +89,7 @@
       "properties": {
         "provider": {"type": "string", "minLength": 1},
         "name": {"type": "string", "minLength": 1},
-        "prompt_version": {"const": "strategy-prompt.v1"}
+        "prompt_version": {"const": "strategy-prompt.v2"}
       },
       "additionalProperties": false
     },
