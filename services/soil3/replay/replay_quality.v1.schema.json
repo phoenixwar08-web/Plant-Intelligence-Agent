@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plant-agent.local/schemas/replay_quality.v1.schema.json",
+  "title": "soil3 Replay Quality V1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "sample_id",
+    "device_code",
+    "replay_at",
+    "status",
+    "source_summary",
+    "timestamp_quality",
+    "continuity",
+    "missing_sensor_fields",
+    "watering_sensor_relationships",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "replay_quality.v1"},
+    "sample_id": {"type": "string", "pattern": "^replay-[0-9a-f]{24}$"},
+    "device_code": {"const": "soil3"},
+    "replay_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["good", "warning", "unusable"]},
+    "source_summary": {"type": "object"},
+    "timestamp_quality": {"type": "object"},
+    "continuity": {"type": "object"},
+    "missing_sensor_fields": {"type": "object"},
+    "watering_sensor_relationships": {"type": "array", "items": {"type": "object"}},
+    "limitations": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}
