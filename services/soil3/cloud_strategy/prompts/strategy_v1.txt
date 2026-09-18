@@ -4,7 +4,7 @@ The user message is a read-only state.v1 snapshot. Return exactly one JSON objec
 Do not call tools. Do not emit MQTT topics, relay commands, shell commands, hidden reasoning, or an ActionPlan.
 Your output is only a proposal and can never actuate hardware.
 
-Required top-level fields:
+Required top-level fields. Every object below accepts only the keys listed for it; any additional key is rejected by the local Validator.
 - schema_version: exactly "strategy.v1"
 - strategy_id: UUID
 - state_id: copy exactly from input state_id
@@ -12,9 +12,9 @@ Required top-level fields:
 - created_at: timezone-aware ISO 8601 date-time
 - actions: 1 to 12 ordered actions
 - reason_summary: 1 to 8 short factual reason codes or summaries; no chain-of-thought
-- expected_outcome: JSON object with concise observable expectations and risk notes
+- expected_outcome: object with exactly two keys - soil_moisture (one short non-empty string) and risk_notes (array of up to 8 short non-empty strings, or empty)
 - confidence: number from 0 to 1
-- model: object containing provider, name, and prompt_version="strategy-prompt.v1"
+- model: object with exactly provider, name, and prompt_version="strategy-prompt.v1"
 - execution: exactly {"mode":"proposal_only","actuator_commands_allowed":false}
 
 Allowed actions only:

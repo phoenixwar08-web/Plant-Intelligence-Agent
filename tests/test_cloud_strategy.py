@@ -8,12 +8,18 @@ from pathlib import Path
 from services.soil3.cloud_strategy.client import CloudStrategyError, OpenAICompatibleClient
 from services.soil3.cloud_strategy.service import append_audit, parse_model_json, run_chain, write_json_atomic
 from services.soil3.cloud_strategy.validator import (
+    ALLOWED_EXECUTION_FIELDS,
+    ALLOWED_EXPECTED_OUTCOME_FIELDS,
+    ALLOWED_MODEL_FIELDS,
     PROTOCOL_MAX_ACTIONS,
     PROTOCOL_MAX_PUMP_SECONDS,
+    PROTOCOL_MAX_REASON_SUMMARY_ITEMS,
     PROTOCOL_MAX_TOTAL_PUMP_SECONDS,
     PROTOCOL_MAX_TOTAL_SECONDS,
     PROTOCOL_MAX_WAIT_SECONDS,
+    REQUIRED_EXPECTED_OUTCOME_FIELDS,
     REQUIRED_FIELDS,
+    REQUIRED_MODEL_FIELDS,
     StrategyValidator,
 )
 
@@ -400,6 +406,69 @@ class ExecutionFieldTests(unittest.TestCase):
         self.assertTrue(self.validator.validate(value, self.state).accepted)
 
 
+class DescriptiveFieldTests(unittest.TestCase):
+    """expected_outcome and model must not become a side channel for control data."""
+
+    def setUp(self):
+        self.state = sample_state()
+        self.validator = StrategyValidator()
+
+    def test_execution_shaped_keys_cannot_hide_in_expected_outcome(self):
+        for key in ("pump_seconds", "gpio", "cmd", "relay", "mqtt_topic", "actuator_commands_allowed"):
+            with self.subTest(key=key):
+                value = valid_strategy(self.state)
+                value["expected_outcome"] = {
+                    "soil_moisture": "recovering",
+                    "risk_notes": [],
+                    key: "on",
+                }
+                result = self.validator.validate(value, self.state)
+                self.assertFalse(result.accepted)
+                self.assertIn(f"expected_outcome_unknown_fields:{key}", result.reason_codes)
+
+    def test_expected_outcome_requires_both_declared_keys(self):
+        for missing in ("soil_moisture", "risk_notes"):
+            with self.subTest(missing=missing):
+                value = valid_strategy(self.state)
+                del value["expected_outcome"][missing]
+                result = self.validator.validate(value, self.state)
+                self.assertIn(f"expected_outcome_missing_fields:{missing}", result.reason_codes)
+
+    def test_expected_outcome_field_types_are_enforced(self):
+        for field, bad in (
+            ("soil_moisture", 12),
+            ("soil_moisture", ""),
+            ("risk_notes", "single string"),
+            ("risk_notes", [12]),
+            ("risk_notes", ["   "]),
+        ):
+            with self.subTest(field=field, bad=bad):
+                value = valid_strategy(self.state)
+                value["expected_outcome"][field] = bad
+                result = self.validator.validate(value, self.state)
+                self.assertIn(f"expected_outcome_invalid_field:{field}", result.reason_codes)
+
+    def test_risk_notes_length_is_capped(self):
+        value = valid_strategy(self.state)
+        value["expected_outcome"]["risk_notes"] = [f"r{i}" for i in range(9)]
+        result = self.validator.validate(value, self.state)
+        self.assertIn("expected_outcome_risk_notes_too_long", result.reason_codes)
+
+    def test_empty_risk_notes_and_plain_expectation_are_accepted(self):
+        value = valid_strategy(self.state)
+        value["expected_outcome"] = {"soil_moisture": "holds above hard safety low", "risk_notes": []}
+        self.assertEqual([], self.validator.validate(value, self.state).reason_codes)
+
+    def test_execution_shaped_keys_cannot_hide_in_model_metadata(self):
+        for key in ("pump_seconds", "gpio", "cmd", "relay", "mqtt_topic"):
+            with self.subTest(key=key):
+                value = valid_strategy(self.state)
+                value["model"][key] = 60
+                result = self.validator.validate(value, self.state)
+                self.assertFalse(result.accepted)
+                self.assertIn(f"model_unknown_fields:{key}", result.reason_codes)
+
+
 class ProtocolConsistencyTests(unittest.TestCase):
     """The schema and the Validator are two sources of truth; keep them from drifting."""
 
@@ -416,6 +485,7 @@ class ProtocolConsistencyTests(unittest.TestCase):
                 "max_wait_seconds": PROTOCOL_MAX_WAIT_SECONDS,
                 "max_total_pump_seconds": PROTOCOL_MAX_TOTAL_PUMP_SECONDS,
                 "max_total_seconds": PROTOCOL_MAX_TOTAL_SECONDS,
+                "max_reason_summary_items": PROTOCOL_MAX_REASON_SUMMARY_ITEMS,
             },
             declared,
         )
@@ -432,8 +502,40 @@ class ProtocolConsistencyTests(unittest.TestCase):
     def test_strictness_flags_match_the_validator(self):
         self.assertIs(False, self.schema["additionalProperties"])
         self.assertIs(False, self.schema["properties"]["execution"]["additionalProperties"])
+        self.assertIs(False, self.schema["properties"]["model"]["additionalProperties"])
+        self.assertIs(
+            False, self.schema["properties"]["expected_outcome"]["additionalProperties"]
+        )
         for variant in self.schema["properties"]["actions"]["items"]["oneOf"]:
             self.assertIs(False, variant["additionalProperties"])
+
+    def test_allowed_key_sets_match_the_validator(self):
+        self.assertEqual(
+            set(self.schema["properties"]["execution"]["properties"]),
+            ALLOWED_EXECUTION_FIELDS,
+        )
+        self.assertEqual(
+            set(self.schema["properties"]["model"]["properties"]), ALLOWED_MODEL_FIELDS
+        )
+        self.assertEqual(
+            set(self.schema["properties"]["model"]["required"]), REQUIRED_MODEL_FIELDS
+        )
+        self.assertEqual(
+            set(self.schema["properties"]["expected_outcome"]["properties"]),
+            ALLOWED_EXPECTED_OUTCOME_FIELDS,
+        )
+        self.assertEqual(
+            set(self.schema["properties"]["expected_outcome"]["required"]),
+            REQUIRED_EXPECTED_OUTCOME_FIELDS,
+        )
+        self.assertEqual("string", self.schema["properties"]["reason_summary"]["items"]["type"])
+        self.assertEqual(
+            PROTOCOL_MAX_REASON_SUMMARY_ITEMS, self.schema["properties"]["reason_summary"]["maxItems"]
+        )
+        self.assertEqual(
+            PROTOCOL_MAX_REASON_SUMMARY_ITEMS,
+            self.schema["properties"]["expected_outcome"]["properties"]["risk_notes"]["maxItems"],
+        )
 
     def test_required_fields_are_the_same_set_in_both_places(self):
         self.assertEqual(sorted(REQUIRED_FIELDS), sorted(self.schema["required"]))

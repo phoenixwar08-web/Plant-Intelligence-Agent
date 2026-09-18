@@ -4,7 +4,7 @@
 | --- | --- | --- |
 | `state.v1` | frozen | Read-only normalized current facts for a decision; built on demand, not by a high-frequency snapshot task. |
 | `vision.v1` | implemented | One structured image observation per fixed plant zone; appearance only, never a diagnosis, strategy, or device control. Not enabled: no consumer exists, and no camera or provider request runs unless explicitly configured and separately approved. |
-| `strategy.v1` | frozen | Structured proposal linked to one `state.v1`; only `water(pump_seconds)`, `wait(seconds)`, `observe`, and `stop` actions are allowed. It never grants execution or device-control authority. |
+| `strategy.v1` | implemented | Structured proposal linked to one `state.v1`; only `water(pump_seconds)`, `wait(seconds)`, `observe`, and `stop` actions are allowed, each within a protocol ceiling and within a cumulative ceiling for the whole strategy. It never grants execution or device-control authority. Not enabled: no consumer exists, and the shipped configuration is disabled and carries no provider address. |
 | `gate.v1` | planned | Admission decision for a validated strategy. |
 | `episode.v1` | planned | Structured care experience record. |
 | `feedback.v1` | planned | Factual post-action observations and outcome evidence. |

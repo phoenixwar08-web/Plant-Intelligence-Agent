@@ -16,10 +16,11 @@ audit JSONL, credentials, and real provider addresses do not belong in Git.
 
 ## Validator ceilings
 
-`strategy.v1` is declared frozen in `docs/PROTOCOLS_AND_BOUNDARIES.md`, so the
-numbers below are protocol ceilings, not tuning knobs: `validator` in the
-config may tighten each one but never widen it, and an out-of-range config
-raises at construction.
+`strategy.v1` is marked `implemented` in `docs/PROTOCOLS_AND_BOUNDARIES.md`: the
+contract exists and is covered by tests, but it is not frozen, so compatibility
+iteration may continue. The numbers below are still protocol ceilings rather
+than tuning knobs: `validator` in the config may tighten each one but never
+widen it, and an out-of-range config raises at construction.
 
 | Limit | Protocol ceiling |
 | --- | --- |
@@ -28,13 +29,17 @@ raises at construction.
 | `seconds` per wait action | 86400 |
 | summed `pump_seconds` across all actions | 240 |
 | summed water + wait time across all actions | 86400 |
+| `reason_summary` and `risk_notes` items | 8 |
 
 The two summed ceilings exist because per-action limits alone still accept
 twelve repetitions of the largest allowed action.
 
 Unknown fields are rejected at the top level, inside every action object, and
-inside `execution`. `model` accepts extra keys and `expected_outcome` accepts
-any JSON object by schema; no consumer may treat either as control input.
+inside `execution`, `model`, and `expected_outcome`. `expected_outcome` accepts
+only `soil_moisture` (one string) and `risk_notes` (up to 8 strings), so
+execution-shaped keys such as `pump_seconds`, `gpio`, `cmd`, or `relay` cannot
+enter the record through a descriptive field. Widening any of these key sets is
+a protocol change, not a local edit.
 
 A rejected, unparseable, or broken-config proposal fails closed: the chain
 records the reason codes and exits non-zero without reaching any device path.

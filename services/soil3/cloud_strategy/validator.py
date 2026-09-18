@@ -13,7 +13,14 @@ PROTOCOL_MAX_PUMP_SECONDS = 120.0
 PROTOCOL_MAX_WAIT_SECONDS = 86400.0
 PROTOCOL_MAX_TOTAL_PUMP_SECONDS = 240.0
 PROTOCOL_MAX_TOTAL_SECONDS = 86400.0
+PROTOCOL_MAX_REASON_SUMMARY_ITEMS = 8
 ALLOWED_EXECUTION_FIELDS = {"mode", "actuator_commands_allowed"}
+# Only the vocabulary the prompt actually asks for. A free-form object here is a
+# channel for execution-shaped keys (pump_seconds, gpio, cmd) to enter the record.
+REQUIRED_EXPECTED_OUTCOME_FIELDS = {"soil_moisture", "risk_notes"}
+ALLOWED_EXPECTED_OUTCOME_FIELDS = REQUIRED_EXPECTED_OUTCOME_FIELDS
+REQUIRED_MODEL_FIELDS = {"provider", "name", "prompt_version"}
+ALLOWED_MODEL_FIELDS = REQUIRED_MODEL_FIELDS
 REQUIRED_FIELDS = {
     "schema_version",
     "strategy_id",
@@ -148,11 +155,31 @@ class StrategyValidator:
             or any(not isinstance(item, str) or not item.strip() for item in summary)
         ):
             reasons.append("invalid_reason_summary")
-        elif len(summary) > 8:
+        elif len(summary) > PROTOCOL_MAX_REASON_SUMMARY_ITEMS:
             reasons.append("reason_summary_too_long")
 
-        if not isinstance(value.get("expected_outcome"), dict):
+        outcome = value.get("expected_outcome")
+        if not isinstance(outcome, dict):
             reasons.append("invalid_expected_outcome")
+        else:
+            unknown_outcome = sorted(set(outcome) - ALLOWED_EXPECTED_OUTCOME_FIELDS)
+            if unknown_outcome:
+                reasons.append("expected_outcome_unknown_fields:" + ",".join(unknown_outcome))
+            missing_outcome = sorted(REQUIRED_EXPECTED_OUTCOME_FIELDS - set(outcome))
+            if missing_outcome:
+                reasons.append("expected_outcome_missing_fields:" + ",".join(missing_outcome))
+            if "soil_moisture" in outcome and (
+                not isinstance(outcome["soil_moisture"], str) or not outcome["soil_moisture"].strip()
+            ):
+                reasons.append("expected_outcome_invalid_field:soil_moisture")
+            risk_notes = outcome.get("risk_notes")
+            if risk_notes is not None and not isinstance(risk_notes, list):
+                reasons.append("expected_outcome_invalid_field:risk_notes")
+            elif isinstance(risk_notes, list):
+                if any(not isinstance(item, str) or not item.strip() for item in risk_notes):
+                    reasons.append("expected_outcome_invalid_field:risk_notes")
+                elif len(risk_notes) > PROTOCOL_MAX_REASON_SUMMARY_ITEMS:
+                    reasons.append("expected_outcome_risk_notes_too_long")
 
         confidence = value.get("confidence")
         if not _is_number(confidence) or not 0 <= float(confidence) <= 1:
@@ -167,6 +194,9 @@ class StrategyValidator:
                     reasons.append(f"invalid_model_field:{field}")
             if model.get("prompt_version") != "strategy-prompt.v1":
                 reasons.append("invalid_model_field:prompt_version")
+            unknown_model = sorted(set(model) - ALLOWED_MODEL_FIELDS)
+            if unknown_model:
+                reasons.append("model_unknown_fields:" + ",".join(unknown_model))
 
         execution = value.get("execution")
         if not isinstance(execution, dict):

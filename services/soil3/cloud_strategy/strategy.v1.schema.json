@@ -7,7 +7,8 @@
     "max_pump_seconds": 120,
     "max_wait_seconds": 86400,
     "max_total_pump_seconds": 240,
-    "max_total_seconds": 86400
+    "max_total_seconds": 86400,
+    "max_reason_summary_items": 8
   },
   "x-protocol-limit-notes": "JSON Schema cannot express a sum across array items, so the cumulative ceilings are declared here as the single source of truth and asserted against the Validator constants by tests/test_cloud_strategy.py.",
   "type": "object",
@@ -69,7 +70,15 @@
       }
     },
     "reason_summary": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1}},
-    "expected_outcome": {"type": "object"},
+    "expected_outcome": {
+      "type": "object",
+      "required": ["soil_moisture", "risk_notes"],
+      "properties": {
+        "soil_moisture": {"type": "string", "minLength": 1},
+        "risk_notes": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     "model": {
       "type": "object",
@@ -79,7 +88,7 @@
         "name": {"type": "string", "minLength": 1},
         "prompt_version": {"const": "strategy-prompt.v1"}
       },
-      "additionalProperties": true
+      "additionalProperties": false
     },
     "execution": {
       "type": "object",
