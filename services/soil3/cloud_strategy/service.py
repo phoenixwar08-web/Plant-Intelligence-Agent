@@ -37,11 +37,34 @@ def parse_model_json(content: str) -> Dict[str, Any]:
     return value
 
 
+def build_validator(config: Dict[str, Any]) -> StrategyValidator:
+    limits = config["validator"]
+    return StrategyValidator(
+        max_actions=int(limits["max_actions"]),
+        max_pump_seconds=float(limits["max_pump_seconds"]),
+        max_wait_seconds=float(limits["max_wait_seconds"]),
+        max_total_pump_seconds=float(limits["max_total_pump_seconds"]),
+        max_total_seconds=float(limits["max_total_seconds"]),
+    )
+
+
 def append_audit(audit_dir: Path, record: Dict[str, Any]) -> Path:
     audit_dir.mkdir(parents=True, exist_ok=True)
     path = audit_dir / (datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".jsonl")
     with path.open("a", encoding="utf-8") as output:
         output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    return path
+
+
+def write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as output:
+        json.dump(payload, output, ensure_ascii=False, indent=2)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
     return path
 
 
@@ -93,13 +116,16 @@ def run_chain(
             parse_error = {"code": "invalid_model_json", "message": str(error)}
             validation = {"accepted": False, "reason_codes": ["invalid_model_json"], "strategy": None}
         else:
-            limits = config["validator"]
-            validator = StrategyValidator(
-                max_actions=int(limits["max_actions"]),
-                max_pump_seconds=float(limits["max_pump_seconds"]),
-                max_wait_seconds=float(limits["max_wait_seconds"]),
-            )
-            validation = validator.validate(parsed, state).to_dict()
+            try:
+                validator = build_validator(config)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                validation = {
+                    "accepted": False,
+                    "reason_codes": ["invalid_validator_config"],
+                    "strategy": None,
+                }
+            else:
+                validation = validator.validate(parsed, state).to_dict()
     elif failure is not None:
         validation = {"accepted": False, "reason_codes": [failure["code"]], "strategy": None}
 
@@ -145,8 +171,7 @@ def main() -> None:
     result = run_chain(state=state, config=config, prompt=prompt, fixture_content=fixture_content)
     audit_path = append_audit(Path(config["audit_dir"]), result)
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_atomic(args.output, result)
     print(
         json.dumps(
             {

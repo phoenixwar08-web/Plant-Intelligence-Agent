@@ -14,6 +14,8 @@
   "validator": {
     "max_actions": 12,
     "max_pump_seconds": 120,
-    "max_wait_seconds": 86400
+    "max_wait_seconds": 86400,
+    "max_total_pump_seconds": 240,
+    "max_total_seconds": 86400
   }
 }

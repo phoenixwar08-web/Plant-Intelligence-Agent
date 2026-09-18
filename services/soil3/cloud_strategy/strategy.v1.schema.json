@@ -2,6 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://plant-agent.local/schemas/strategy.v1.schema.json",
   "title": "soil3 Strategy V1",
+  "x-protocol-limits": {
+    "max_actions": 12,
+    "max_pump_seconds": 120,
+    "max_wait_seconds": 86400,
+    "max_total_pump_seconds": 240,
+    "max_total_seconds": 86400
+  },
+  "x-protocol-limit-notes": "JSON Schema cannot express a sum across array items, so the cumulative ceilings are declared here as the single source of truth and asserted against the Validator constants by tests/test_cloud_strategy.py.",
   "type": "object",
   "required": [
     "schema_version",
@@ -19,7 +27,7 @@
   "properties": {
     "schema_version": {"const": "strategy.v1"},
     "strategy_id": {"type": "string", "format": "uuid"},
-    "state_id": {"type": "string"},
+    "state_id": {"type": "string", "minLength": 1},
     "plant_id": {"const": "soil3"},
     "created_at": {"type": "string", "format": "date-time"},
     "actions": {

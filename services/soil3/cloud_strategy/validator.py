@@ -11,6 +11,9 @@ ALLOWED_ACTIONS = {"water", "wait", "observe", "stop"}
 PROTOCOL_MAX_ACTIONS = 12
 PROTOCOL_MAX_PUMP_SECONDS = 120.0
 PROTOCOL_MAX_WAIT_SECONDS = 86400.0
+PROTOCOL_MAX_TOTAL_PUMP_SECONDS = 240.0
+PROTOCOL_MAX_TOTAL_SECONDS = 86400.0
+ALLOWED_EXECUTION_FIELDS = {"mode", "actuator_commands_allowed"}
 REQUIRED_FIELDS = {
     "schema_version",
     "strategy_id",
@@ -41,7 +44,14 @@ class ValidationResult:
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        # float(10**400) raises instead of returning inf, so an unguarded
+        # conversion lets a JSON number crash the Validator rather than reject it.
+        return False
 
 
 def _is_uuid(value: Any) -> bool:
@@ -69,16 +79,32 @@ class StrategyValidator:
         max_actions: int = 12,
         max_pump_seconds: float = 120.0,
         max_wait_seconds: float = 86400.0,
+        max_total_pump_seconds: float = 240.0,
+        max_total_seconds: float = 86400.0,
     ) -> None:
+        try:
+            max_pump_seconds = float(max_pump_seconds)
+            max_wait_seconds = float(max_wait_seconds)
+            max_total_pump_seconds = float(max_total_pump_seconds)
+            max_total_seconds = float(max_total_seconds)
+        except (TypeError, OverflowError, ValueError):
+            raise ValueError("validator limits must be finite numbers")
+
         if not 1 <= max_actions <= PROTOCOL_MAX_ACTIONS:
             raise ValueError("max_actions exceeds strategy.v1 protocol bounds")
         if not 0 < max_pump_seconds <= PROTOCOL_MAX_PUMP_SECONDS:
             raise ValueError("max_pump_seconds exceeds strategy.v1 protocol bounds")
         if not 0 < max_wait_seconds <= PROTOCOL_MAX_WAIT_SECONDS:
             raise ValueError("max_wait_seconds exceeds strategy.v1 protocol bounds")
+        if not max_pump_seconds <= max_total_pump_seconds <= PROTOCOL_MAX_TOTAL_PUMP_SECONDS:
+            raise ValueError("max_total_pump_seconds exceeds strategy.v1 protocol bounds")
+        if not max(max_pump_seconds, max_wait_seconds) <= max_total_seconds <= PROTOCOL_MAX_TOTAL_SECONDS:
+            raise ValueError("max_total_seconds exceeds strategy.v1 protocol bounds")
         self.max_actions = max_actions
         self.max_pump_seconds = max_pump_seconds
         self.max_wait_seconds = max_wait_seconds
+        self.max_total_pump_seconds = max_total_pump_seconds
+        self.max_total_seconds = max_total_seconds
 
     def validate(self, value: Any, state: Dict[str, Any]) -> ValidationResult:
         reasons: List[str] = []
@@ -94,8 +120,14 @@ class StrategyValidator:
             reasons.append("invalid_schema_version")
         if not _is_uuid(value.get("strategy_id")):
             reasons.append("invalid_strategy_id")
-        if value.get("state_id") != state.get("state_id"):
-            reasons.append("state_id_mismatch")
+        state_id = value.get("state_id")
+        if not isinstance(state_id, str) or not state_id.strip():
+            reasons.append("invalid_state_id")
+        else:
+            if not isinstance(state.get("state_id"), str) or not str(state.get("state_id")).strip():
+                reasons.append("state_has_no_usable_state_id")
+            elif state_id != state.get("state_id"):
+                reasons.append("state_id_mismatch")
         if value.get("plant_id") != state.get("plant_id") or value.get("plant_id") != "soil3":
             reasons.append("plant_id_mismatch")
         if not _is_datetime(value.get("created_at")):
@@ -144,6 +176,9 @@ class StrategyValidator:
                 reasons.append("execution_mode_not_proposal_only")
             if execution.get("actuator_commands_allowed") is not False:
                 reasons.append("actuator_permission_must_be_false")
+            unknown_execution = sorted(set(execution) - ALLOWED_EXECUTION_FIELDS)
+            if unknown_execution:
+                reasons.append("execution_unknown_fields:" + ",".join(unknown_execution))
 
         return ValidationResult(not reasons, reasons, value if not reasons else None)
 
@@ -151,6 +186,8 @@ class StrategyValidator:
         reasons: List[str] = []
         action_ids = set()
         stop_seen = False
+        pump_total = 0.0
+        duration_total = 0.0
         for index, action in enumerate(actions):
             prefix = f"action[{index}]"
             if not isinstance(action, dict):
@@ -179,8 +216,11 @@ class StrategyValidator:
                     reasons.append(f"{prefix}:invalid_pump_seconds_type")
                 elif float(seconds) <= 0:
                     reasons.append(f"{prefix}:pump_seconds_not_positive")
-                elif float(seconds) > self.max_pump_seconds:
-                    reasons.append(f"{prefix}:pump_seconds_extreme")
+                else:
+                    pump_total += float(seconds)
+                    duration_total += float(seconds)
+                    if float(seconds) > self.max_pump_seconds:
+                        reasons.append(f"{prefix}:pump_seconds_extreme")
                 unexpected = set(action) - {"action_id", "type", "pump_seconds"}
             elif action_type == "wait":
                 seconds = action.get("seconds")
@@ -188,11 +228,20 @@ class StrategyValidator:
                     reasons.append(f"{prefix}:invalid_wait_seconds_type")
                 elif float(seconds) <= 0:
                     reasons.append(f"{prefix}:wait_seconds_not_positive")
-                elif float(seconds) > self.max_wait_seconds:
-                    reasons.append(f"{prefix}:wait_seconds_extreme")
+                else:
+                    duration_total += float(seconds)
+                    if float(seconds) > self.max_wait_seconds:
+                        reasons.append(f"{prefix}:wait_seconds_extreme")
                 unexpected = set(action) - {"action_id", "type", "seconds"}
             else:
                 unexpected = set(action) - {"action_id", "type"}
             if unexpected:
                 reasons.append(f"{prefix}:unknown_fields:{','.join(sorted(unexpected))}")
+
+        # A per-action ceiling alone lets a proposal spend its whole budget on
+        # pump time by repeating the largest allowed action up to max_actions.
+        if pump_total > self.max_total_pump_seconds:
+            reasons.append("total_pump_seconds_extreme")
+        if duration_total > self.max_total_seconds:
+            reasons.append("total_seconds_extreme")
         return reasons
