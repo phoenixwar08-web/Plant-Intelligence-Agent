@@ -47,12 +47,27 @@ a protocol change, not a local edit.
 ## Binding to a state.v1 snapshot
 
 `state.v1` writes no identifier column, so a proposal names the snapshot it came
-from with the fields the producer actually emits: `device_code` (always `soil3`)
-plus that snapshot's `observed_at`. `state_generated_at` is carried for
-traceability. Timestamps are compared as instants, not as text, because
-`state.v1` copies `observed_at` through untouched and a real record can hold an
-ISO string with a `Z`, another offset, or a numeric epoch. A state whose
-timestamp is missing or unparseable is rejected rather than guessed at.
+from with three fields: `device_code` (always `soil3`), that snapshot's
+`observed_at`, and `state_sha256` — a SHA-256 of the canonicalized snapshot.
+`state_generated_at` is carried for traceability and is verified by name as well,
+so a swapped timestamp reports itself rather than only surfacing as a hash
+mismatch.
+
+The hash is what makes the binding unambiguous: `state.v1` declares no uniqueness
+for `(device_code, observed_at)`, so two snapshots of one device carrying the
+same observation moment can only be told apart by their content.
+
+`state_sha256` is attached by this service, never by the model. The prompt tells
+the provider not to write it, and a value that arrives anyway is overwritten from
+the snapshot actually loaded before the Validator runs; the Validator recomputes
+it independently and reports `invalid_state_sha256` or `state_sha256_mismatch`. An
+attempted override stays visible in the audit copy of the raw response and in the
+hash of the complete response.
+
+Timestamps are compared as instants, not as text, because `state.v1` copies
+`observed_at` through untouched and a real record can hold an ISO string with a
+`Z`, another offset, or a numeric epoch. A state whose timestamp is missing or
+unparseable is rejected rather than guessed at.
 
 The fixtures in `tests/test_cloud_strategy.py` are built by calling
 `StateBuilder` from `services/soil3/state/state_v1.py`, so a change in the

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import uuid
 from dataclasses import dataclass
@@ -29,6 +31,7 @@ REQUIRED_FIELDS = {
     "device_code",
     "state_observed_at",
     "state_generated_at",
+    "state_sha256",
     "created_at",
     "actions",
     "reason_summary",
@@ -37,13 +40,34 @@ REQUIRED_FIELDS = {
     "model",
     "execution",
 }
-# State bindings, as (strategy field, state.v1 field). state.v1 emits no identifier
-# column of its own, so a proposal points at a snapshot by the pair the producer
-# actually writes: which device, and which observation moment it was built from.
+# Instant bindings, as (strategy field, state.v1 field). state.v1 emits no identifier
+# column of its own, so a proposal names which observation moment it answers with the
+# fields the producer actually writes. state_generated_at is carried for traceability and
+# verified by name, so a swapped timestamp reports itself instead of only surfacing as a
+# hash mismatch.
 STATE_BINDINGS = (
     ("state_observed_at", "observed_at"),
     ("state_generated_at", "generated_at"),
 )
+# Content binding. The timestamps say which moment a proposal answers; only a hash of
+# the whole snapshot says which record it answers, because state.v1 declares no
+# uniqueness for (device_code, observed_at). The local service computes this field, so
+# provider output can never choose or move it.
+STATE_HASH_FIELD = "state_sha256"
+_HEX_DIGITS = set("0123456789abcdef")
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
+
+
+def fingerprint(value: Any) -> str:
+    """Content hash of a state.v1 record, independent of key order or formatting."""
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def is_state_hash(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and set(value) <= _HEX_DIGITS
 
 
 @dataclass(frozen=True)
@@ -172,6 +196,13 @@ class StrategyValidator:
                 reasons.append(f"state_has_no_usable_{state_key}")
             elif claimed is not None and claimed != actual:
                 reasons.append(f"{field}_mismatch")
+        # Recomputed here rather than trusted from the caller: the Validator is the
+        # authority on which snapshot a proposal is bound to.
+        claimed_hash = value.get(STATE_HASH_FIELD)
+        if not is_state_hash(claimed_hash):
+            reasons.append(f"invalid_{STATE_HASH_FIELD}")
+        elif claimed_hash != fingerprint(state):
+            reasons.append(f"{STATE_HASH_FIELD}_mismatch")
         if not _is_datetime(value.get("created_at")):
             reasons.append("invalid_created_at")
 

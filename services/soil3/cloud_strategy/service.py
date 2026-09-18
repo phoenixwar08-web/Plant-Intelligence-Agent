@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .client import CloudResponse, CloudStrategyError, OpenAICompatibleClient
-from .validator import StrategyValidator, parse_timestamp
+from .validator import STATE_HASH_FIELD, StrategyValidator, fingerprint, parse_timestamp
 
 
 MODULE_ROOT = Path(__file__).resolve().parent
@@ -67,14 +67,6 @@ def project_state_for_model(state: Dict[str, Any]) -> Dict[str, Any]:
         if picked:
             projected[section] = picked
     return projected
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str)
-
-
-def fingerprint(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def bind_model_response(content: Optional[str]) -> Dict[str, Any]:
@@ -189,6 +181,11 @@ def run_chain(
             parse_error = {"code": "invalid_model_json", "message": str(error)}
             validation = {"accepted": False, "reason_codes": ["invalid_model_json"], "strategy": None}
         else:
+            # Trusted attachment. The prompt forbids emitting state_sha256, and a value
+            # the model supplies anyway is overwritten here from the snapshot actually
+            # loaded, so the binding can never come from provider output. An attempt
+            # stays visible in the audit copy of the raw response and its full-text hash.
+            parsed[STATE_HASH_FIELD] = fingerprint(state)
             try:
                 validator = build_validator(config)
             except (KeyError, TypeError, ValueError, OverflowError):

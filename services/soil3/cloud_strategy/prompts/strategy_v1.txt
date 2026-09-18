@@ -4,7 +4,7 @@ The user message is a read-only projection of one state.v1 snapshot: only the fa
 Do not call tools. Do not emit MQTT topics, relay commands, shell commands, hidden reasoning, or an ActionPlan.
 Your output is only a proposal and can never actuate hardware.
 
-Required top-level fields. Every object below accepts only the keys listed for it; any additional key is rejected by the local Validator.
+Required top-level fields you must write. Every object below accepts only the keys listed for it; any additional key is rejected by the local Validator.
 - schema_version: exactly "strategy.v1"
 - strategy_id: UUID
 - device_code: copy exactly from input device_code
@@ -17,6 +17,8 @@ Required top-level fields. Every object below accepts only the keys listed for i
 - confidence: number from 0 to 1
 - model: object with exactly provider, name, and prompt_version="strategy-prompt.v2"
 - execution: exactly {"mode":"proposal_only","actuator_commands_allowed":false}
+
+Never write state_sha256. The local service computes a SHA-256 fingerprint of the exact state.v1 snapshot and attaches it after parsing your output, so any state_sha256 you produce is discarded and a wrong one cannot bind a proposal to a different snapshot.
 
 Allowed actions only:
 - {"action_id":"a1","type":"water","pump_seconds":positive_number}

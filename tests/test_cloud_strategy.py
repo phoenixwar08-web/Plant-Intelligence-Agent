@@ -17,7 +17,6 @@ from services.soil3.cloud_strategy.service import (
     MODEL_INPUT_SECTIONS,
     append_audit,
     bind_model_response,
-    fingerprint,
     parse_model_json,
     project_state_for_model,
     run_chain,
@@ -38,7 +37,10 @@ from services.soil3.cloud_strategy.validator import (
     REQUIRED_FIELDS,
     REQUIRED_MODEL_FIELDS,
     STATE_BINDINGS,
+    STATE_HASH_FIELD,
     StrategyValidator,
+    fingerprint,
+    is_state_hash,
     parse_timestamp,
 )
 from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS, StateBuilder
@@ -69,18 +71,20 @@ class FakeSession:
         return self.response
 
 
-def real_state():
+def real_state(soil_humidity=31.4):
     """A state.v1 record from the actual producer, not a hand-made look-alike.
 
     strategy.v1 binds to fields state.v1 really writes, so every fixture here goes
-    through StateBuilder: if the producer changes shape, these tests notice.
+    through StateBuilder: if the producer changes shape, these tests notice. The
+    humidity argument builds a second genuine record for the same device and the
+    same observation moment, which is the case a content hash exists to separate.
     """
     return StateBuilder("soil3").build(
         {
             "observed_at": "2026-09-16T10:00:00Z",
             "generated_at": "2026-09-16T10:00:01Z",
             "sensor_readings": [
-                {"timestamp": "2026-09-16T09:55:00Z", "humidity": 31.4, "temperature": 24.1, "ec_raw": 680, "lux": 1200},
+                {"timestamp": "2026-09-16T09:55:00Z", "humidity": soil_humidity, "temperature": 24.1, "ec_raw": 680, "lux": 1200},
                 {"timestamp": "2026-09-16T07:00:00Z", "humidity": 33.0, "temperature": 22.0},
             ],
             "system_state": {
@@ -115,6 +119,7 @@ def valid_strategy(state):
         "device_code": state["device_code"],
         "state_observed_at": state["observed_at"],
         "state_generated_at": state["generated_at"],
+        STATE_HASH_FIELD: fingerprint(state),
         "created_at": "2026-09-16T10:00:00+00:00",
         "actions": [
             {"action_id": "a1", "type": "observe"},
@@ -277,6 +282,18 @@ class ClientAndChainTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_protocol_doc_states_the_binding_without_conditioning_the_status(self):
+        """The lifecycle legend and this module's contract must not drift apart again."""
+        doc = (ROOT / "docs" / "PROTOCOLS_AND_BOUNDARIES.md").read_text(encoding="utf-8")
+        row = next(line for line in doc.splitlines() if line.startswith("| `strategy.v1`"))
+        self.assertIn("implemented", row)
+        self.assertIn("Not enabled", row)
+        for field in ("device_code", "`observed_at`", "state_sha256"):
+            self.assertIn(field, row)
+        legend = next(line for line in doc.splitlines() if line.startswith("“Implemented”"))
+        self.assertIn("automated tests", legend)
+        self.assertNotIn("verified against real data", legend)
+
     def test_schema_and_example_config_are_valid_json(self):
         schema_path = (
             ROOT
@@ -500,6 +517,124 @@ class IdentityBindingTests(unittest.TestCase):
         )
         for _, state_key in STATE_BINDINGS:
             self.assertIn(state_key, self.state)
+
+
+class SnapshotContentBindingTests(unittest.TestCase):
+    """(device_code, observed_at) is unique in practice, not by contract: the hash pins the record."""
+
+    def setUp(self):
+        self.state = sample_state()
+        self.validator = StrategyValidator()
+
+    def test_strategy_without_a_content_binding_is_incomplete(self):
+        value = valid_strategy(self.state)
+        del value[STATE_HASH_FIELD]
+        self.assertIn(
+            f"missing_field:{STATE_HASH_FIELD}",
+            self.validator.validate(value, self.state).reason_codes,
+        )
+
+    def test_malformed_content_binding_is_rejected(self):
+        # the service emits lowercase hex, so anything else is not a binding either
+        for candidate in (None, "", "deadbeef", "0" * 63, "0" * 64 + "0", "F" * 64, 12345, ["a"]):
+            with self.subTest(candidate=repr(candidate)[:14]):
+                value = valid_strategy(self.state)
+                value[STATE_HASH_FIELD] = candidate
+                self.assertIn(
+                    f"invalid_{STATE_HASH_FIELD}",
+                    self.validator.validate(value, self.state).reason_codes,
+                )
+
+    def test_two_snapshots_of_the_same_moment_are_told_apart(self):
+        """The case state.v1 cannot express: same device, same instant, different facts."""
+        other = real_state(soil_humidity=44.0)
+        self.assertEqual(self.state["device_code"], other["device_code"])
+        self.assertEqual(self.state["observed_at"], other["observed_at"])
+        self.assertEqual(self.state["generated_at"], other["generated_at"])
+        self.assertNotEqual(fingerprint(self.state), fingerprint(other))
+
+        value = valid_strategy(self.state)
+        result = self.validator.validate(value, other)
+        self.assertFalse(result.accepted)
+        self.assertIn(f"{STATE_HASH_FIELD}_mismatch", result.reason_codes)
+        for field, _ in STATE_BINDINGS:
+            self.assertNotIn(f"{field}_mismatch", result.reason_codes)
+
+    def test_a_proposal_only_binds_the_record_its_hash_came_from(self):
+        other = real_state(soil_humidity=44.0)
+        for left, right in ((other, self.state), (self.state, other)):
+            with self.subTest(bound_to=str(fingerprint(left))[:8]):
+                value = valid_strategy(left)
+                self.assertTrue(self.validator.validate(value, left).accepted)
+                self.assertIn(
+                    f"{STATE_HASH_FIELD}_mismatch",
+                    self.validator.validate(value, right).reason_codes,
+                )
+
+    def test_binding_hash_ignores_key_order_of_the_snapshot(self):
+        shuffled = json.loads(json.dumps(dict(reversed(list(self.state.items())))))
+        self.assertEqual(fingerprint(self.state), fingerprint(shuffled))
+        self.assertTrue(self.validator.validate(valid_strategy(shuffled), self.state).accepted)
+
+    def test_service_attaches_the_hash_when_the_model_omits_it(self):
+        state = real_state()
+        value = valid_strategy(state)
+        del value[STATE_HASH_FIELD]
+        result = run_chain(
+            state=state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(value),
+        )
+        self.assertEqual([], result["validation"]["reason_codes"])
+        self.assertEqual(fingerprint(state), result["validation"]["strategy"][STATE_HASH_FIELD])
+
+    def test_a_model_supplied_hash_is_overwritten_not_trusted(self):
+        state = real_state()
+        value = valid_strategy(state)
+        value[STATE_HASH_FIELD] = "0" * 64
+        result = run_chain(
+            state=state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(value),
+        )
+        strategy = result["validation"]["strategy"]
+        self.assertEqual([], result["validation"]["reason_codes"])
+        self.assertEqual(fingerprint(state), strategy[STATE_HASH_FIELD])
+        # the attempt itself stays auditable in the stored provider text
+        self.assertIn("0" * 64, result["raw_model_response"])
+
+    def test_a_hash_under_another_name_is_not_a_binding(self):
+        state = real_state()
+        value = valid_strategy(state)
+        del value[STATE_HASH_FIELD]
+        value["snapshot_sha256"] = fingerprint(state)
+        result = run_chain(
+            state=state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(value),
+        )
+        self.assertIn(
+            "unknown_top_level_fields:snapshot_sha256",
+            result["validation"]["reason_codes"],
+        )
+
+    def test_binding_survives_an_epoch_observed_at_record(self):
+        """A real record whose observed_at is a numeric epoch still gets a full binding."""
+        state = real_state()
+        state["observed_at"] = datetime(2026, 9, 16, 10, 0, tzinfo=timezone.utc).timestamp()
+        value = valid_strategy(state)
+        del value[STATE_HASH_FIELD]
+        result = run_chain(
+            state=state,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(value),
+        )
+        self.assertEqual([], result["validation"]["reason_codes"])
+        self.assertEqual(fingerprint(state), result["validation"]["strategy"][STATE_HASH_FIELD])
 
 
 class ExecutionFieldTests(unittest.TestCase):
@@ -773,6 +908,9 @@ class RealChainIntegrationTests(unittest.TestCase):
         self.assertTrue(result["validation"]["accepted"])
         self.assertEqual("soil3", result["device_code"])
         self.assertEqual(state["observed_at"], result["state_observed_at"])
+        self.assertEqual(
+            fingerprint(state), result["validation"]["strategy"][STATE_HASH_FIELD]
+        )
 
     def test_proposal_built_for_another_snapshot_is_rejected(self):
         state = real_state()
@@ -785,6 +923,22 @@ class RealChainIntegrationTests(unittest.TestCase):
             fixture_content=json.dumps(valid_strategy(state)),
         )
         self.assertIn("state_observed_at_mismatch", result["validation"]["reason_codes"])
+
+    def test_chain_binding_always_names_the_record_it_loaded(self):
+        """Two records with identical identity fields cannot be interchanged downstream."""
+        wet = real_state(soil_humidity=44.0)
+        dry = real_state(soil_humidity=12.0)
+        self.assertNotEqual(fingerprint(wet), fingerprint(dry))
+        result = run_chain(
+            state=dry,
+            config=chain_config(),
+            prompt="prompt",
+            fixture_content=json.dumps(valid_strategy(wet)),
+        )
+        strategy = result["validation"]["strategy"]
+        self.assertTrue(result["validation"]["accepted"])
+        self.assertEqual(fingerprint(dry), strategy[STATE_HASH_FIELD])
+        self.assertNotEqual(fingerprint(wet), strategy[STATE_HASH_FIELD])
 
     def test_audit_round_trip_of_a_real_chain_run(self):
         state = real_state()
@@ -827,6 +981,11 @@ class PromptVersionTests(unittest.TestCase):
         self.assertIn("device_code", text)
         self.assertNotIn("state_id", text)
         self.assertNotIn("plant_id", text)
+
+    def test_prompt_file_forbids_the_model_from_writing_the_content_binding(self):
+        text = PROMPT_PATH.read_text(encoding="utf-8")
+        self.assertIn(STATE_HASH_FIELD, text)
+        self.assertIn(f"Never write {STATE_HASH_FIELD}", text)
 
     def test_previous_prompt_version_is_no_longer_accepted(self):
         state = real_state()
@@ -909,6 +1068,20 @@ class ProtocolConsistencyTests(unittest.TestCase):
     def test_required_fields_are_the_same_set_in_both_places(self):
         self.assertEqual(sorted(REQUIRED_FIELDS), sorted(self.schema["required"]))
         self.assertEqual(set(self.schema["properties"]), set(REQUIRED_FIELDS))
+
+    def test_content_binding_is_declared_the_same_way_in_both_places(self):
+        self.assertIn(STATE_HASH_FIELD, REQUIRED_FIELDS)
+        declared = self.schema["properties"][STATE_HASH_FIELD]
+        self.assertEqual("string", declared["type"])
+        # the Validator's shape rule and the schema pattern must not disagree
+        for candidate in (fingerprint(real_state()), "0" * 64):
+            with self.subTest(candidate=candidate[:8]):
+                self.assertTrue(is_state_hash(candidate))
+                self.assertRegex(candidate, declared["pattern"])
+        for candidate in ("", "0" * 63, "0" * 65, "F" * 64):
+            with self.subTest(rejected=candidate[:8] or "empty"):
+                self.assertFalse(is_state_hash(candidate))
+                self.assertNotRegex(candidate, declared["pattern"])
 
     def test_example_config_limits_stay_inside_protocol_bounds(self):
         config = json.loads(EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8"))
