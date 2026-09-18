@@ -15,6 +15,16 @@
   },
   "vision": {
     "enabled": false,
-    "note": "The future vision service is an independent service."
+    "entry_point": "services.soil3.vision.capture_and_analyze_once",
+    "required_environment": [
+      "SOIL3_CAMERA_RTSP_URL",
+      "QWEN_API_KEY",
+      "QWEN_BASE_URL",
+      "QWEN_MODEL",
+      "SOIL3_VISION_DATA_DIR",
+      "SOIL3_VISION_ZONES_PATH"
+    ],
+    "zones_file_example": "config/vision_zones.example.json",
+    "note": "Vision V1 is an independent observation service. Values are supplied only through environment variables. QWEN_BASE_URL is the provider endpoint without /chat/completions and must end in the provider's OpenAI-compatible path segment (for an Alibaba Cloud Model Studio dedicated endpoint that is /compatible-mode/v1, not the /api/v1 shown in the console). SOIL3_VISION_ZONES_PATH lists one fixed rect per plant zone; each zone is observed and tracked separately."
   }
 }
