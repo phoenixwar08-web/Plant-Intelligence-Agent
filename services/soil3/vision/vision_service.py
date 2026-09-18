@@ -102,10 +102,11 @@ def _provenance_for(service: "VisionService", raw: Mapping[str, object], zone: P
 def _previous_crop(service: "VisionService", zone_id: str) -> tuple[str | None, bytes | None]:
     """Return the latest earlier crop of this same zone, if it can still be read.
 
-    Zones are tracked separately so two plants never compare against each other. A
-    history record whose image is gone or corrupted is dropped entirely rather than
-    reported as a change the model was never shown, so a failure to read history must
-    never be recorded as a capture or analysis failure of the current attempt.
+    Zones are tracked separately so a plant is never compared against a different
+    plant in another zone. A history record whose image is gone or corrupted is
+    dropped entirely rather than reported as a change the model was never shown, so a
+    failure to read history must never be recorded as a capture or analysis failure of
+    the current attempt.
     """
     latest: tuple[str, ImageEvidence] | None = None
     records_root = service._data_root / "records"

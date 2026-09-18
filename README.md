@@ -81,11 +81,11 @@ Plant-Intelligence-Agent/
 
 仓库内 Python 接口 `services.soil3.vision.capture_and_analyze_once()` 只完成一次观测：抓取一帧、完整保存原始帧证据、按预设区域裁出每个植物 zone、逐区调用视觉模型、校验并持久化合法的 `vision.v1`。它不提供 HTTP、不启动后台调度、不接入 Episode，也不修改 `state.v1`、Phase3、MQTT 或水泵控制。
 
-当前画面里同时存在两处植物，所以一次调用按 `SOIL3_VISION_ZONES_PATH` 配置的 zone 分别产出记录（例如 `plant_zone_1`、`plant_zone_2`）：
+一次调用按 `SOIL3_VISION_ZONES_PATH` 配置的 zone 逐个产出记录（1–8 个，例：`plant_zone_1`、`plant_zone_2`），所以画面里有一处还是几处植物都只是配置问题：
 
 - 原始帧完整保存在 `frames/`，送给模型的只是按归一化 `[x, y, w, h]` 裁出的 `images/` 区域；ROI 只在模型输入阶段生效，不改变留档图片。
-- `change_vs_previous` 只与同一 `plant_zone` 的上一次观测比较，两处植物不会互相追踪。
-- 一个 zone 失败不影响另一个 zone；整轮结果可以是 `success`、`image_unusable`、`analysis_failed`、`capture_failed` 或 `partial`。
+- `change_vs_previous` 只与同一 `plant_zone` 的上一次观测比较，不同植物不会互相追踪。
+- 某个 zone 失败不影响其余 zone；整轮结果可以是 `success`、`image_unusable`、`analysis_failed`、`capture_failed` 或 `partial`。
 - `analysis_failed` 记录额外带 `http_status` 与 `provider_error_code`：收到 HTTP 响应就记状态码，provider 给出可安全提取的机器错误码（如 `insufficient_quota`）就记该码；超时/连不上时两者为 `null`。本地校验拒绝时两者也是 `null`，以区别于 provider 故障。原始响应体、密钥、完整 URL、Base64 图片、prompt 与模型原文一律不落盘。
 
 每条记录报告 17 个视觉字段：`image_quality`、`target_detected`、`target_ambiguity`、`leaf_droop`、`leaf_spread`、`wilting`、`yellowing`、`visible_damage`、`browning`、`leaf_curl`、`spots_or_lesions`、`leaf_loss`、`stem_posture`、`occlusion`、`overall_visual_state`、`change_vs_previous`、`confidence`。视觉证据不足时字段必须是 `null`，本地校验会拒绝没有证据支撑的结论；`overall_visual_state` 只描述外观（`normal / mild_abnormality / obvious_abnormality / severe_abnormality / unavailable`），不是健康诊断，也不是浇水或处置建议。
