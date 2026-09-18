@@ -3,7 +3,7 @@
 | Protocol | Status | Boundary |
 | --- | --- | --- |
 | `state.v1` | frozen | Read-only normalized current facts for a decision; built on demand, not by a high-frequency snapshot task. |
-| `vision.v1` | implemented, not enabled | One structured image observation per fixed plant zone; appearance only, never a diagnosis, strategy, or device control. No consumer yet. |
+| `vision.v1` | frozen | One structured image observation per fixed plant zone; appearance only, never a diagnosis, strategy, or device control. Implemented but not enabled: no consumer exists, and no camera or provider request runs unless explicitly configured and separately approved. |
 | `strategy.v1` | planned | Structured proposal; never direct device control. |
 | `gate.v1` | planned | Admission decision for a validated strategy. |
 | `episode.v1` | planned | Structured care experience record. |
