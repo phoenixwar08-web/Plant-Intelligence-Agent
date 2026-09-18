@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plant-agent.local/schemas/strategy.v1.schema.json",
+  "title": "soil3 Strategy V1",
+  "x-protocol-limits": {
+    "max_actions": 12,
+    "max_pump_seconds": 120,
+    "max_wait_seconds": 86400,
+    "max_total_pump_seconds": 240,
+    "max_total_seconds": 86400,
+    "max_reason_summary_items": 8
+  },
+  "x-protocol-limit-notes": "JSON Schema cannot express a sum across array items, so the cumulative ceilings are declared here as the single source of truth and asserted against the Validator constants by tests/test_cloud_strategy.py.",
+  "x-state-binding-notes": "state.v1 defines no identifier column, so a proposal binds to the snapshot it was built from by device_code, that snapshot's state_observed_at, and state_sha256, a SHA-256 fingerprint of the whole snapshot computed by the local service. state_generated_at is traceability metadata only: the snapshot hash already covers it, so it is not a binding condition of its own. state.v1 may hold any timestamp notation its sources used; the local service normalizes to RFC 3339 UTC before a value enters strategy.v1, which is why every timestamp here is constrained to that one form. Cross-record equality, hashing, and instant comparison cannot be expressed in JSON Schema and are enforced by the Validator.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "strategy_id",
+    "device_code",
+    "state_observed_at",
+    "state_generated_at",
+    "state_sha256",
+    "created_at",
+    "actions",
+    "reason_summary",
+    "expected_outcome",
+    "confidence",
+    "model",
+    "execution"
+  ],
+  "properties": {
+    "schema_version": {"const": "strategy.v1"},
+    "strategy_id": {"type": "string", "format": "uuid"},
+    "device_code": {"const": "soil3"},
+    "state_observed_at": {"$ref": "#/$defs/rfc3339_utc"},
+    "state_generated_at": {"$ref": "#/$defs/rfc3339_utc"},
+    "state_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 of the state.v1 snapshot under the service's key-order-independent JSON encoding, attached by the local service; never model-authored."
+    },
+    "created_at": {"$ref": "#/$defs/rfc3339_utc"},
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["action_id", "type", "pump_seconds"],
+            "properties": {
+              "action_id": {"type": "string", "minLength": 1},
+              "type": {"const": "water"},
+              "pump_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 120}
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["action_id", "type", "seconds"],
+            "properties": {
+              "action_id": {"type": "string", "minLength": 1},
+              "type": {"const": "wait"},
+              "seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 86400}
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["action_id", "type"],
+            "properties": {
+              "action_id": {"type": "string", "minLength": 1},
+              "type": {"enum": ["observe", "stop"]}
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "reason_summary": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1}},
+    "expected_outcome": {
+      "type": "object",
+      "required": ["soil_moisture", "risk_notes"],
+      "properties": {
+        "soil_moisture": {"type": "string", "minLength": 1},
+        "risk_notes": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "model": {
+      "type": "object",
+      "required": ["provider", "name", "prompt_version"],
+      "properties": {
+        "provider": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "prompt_version": {"const": "strategy-prompt.v2"}
+      },
+      "additionalProperties": false
+    },
+    "execution": {
+      "type": "object",
+      "required": ["mode", "actuator_commands_allowed"],
+      "properties": {
+        "mode": {"const": "proposal_only"},
+        "actuator_commands_allowed": {"const": false}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "rfc3339_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{6})?Z$",
+      "description": "The one timestamp notation strategy.v1 carries: RFC 3339 in UTC, a Z suffix, and microsecond precision at most — exactly what datetime.isoformat() renders. The local service rewrites any other notation (another offset, a numeric epoch) into this form, so an equivalent instant written differently is not a valid strategy record."
+    }
+  },
+  "additionalProperties": false
+}

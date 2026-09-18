@@ -1,0 +1,21 @@
+{
+  "enabled": false,
+  "provider": "openai-compatible-provider",
+  "base_url": "https://provider.example/v1",
+  "model": "MODEL_ID",
+  "api_key_env": "CLOUD_STRATEGY_API_KEY",
+  "timeout_seconds": 30,
+  "max_retries": 1,
+  "temperature": 0,
+  "max_tokens": 1200,
+  "json_response_format": true,
+  "state_path": "RUNTIME_STATE_V1_PATH",
+  "audit_dir": "RUNTIME_AUDIT_DIRECTORY",
+  "validator": {
+    "max_actions": 12,
+    "max_pump_seconds": 120,
+    "max_wait_seconds": 86400,
+    "max_total_pump_seconds": 240,
+    "max_total_seconds": 86400
+  }
+}
