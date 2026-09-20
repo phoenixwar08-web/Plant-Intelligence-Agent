@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plant-agent.local/schemas/episode.v1.schema.json",
+  "title": "soil3 Episode V1",
+  "x-lifecycle-notes": "One episode records one complete care experience: create opens it from a real state.v1 snapshot, update attaches caller-supplied facts while it is open, read returns it unchanged, and close finalizes it exactly once. Lifecycle is open -> closed; a closed record is immutable. strategy, gate_result, and outcome are set-once; executed_actions and feedback are append-only fact lists. At close, every tracked section nobody supplied is listed in missing_facts instead of being fabricated. The store computes state_binding.state_sha256 from the embedded snapshot using the same canonical encoding strategy.v1 binds with, so a strategy carrying a different state_sha256 is refused. The model's hidden thought process is never recorded: payloads carrying reasoning-shaped keys (chain_of_thought, hidden_reasoning, raw_reasoning, reasoning_trace, thinking) are refused, and only structured outputs such as reason_summary, confidence, and decision are stored. gate.v1 and feedback.v1 are planned protocols, so their sections are stored as the caller's structured payloads; a gate decision, when present, must use the allow / allow_with_warning / deny vocabulary. Cross-record binding checks and set-once/append semantics cannot be expressed in JSON Schema and are enforced by services/soil3/episode/episode_v1.py.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "episode_id",
+    "device_code",
+    "status",
+    "created_at",
+    "updated_at",
+    "closed_at",
+    "state_binding",
+    "initial_state",
+    "strategy",
+    "gate_result",
+    "executed_actions",
+    "feedback",
+    "outcome",
+    "missing_facts"
+  ],
+  "properties": {
+    "schema_version": {"const": "episode.v1"},
+    "episode_id": {"type": "string", "pattern": "^ep-[0-9a-f]{24}$"},
+    "device_code": {"const": "soil3"},
+    "status": {"enum": ["open", "closed"]},
+    "created_at": {"$ref": "#/$defs/rfc3339_utc"},
+    "updated_at": {"$ref": "#/$defs/rfc3339_utc"},
+    "closed_at": {
+      "oneOf": [{"$ref": "#/$defs/rfc3339_utc"}, {"type": "null"}],
+      "description": "Set exactly once, when the episode closes; null while open."
+    },
+    "state_binding": {
+      "type": "object",
+      "required": ["state_sha256", "state_observed_at", "state_generated_at"],
+      "properties": {
+        "state_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the embedded state.v1 snapshot under the same key-order-independent JSON encoding strategy.v1 uses, computed by the store; never caller-authored."
+        },
+        "state_observed_at": {
+          "oneOf": [{"$ref": "#/$defs/rfc3339_utc"}, {"type": "null"}],
+          "description": "The snapshot's observed_at normalized to the canonical notation when parseable; null when the source carried no usable time. Never invented."
+        },
+        "state_generated_at": {
+          "oneOf": [{"$ref": "#/$defs/rfc3339_utc"}, {"type": "null"}],
+          "description": "Traceability metadata, not a binding condition of its own, exactly as in strategy.v1."
+        }
+      },
+      "additionalProperties": false
+    },
+    "initial_state": {
+      "type": "object",
+      "required": ["schema_version", "device_code"],
+      "properties": {
+        "schema_version": {"const": "state.v1"},
+        "device_code": {"const": "soil3"}
+      },
+      "description": "The frozen state.v1 snapshot the episode was opened from, embedded verbatim and read-only. Its full contract lives with the state.v1 producer, not here."
+    },
+    "strategy": {
+      "oneOf": [{"type": "object"}, {"type": "null"}],
+      "description": "Caller-supplied strategy.v1 record (set-once). reason_summary and confidence are preserved exactly; a state_sha256 or state_observed_at that does not match the embedded snapshot is refused."
+    },
+    "gate_result": {
+      "oneOf": [{"type": "object"}, {"type": "null"}],
+      "description": "Caller-supplied gate result (set-once). gate.v1 is planned, so only the envelope is constrained here: decision, when present, is one of allow / allow_with_warning / deny, and reason_codes, when present, is a list of non-empty strings."
+    },
+    "executed_actions": {
+      "type": "array",
+      "items": {"type": "object"},
+      "description": "Append-only facts about what actually executed, as reported by the caller. executed_at, when present and parseable, is normalized to the canonical notation. The store never adds, edits, or removes entries."
+    },
+    "feedback": {
+      "type": "array",
+      "items": {"type": "object"},
+      "description": "Append-only factual post-action observations as reported by the caller. feedback.v1 is planned, so entries are stored as supplied; observed_at, when present and parseable, is normalized. Visual-feedback collection timing belongs to Issue #30, not to this record."
+    },
+    "outcome": {
+      "oneOf": [{"type": "object"}, {"type": "null"}],
+      "description": "Caller-supplied factual outcome evaluation (set-once; may be supplied at close). Independent evaluations are preserved as supplied; episode.v1 computes no unified reward."
+    },
+    "missing_facts": {
+      "type": "array",
+      "items": {"enum": ["strategy", "gate_result", "executed_actions", "feedback", "outcome"]},
+      "uniqueItems": true,
+      "description": "Finalized at close: the tracked sections nobody supplied. An empty fact list counts as absent. Absence is stated, never filled in."
+    }
+  },
+  "$defs": {
+    "rfc3339_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{6})?Z$",
+      "description": "The one timestamp notation episode.v1 writes: RFC 3339 in UTC with a Z suffix, the same form strategy.v1 carries and state.v1 writes for generated_at."
+    }
+  },
+  "additionalProperties": false
+}
