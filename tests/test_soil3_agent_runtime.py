@@ -30,6 +30,13 @@ class DeploymentAssetTests(unittest.TestCase):
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", source)
         self.assertIn("Requires=plant-agent-soil3-state.service", source)
         self.assertIn("After=plant-agent-soil3-state.service", source)
+        self.assertEqual(2, source.count("ReadOnlyPaths=/root/water"))
+        self.assertEqual(
+            2,
+            source.count(
+                "ReadWritePaths=/root/water/runtime/instances/soil3/agent_chain"
+            ),
+        )
         self.assertNotIn("mqtt", source.lower())
         self.assertNotIn("manual_water", source.lower())
         self.assertNotIn("phase3/main.py", source)

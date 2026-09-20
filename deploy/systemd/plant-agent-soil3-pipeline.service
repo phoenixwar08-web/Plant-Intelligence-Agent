@@ -13,4 +13,5 @@ ExecStart=/usr/bin/python3 -m services.soil3.agent_runtime.service pipeline --co
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
+ReadOnlyPaths=/root/water
 ReadWritePaths=/root/water/runtime/instances/soil3/agent_chain
