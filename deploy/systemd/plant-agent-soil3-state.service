@@ -1,0 +1,14 @@
+[Unit]
+Description=Plant Agent soil3 state.v1 snapshot (proposal-only)
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/water/releases/plant-intelligence-release
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/root/water/releases/plant-intelligence-release
+ExecStart=/usr/bin/python3 -m services.soil3.agent_runtime.service state --config /root/water/runtime/instances/soil3/agent_chain/config/runtime.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/root/water/runtime/instances/soil3/agent_chain

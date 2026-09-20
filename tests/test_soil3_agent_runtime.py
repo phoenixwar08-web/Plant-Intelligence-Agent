@@ -5,6 +5,36 @@ from pathlib import Path
 from unittest import mock
 
 
+ROOT = Path(__file__).resolve().parents[1]
+EXAMPLE_CONFIG = ROOT / "config" / "soil3_agent_runtime.example.json"
+UNIT_FILES = (
+    ROOT / "deploy" / "systemd" / "plant-agent-soil3-state.service",
+    ROOT / "deploy" / "systemd" / "plant-agent-soil3-state.timer",
+    ROOT / "deploy" / "systemd" / "plant-agent-soil3-pipeline.service",
+    ROOT / "deploy" / "systemd" / "plant-agent-soil3-pipeline.timer",
+)
+
+
+class DeploymentAssetTests(unittest.TestCase):
+    def test_example_config_is_nonsecret_offline_fixture(self):
+        """Fails if the deployable baseline gains a real provider or secret."""
+        value = json.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual("offline_fixture", value["provider_mode"])
+        self.assertFalse(value["exploration_requested"])
+        self.assertNotIn("api_key", json.dumps(value).lower())
+
+    def test_systemd_units_are_oneshot_and_do_not_name_control_paths(self):
+        """Fails if scheduling assets acquire a control or broker dependency."""
+        source = "\n".join(path.read_text(encoding="utf-8") for path in UNIT_FILES)
+        self.assertIn("Type=oneshot", source)
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", source)
+        self.assertIn("Requires=plant-agent-soil3-state.service", source)
+        self.assertIn("After=plant-agent-soil3-state.service", source)
+        self.assertNotIn("mqtt", source.lower())
+        self.assertNotIn("manual_water", source.lower())
+        self.assertNotIn("phase3/main.py", source)
+
+
 class StateProducerTests(unittest.TestCase):
     def runtime_config_value(self, root: Path):
         return {
