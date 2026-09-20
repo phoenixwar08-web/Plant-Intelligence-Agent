@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "soil3 Cloud Gate V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "gate_id", "decided_at", "device_code", "strategy_id", "state_observed_at", "state_sha256", "decision", "reason_codes", "warning_codes", "budget", "execution"],
+  "properties": {
+    "schema_version": {"const": "gate.v1"},
+    "gate_id": {"type": "string", "format": "uuid"},
+    "decided_at": {"type": "string"},
+    "device_code": {"type": ["string", "null"]},
+    "strategy_id": {"type": ["string", "null"]},
+    "state_observed_at": {"type": ["string", "null"]},
+    "state_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decision": {"enum": ["allow", "allow_with_warning", "deny"]},
+    "reason_codes": {"type": "array", "items": {"type": "string"}},
+    "warning_codes": {"type": "array", "items": {"type": "string"}},
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exploration_requested", "requested_water_seconds", "reserved_water_seconds", "remaining_water_seconds", "reservation_id"],
+      "properties": {
+        "exploration_requested": {"type": "boolean"},
+        "requested_water_seconds": {"type": "number", "minimum": 0},
+        "reserved_water_seconds": {"type": "number", "minimum": 0},
+        "remaining_water_seconds": {"type": ["number", "null"], "minimum": 0},
+        "reservation_id": {"type": ["string", "null"]}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "actuator_commands_allowed"],
+      "properties": {
+        "mode": {"const": "admission_only"},
+        "actuator_commands_allowed": {"const": false}
+      }
+    }
+  }
+}
