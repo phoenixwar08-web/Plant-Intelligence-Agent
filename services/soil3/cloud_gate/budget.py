@@ -54,11 +54,20 @@ def _finite_nonnegative(value: Any) -> float:
     return number
 
 
+def _strategy_fingerprint(value: Any) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise BudgetLedgerError("invalid strategy fingerprint")
+    return value
+
+
 def _validate_reservation(value: dict[str, Any]) -> None:
     if not isinstance(value.get("device_code"), str) or not value["device_code"]:
         raise BudgetLedgerError("budget ledger has invalid reservation")
     if not isinstance(value.get("reservation_id"), str) or not value["reservation_id"]:
         raise BudgetLedgerError("budget ledger has invalid reservation")
+    _strategy_fingerprint(value.get("strategy_sha256"))
     _timestamp(value.get("decided_at"))
     _finite_nonnegative(value.get("requested_water_seconds"))
     _finite_nonnegative(value.get("reserved_water_seconds"))
@@ -76,6 +85,7 @@ class BudgetLedger:
         self,
         device_code: str,
         reservation_id: str,
+        strategy_sha256: str,
         requested_water_seconds: float,
         policy: "GatePolicy",
         decided_at: str,
@@ -84,9 +94,13 @@ class BudgetLedger:
             raise BudgetLedgerError("invalid device code")
         if not isinstance(reservation_id, str) or not reservation_id:
             raise BudgetLedgerError("invalid reservation id")
+        strategy_sha256 = _strategy_fingerprint(strategy_sha256)
         requested = _finite_nonnegative(requested_water_seconds)
         now = _timestamp(decided_at)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise BudgetLedgerError("budget ledger directory is unavailable") from error
         self._acquire_lock()
         try:
             ledger = self._read()
@@ -101,7 +115,10 @@ class BudgetLedger:
                 None,
             )
             if existing is not None:
-                if float(existing["requested_water_seconds"]) != requested:
+                if (
+                    float(existing["requested_water_seconds"]) != requested
+                    or existing["strategy_sha256"] != strategy_sha256
+                ):
                     raise BudgetReservationConflict("budget reservation request conflicts")
                 return BudgetReservation(
                     reservation_id=reservation_id,
@@ -132,6 +149,7 @@ class BudgetLedger:
                 {
                     "device_code": device_code,
                     "reservation_id": reservation_id,
+                    "strategy_sha256": strategy_sha256,
                     "decided_at": decided_at,
                     "requested_water_seconds": result.requested_water_seconds,
                     "reserved_water_seconds": result.reserved_water_seconds,
@@ -145,15 +163,30 @@ class BudgetLedger:
                 raise BudgetLedgerError("budget ledger cannot be written") from error
             return result
         finally:
-            self.lock_path.unlink(missing_ok=True)
+            self._release_lock()
 
     def _acquire_lock(self) -> None:
         try:
             descriptor = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError as error:
             raise BudgetLedgerError("budget ledger is locked") from error
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            output.write(str(os.getpid()))
+        except OSError as error:
+            raise BudgetLedgerError("budget ledger lock is unavailable") from error
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                output.write(str(os.getpid()))
+        except OSError as error:
+            try:
+                self.lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise BudgetLedgerError("budget ledger lock is unavailable") from error
+
+    def _release_lock(self) -> None:
+        try:
+            self.lock_path.unlink(missing_ok=True)
+        except OSError as error:
+            raise BudgetLedgerError("budget ledger lock cannot be released") from error
 
     def _read(self) -> dict[str, list[dict[str, Any]]]:
         if not self.path.exists():

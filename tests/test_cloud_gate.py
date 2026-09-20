@@ -3,6 +3,7 @@ import unittest
 import uuid
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from services.soil3.cloud_gate.budget import BudgetLedger
 from services.soil3.cloud_gate import service
@@ -127,16 +128,28 @@ class CloudGateAdmissionTests(unittest.TestCase):
         self.assertEqual("deny", record["decision"])
         self.assertIn("strategy_invalid:action[0]:invalid_pump_seconds_type", record["reason_codes"])
 
+    def test_invalid_reference_fields_are_rendered_as_null(self):
+        state = fresh_state()
+        strategy = valid_strategy(state)
+        state["device_code"] = {"not": "a string"}
+        strategy["strategy_id"] = ["not", "a string"]
+
+        record = evaluate_gate(state, strategy, policy(), False)
+
+        self.assertEqual("deny", record["decision"])
+        self.assertIsNone(record["device_code"])
+        self.assertIsNone(record["strategy_id"])
+
 
 class CloudGateBudgetTests(unittest.TestCase):
     def test_reopening_ledger_with_same_reservation_does_not_charge_budget_twice(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "budget.json"
             first = BudgetLedger(path).reserve(
-                "soil3", "same-reservation", 6, policy(), "2026-09-20T10:00:00Z"
+                "soil3", "same-reservation", "a" * 64, 6, policy(), "2026-09-20T10:00:00Z"
             )
             repeated = BudgetLedger(path).reserve(
-                "soil3", "same-reservation", 6, policy(), "2026-09-20T10:00:00Z"
+                "soil3", "same-reservation", "a" * 64, 6, policy(), "2026-09-20T10:00:00Z"
             )
 
         self.assertTrue(first.available)
@@ -146,8 +159,8 @@ class CloudGateBudgetTests(unittest.TestCase):
     def test_budget_exhaustion_returns_unavailable_without_new_charge(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger = BudgetLedger(Path(directory) / "budget.json")
-            first = ledger.reserve("soil3", "first", 6, policy(), "2026-09-20T10:00:00Z")
-            exhausted = ledger.reserve("soil3", "second", 6, policy(), "2026-09-20T10:00:00Z")
+            first = ledger.reserve("soil3", "first", "a" * 64, 6, policy(), "2026-09-20T10:00:00Z")
+            exhausted = ledger.reserve("soil3", "second", "b" * 64, 6, policy(), "2026-09-20T10:00:00Z")
 
         self.assertTrue(first.available)
         self.assertFalse(exhausted.available)
@@ -204,6 +217,36 @@ class CloudGateBudgetTests(unittest.TestCase):
         self.assertEqual("allow", first["decision"])
         self.assertEqual("deny", conflicting["decision"])
         self.assertEqual(["budget_reservation_conflict"], conflicting["reason_codes"])
+
+    def test_changed_non_water_content_under_same_strategy_id_is_denied_as_budget_conflict(self):
+        state = fresh_state()
+        strategy = valid_strategy(
+            state, [{"action_id": "water", "type": "water", "pump_seconds": 6}]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = BudgetLedger(Path(directory) / "budget.json")
+            first = evaluate_gate(state, strategy, policy(), True, ledger)
+            strategy["actions"].append(
+                {"action_id": "wait", "type": "wait", "seconds": 60}
+            )
+            conflicting = evaluate_gate(state, strategy, policy(), True, ledger)
+
+        self.assertEqual("allow", first["decision"])
+        self.assertEqual("deny", conflicting["decision"])
+        self.assertEqual(["budget_reservation_conflict"], conflicting["reason_codes"])
+
+    def test_ledger_directory_error_fails_closed_in_gate(self):
+        state = fresh_state()
+        strategy = valid_strategy(
+            state, [{"action_id": "water", "type": "water", "pump_seconds": 6}]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = BudgetLedger(Path(directory) / "budget.json")
+            with patch("services.soil3.cloud_gate.budget.Path.mkdir", side_effect=OSError("denied")):
+                record = evaluate_gate(state, strategy, policy(), True, ledger)
+
+        self.assertEqual("deny", record["decision"])
+        self.assertEqual(["budget_ledger_unavailable"], record["reason_codes"])
 
 
 class CloudGateCliTests(unittest.TestCase):

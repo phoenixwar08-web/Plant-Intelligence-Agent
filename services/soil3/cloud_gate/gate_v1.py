@@ -121,6 +121,10 @@ def _budget_record(exploration_requested: bool, requested_water_seconds: float) 
     }
 
 
+def _string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def evaluate_gate(
     state: dict[str, Any],
     strategy: dict[str, Any],
@@ -195,6 +199,7 @@ def evaluate_gate(
 
     decided_at = _utc_now()
     state_sha256 = fingerprint(state)
+    strategy_sha256 = fingerprint(strategy) if validation.accepted else None
     requested_water_seconds = (
         _requested_water_seconds(strategy)
         if exploration_requested and validation.accepted
@@ -210,6 +215,7 @@ def evaluate_gate(
                 reservation = ledger.reserve(
                     "soil3",
                     reservation_id,
+                    strategy_sha256,
                     requested_water_seconds,
                     policy,
                     decided_at,
@@ -234,8 +240,8 @@ def evaluate_gate(
         "schema_version": "gate.v1",
         "gate_id": str(uuid.uuid4()),
         "decided_at": decided_at,
-        "device_code": state.get("device_code"),
-        "strategy_id": strategy.get("strategy_id"),
+        "device_code": _string_or_none(state.get("device_code")),
+        "strategy_id": _string_or_none(strategy.get("strategy_id")),
         "state_observed_at": normalize_timestamp(state.get("observed_at")),
         "state_sha256": state_sha256,
         "decision": decision,
