@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "runner_state.v1.schema.json",
+  "title": "soil3 strategy dry-run state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "strategy_id", "strategy_sha256", "mode", "status", "current_step_index", "created_at", "updated_at", "steps", "execution"],
+  "properties": {
+    "schema_version": {"const": "runner_state.v1"},
+    "strategy_id": {"type": "string", "format": "uuid"},
+    "strategy_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "mode": {"const": "dry_run"},
+    "status": {"enum": ["running", "waiting", "completed", "stopped"]},
+    "current_step_index": {"type": "integer", "minimum": 0},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "action", "status", "started_at", "completed_at", "wait_until", "result"],
+        "properties": {
+          "index": {"type": "integer", "minimum": 0},
+          "action": {"type": "object"},
+          "status": {"enum": ["pending", "waiting", "completed", "skipped"]},
+          "started_at": {"type": ["string", "null"]},
+          "completed_at": {"type": ["string", "null"]},
+          "wait_until": {"type": ["string", "null"]},
+          "result": {"type": ["object", "null"]}
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["physical_actions_performed", "phase3_called"],
+      "properties": {
+        "physical_actions_performed": {"const": false},
+        "phase3_called": {"const": false}
+      }
+    }
+  }
+}
