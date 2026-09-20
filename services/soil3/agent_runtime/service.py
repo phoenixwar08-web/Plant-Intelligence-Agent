@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .runtime_v1 import RuntimeConfig, write_state_snapshot
+from .runtime_v1 import RuntimeConfig, run_pipeline, write_state_snapshot
 
 
 def load_config(path: Path) -> RuntimeConfig:
@@ -26,10 +26,12 @@ def state_summary(config: RuntimeConfig) -> dict[str, Any]:
 
 def run(argv: list[str] | None = None) -> dict[str, Any]:
     parser = argparse.ArgumentParser(description="soil3 proposal-only agent runtime")
-    parser.add_argument("command", choices=("state",))
+    parser.add_argument("command", choices=("state", "pipeline"))
     parser.add_argument("--config", required=True, type=Path)
     args = parser.parse_args(argv)
     config = load_config(args.config)
+    if args.command == "pipeline":
+        return run_pipeline(config)
     return state_summary(config)
 
 

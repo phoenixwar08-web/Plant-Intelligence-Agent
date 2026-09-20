@@ -6,7 +6,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-import requests
+try:
+    import requests
+except ModuleNotFoundError:  # Offline fixture validation does not require an HTTP client.
+    requests = None
 
 
 class CloudStrategyError(RuntimeError):
@@ -30,7 +33,7 @@ class OpenAICompatibleClient:
         self,
         config: Dict[str, Any],
         api_key: str,
-        session: Any = requests,
+        session: Any = None,
     ) -> None:
         self.config = config
         self.api_key = api_key
@@ -83,6 +86,13 @@ class OpenAICompatibleClient:
             raise CloudStrategyError("missing_api_key", "cloud strategy API key is not configured")
 
         endpoint, payload, timeout, retries = self._request_plan(system_prompt, model_input)
+        if self.session is None:
+            if requests is None:
+                raise CloudStrategyError(
+                    "http_client_unavailable",
+                    "requests is required to use a real Cloud Strategy provider",
+                )
+            self.session = requests
 
         for attempt in range(retries + 1):
             try:

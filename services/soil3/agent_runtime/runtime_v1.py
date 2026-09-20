@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from services.soil3.cloud_gate.gate_v1 import GatePolicy
-from services.soil3.cloud_strategy.validator import StrategyValidator
+from services.soil3.cloud_gate.gate_v1 import GatePolicy, evaluate_gate
+from services.soil3.cloud_strategy.service import append_audit, run_chain
+from services.soil3.cloud_strategy.validator import PROMPT_VERSION, StrategyValidator, fingerprint, normalize_timestamp
+from services.soil3.episode.episode_v1 import EpisodeStore
+from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry.events import build_health_snapshot
 
@@ -111,6 +116,30 @@ class RuntimeConfig:
             "validator": dict(self.strategy_validator),
         }
 
+    @property
+    def strategy_output(self) -> Path:
+        return self.runtime_root / "strategy" / "latest.json"
+
+    @property
+    def gate_output(self) -> Path:
+        return self.runtime_root / "gate" / "latest.json"
+
+    @property
+    def runner_dir(self) -> Path:
+        return self.runtime_root / "runner"
+
+    @property
+    def episode_dir(self) -> Path:
+        return self.runtime_root / "episodes"
+
+    @property
+    def audit_dir(self) -> Path:
+        return self.runtime_root / "audit"
+
+    @property
+    def runs_dir(self) -> Path:
+        return self.runtime_root / "runs"
+
 
 def write_state_snapshot(config: RuntimeConfig) -> dict[str, Any]:
     snapshot = build_health_snapshot(
@@ -123,3 +152,117 @@ def write_state_snapshot(config: RuntimeConfig) -> dict[str, Any]:
     state = StateBuilder(config.device_code).build_from_health_snapshot(snapshot)
     atomic_write_json(config.state_output, state)
     return state
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _resolve_prompt_path(prompt_path: Path) -> Path:
+    if prompt_path.is_absolute():
+        return prompt_path
+    return Path(__file__).resolve().parents[3] / prompt_path
+
+
+def build_offline_fixture(state: dict[str, Any]) -> dict[str, Any]:
+    """Build a visibly offline proposal for integration-only validation."""
+
+    observed_at = normalize_timestamp(state["observed_at"])
+    generated_at = _utc_now()
+    return {
+        "schema_version": "strategy.v1",
+        "strategy_id": str(uuid.uuid4()),
+        "device_code": state["device_code"],
+        "state_observed_at": observed_at,
+        "state_generated_at": normalize_timestamp(state["generated_at"]),
+        "state_sha256": fingerprint(state),
+        "created_at": generated_at,
+        "actions": [{"action_id": "offline-fixture-stop", "type": "stop"}],
+        "reason_summary": ["offline_fixture", "non_executing_runtime_validation"],
+        "expected_outcome": {
+            "soil_moisture": "not_evaluated",
+            "risk_notes": ["offline_fixture"],
+        },
+        "confidence": 0.0,
+        "model": {
+            "provider": "offline_fixture",
+            "name": "offline_fixture",
+            "prompt_version": PROMPT_VERSION,
+        },
+        "execution": {"mode": "proposal_only", "actuator_commands_allowed": False},
+    }
+
+
+def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
+    """Run one proposal-only state-to-episode cycle without actuator access."""
+
+    state = write_state_snapshot(config)
+    prompt = _resolve_prompt_path(config.prompt_path).read_text(encoding="utf-8")
+    strategy_result = run_chain(
+        state=state,
+        config=config.strategy_config(),
+        prompt=prompt,
+        fixture_content=json.dumps(build_offline_fixture(state)),
+    )
+    validation = strategy_result.get("validation")
+    if not isinstance(validation, dict) or not validation.get("accepted") or not isinstance(validation.get("strategy"), dict):
+        raise RuntimeError("offline fixture strategy was rejected")
+
+    strategy = validation["strategy"]
+    atomic_write_json(config.strategy_output, strategy)
+    audit_path = append_audit(config.audit_dir, strategy_result)
+    gate = evaluate_gate(
+        state=state,
+        strategy=strategy,
+        policy=config.gate_policy,
+        exploration_requested=False,
+    )
+    atomic_write_json(config.gate_output, gate)
+
+    episode_store = EpisodeStore(config.episode_dir)
+    episode = episode_store.create(state)
+    episode_id = episode["episode_id"]
+    episode_store.update(episode_id, strategy=strategy, gate_result=gate)
+
+    runner_path: str | None = None
+    if gate["decision"] == "deny":
+        runner_status = "skipped_due_to_gate_deny"
+        episode_store.close(episode_id)
+    elif gate["decision"] in {"allow", "allow_with_warning"}:
+        runner_store = RunnerStore(config.runner_dir)
+        runner_result = DryRunRunner(runner_store).run(strategy, state)
+        runner_path = str(runner_store.path_for(strategy["strategy_id"]))
+        executed_actions = [
+            {
+                **step["result"],
+                "action_id": step["action"]["action_id"],
+                "executed_at": step["completed_at"],
+            }
+            for step in runner_result["steps"]
+            if step["status"] == "completed" and isinstance(step.get("result"), dict)
+        ]
+        episode_store.update(episode_id, executed_actions=executed_actions)
+        episode_store.close(episode_id)
+        runner_status = "dry_run_completed"
+    else:
+        raise RuntimeError(f"unexpected gate decision: {gate['decision']}")
+
+    run_id = str(uuid.uuid4())
+    record = {
+        "schema_version": "agent_runtime.v1",
+        "run_id": run_id,
+        "provider_mode": config.provider_mode,
+        "state_path": str(config.state_output),
+        "state_sha256": fingerprint(state),
+        "strategy_path": str(config.strategy_output),
+        "gate_path": str(config.gate_output),
+        "gate_decision": gate["decision"],
+        "runner_status": runner_status,
+        "runner_path": runner_path,
+        "episode_id": episode_id,
+        "episode_path": str(episode_store.episode_path(episode_id)),
+        "audit_path": str(audit_path),
+        "execution": {"physical_actions_performed": False, "phase3_called": False},
+    }
+    atomic_write_json(config.runs_dir / f"{run_id}.json", record)
+    return record

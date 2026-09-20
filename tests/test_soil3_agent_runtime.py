@@ -116,5 +116,93 @@ class StateProducerTests(unittest.TestCase):
             self.assertEqual(["predictor_circuit", "pump_active"], summary["safety_flags"])
 
 
+class PipelineTests(StateProducerTests):
+    def test_pipeline_cli_requires_explicit_config_and_reports_non_execution(self):
+        """Fails if the pipeline silently acquires a config or claims physical work."""
+        from services.soil3.agent_runtime import service
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "runtime.json"
+            config_path.write_text(
+                json.dumps(self.runtime_config_value(root)), encoding="utf-8"
+            )
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ):
+                summary = service.run(["pipeline", "--config", str(config_path)])
+
+            self.assertEqual("deny", summary["gate_decision"])
+            self.assertEqual("skipped_due_to_gate_deny", summary["runner_status"])
+            self.assertEqual(
+                {"physical_actions_performed": False, "phase3_called": False},
+                summary["execution"],
+            )
+
+    def test_gate_deny_skips_runner_and_closes_episode_with_missing_facts(self):
+        """Fails if a deny is ever treated as permission to start dry-run work."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.episode.episode_v1 import EpisodeStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ):
+                record = run_pipeline(config)
+
+            self.assertEqual("offline_fixture", record["provider_mode"])
+            self.assertEqual("deny", record["gate_decision"])
+            self.assertEqual("skipped_due_to_gate_deny", record["runner_status"])
+            self.assertIsNone(record["runner_path"])
+            self.assertEqual(
+                {"physical_actions_performed": False, "phase3_called": False},
+                record["execution"],
+            )
+            episode = EpisodeStore(config.episode_dir).read(record["episode_id"])
+            self.assertEqual("closed", episode["status"])
+            self.assertIn("executed_actions", episode["missing_facts"])
+            self.assertIn("feedback", episode["missing_facts"])
+            self.assertIn("outcome", episode["missing_facts"])
+
+    def test_gate_allow_records_runner_dry_run_without_physical_action(self):
+        """Fails if an admitted proposal can gain a Phase3 or physical side effect."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.episode.episode_v1 import EpisodeStore
+
+        allowed_gate = {
+            "schema_version": "gate.v1",
+            "decision": "allow",
+            "reason_codes": [],
+            "warning_codes": [],
+            "execution": {
+                "mode": "admission_only",
+                "actuator_commands_allowed": False,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate",
+                return_value=allowed_gate,
+            ):
+                record = run_pipeline(config)
+
+            runner = json.loads(Path(record["runner_path"]).read_text(encoding="utf-8"))
+            self.assertEqual("dry_run", runner["mode"])
+            self.assertFalse(runner["execution"]["physical_actions_performed"])
+            self.assertFalse(runner["execution"]["phase3_called"])
+            episode = EpisodeStore(config.episode_dir).read(record["episode_id"])
+            self.assertNotIn("executed_actions", episode["missing_facts"])
+            self.assertEqual("dry_run_stop", episode["executed_actions"][0]["kind"])
+
+
 if __name__ == "__main__":
     unittest.main()
