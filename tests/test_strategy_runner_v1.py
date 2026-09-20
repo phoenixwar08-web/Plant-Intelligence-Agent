@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from services.soil3.cloud_strategy.validator import PROMPT_VERSION
+from services.soil3.cloud_strategy.validator import PROMPT_VERSION, StrategyValidator, fingerprint
 from services.soil3.runner.runner_v1 import (
     RUN_STATUSES,
     STEP_STATUSES,
@@ -154,6 +154,37 @@ class StrategyRunnerV1Tests(unittest.TestCase):
             with self.subTest(strategy_id=item.get("strategy_id")):
                 with self.assertRaises(ValueError):
                     self.runner().start(item)
+
+    def test_runner_matches_formal_action_limits_before_persisting(self):
+        state = {"device_code": "soil3", "observed_at": "2026-09-20T08:00:00Z"}
+        twelve_actions = [
+            {"action_id": f"observe-{index}", "type": "observe"}
+            for index in range(12)
+        ]
+        thirteen_actions = twelve_actions + [{"action_id": "observe-12", "type": "observe"}]
+        cases = {
+            "water 120 seconds": ([{"action_id": "water", "type": "water", "pump_seconds": 120}], True),
+            "water 121 seconds": ([{"action_id": "water", "type": "water", "pump_seconds": 121}], False),
+            "wait 86400 seconds": ([{"action_id": "wait", "type": "wait", "seconds": 86400}], True),
+            "wait 86401 seconds": ([{"action_id": "wait", "type": "wait", "seconds": 86401}], False),
+            "twelve actions": (twelve_actions, True),
+            "thirteen actions": (thirteen_actions, False),
+        }
+
+        for label, (actions, accepted) in cases.items():
+            with self.subTest(case=label):
+                item = strategy(actions)
+                item["state_sha256"] = fingerprint(state)
+                formal = StrategyValidator().validate(item, state)
+                self.assertEqual(accepted, formal.accepted)
+
+                if accepted:
+                    record = self.runner().start(item)
+                    self.assertEqual(item["strategy_id"], record["strategy_id"])
+                else:
+                    with self.assertRaises(ValueError):
+                        self.runner().start(item)
+                    self.assertFalse(self.store.exists(item["strategy_id"]))
 
     def test_store_rejects_path_traversal_and_corrupt_state(self):
         with self.assertRaises(ValueError):

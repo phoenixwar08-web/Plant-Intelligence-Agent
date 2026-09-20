@@ -1,19 +1,15 @@
 from __future__ import annotations
 
 import copy
-import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict
 
 from services.soil3.cloud_strategy.validator import (
-    ALLOWED_ACTIONS,
     EXPECTED_DEVICE_CODE,
-    REQUIRED_FIELDS,
+    StrategyValidator,
     fingerprint,
-    is_canonical_timestamp,
-    is_state_hash,
     parse_timestamp,
 )
 from services.soil3.telemetry.common import atomic_write_json, load_json
@@ -33,64 +29,23 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _is_positive_number(value: Any) -> bool:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    try:
-        return math.isfinite(float(value)) and float(value) > 0
-    except (OverflowError, ValueError):
-        return False
-
-
 def _validate_strategy_shape(strategy: Any) -> None:
-    if not isinstance(strategy, dict) or strategy.get("schema_version") != "strategy.v1":
-        raise ValueError("runner requires a strategy.v1 object")
-    if set(strategy) != REQUIRED_FIELDS:
-        raise ValueError("strategy fields do not match strategy.v1")
-    try:
-        uuid.UUID(str(strategy.get("strategy_id")))
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise ValueError("strategy_id must be a UUID") from exc
-    if strategy.get("device_code") != EXPECTED_DEVICE_CODE:
-        raise ValueError("runner only accepts soil3 strategies")
-    if not is_state_hash(strategy.get("state_sha256")):
-        raise ValueError("strategy has an invalid state_sha256")
-    for field in ("state_observed_at", "state_generated_at", "created_at"):
-        if not is_canonical_timestamp(strategy.get(field)):
-            raise ValueError(f"strategy has an invalid {field}")
-    execution = strategy.get("execution")
-    if execution != {"mode": "proposal_only", "actuator_commands_allowed": False}:
-        raise ValueError("strategy execution metadata is not proposal-only")
-    actions = strategy.get("actions")
-    if not isinstance(actions, list) or not actions:
-        raise ValueError("strategy actions must be a non-empty list")
-    seen = set()
-    stop_seen = False
-    for index, action in enumerate(actions):
-        if not isinstance(action, dict):
-            raise ValueError(f"action[{index}] must be an object")
-        action_id = action.get("action_id")
-        if not isinstance(action_id, str) or not action_id.strip() or action_id in seen:
-            raise ValueError(f"action[{index}] has an invalid or duplicate action_id")
-        seen.add(action_id)
-        action_type = action.get("type")
-        if action_type not in ALLOWED_ACTIONS:
-            raise ValueError(f"action[{index}] has an unknown type")
-        if stop_seen:
-            raise ValueError("actions after stop are not allowed")
-        stop_seen = action_type == "stop"
-        if action_type == "water" and not _is_positive_number(action.get("pump_seconds")):
-            raise ValueError(f"action[{index}] has invalid pump_seconds")
-        if action_type == "wait" and not _is_positive_number(action.get("seconds")):
-            raise ValueError(f"action[{index}] has invalid wait seconds")
-        allowed = {
-            "water": {"action_id", "type", "pump_seconds"},
-            "wait": {"action_id", "type", "seconds"},
-            "observe": {"action_id", "type"},
-            "stop": {"action_id", "type"},
-        }[action_type]
-        if set(action) != allowed:
-            raise ValueError(f"action[{index}] fields do not match strategy.v1")
+    candidate = strategy if isinstance(strategy, dict) else {}
+    # Runner receives a strategy record, not the complete state.v1 snapshot it
+    # was bound to. Reuse the formal validator for every protocol constraint and
+    # suppress only the inevitably unverifiable content-binding mismatch.
+    validation_state = {
+        "device_code": EXPECTED_DEVICE_CODE,
+        "observed_at": candidate.get("state_observed_at"),
+    }
+    validation = StrategyValidator().validate(strategy, validation_state)
+    reasons = [
+        reason
+        for reason in validation.reason_codes
+        if reason != "state_sha256_mismatch"
+    ]
+    if reasons:
+        raise ValueError("runner rejected strategy.v1: " + ", ".join(reasons))
 
 
 class RunnerStore:
