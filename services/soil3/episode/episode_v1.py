@@ -66,9 +66,9 @@ FORBIDDEN_PAYLOAD_KEYS = frozenset({
     "thinking",
 })
 
-# gate.v1 is a planned protocol, so the store does not assume its full contract;
-# it accepts the caller's structured result as-is. When a decision is present it
-# must use the three-outcome vocabulary from the V3 plan document. A field the
+# gate.v1 is implemented, but Issue #17 deliberately does not make Episode a
+# Gate consumer. The store accepts the caller's structured result as-is; when a
+# decision is present it must use the three-outcome vocabulary. A field the
 # caller did not supply is never invented.
 GATE_DECISIONS = ("allow", "allow_with_warning", "deny")
 

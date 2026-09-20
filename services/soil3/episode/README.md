@@ -40,9 +40,11 @@ nothing is deleted or repaired by this module.
   `confidence` on the strategy, `decision` and `reason_codes` on the gate
   result, and the outcome's independent evaluations are preserved exactly as
   supplied. No unified reward is computed.
-- `gate.v1` and `feedback.v1` are planned protocols, so their sections are
-  stored as the caller's structured payloads with only envelope checks (object
-  / list of objects, decision vocabulary when present). This module writes no
+- `gate.v1` is implemented, but this Issue does not make Episode a Gate
+  consumer, so `gate_result` remains a caller's structured payload with only
+  envelope checks. `feedback.v1` remains planned and is stored with the same
+  envelope checks (object / list of objects, decision vocabulary when present).
+  This module writes no
   consumer that assumes a planned contract exists.
 - A section nobody supplied stays `null`/empty and is listed in
   `missing_facts` at close. Missing facts are stated, never invented —
