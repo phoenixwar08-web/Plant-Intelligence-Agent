@@ -170,6 +170,15 @@ class TestCreate(StoreTestCase):
             self.store.create(state)
         self.assertIn("initial_state_forbidden_key:chain_of_thought", caught.exception.reasons)
 
+    def test_create_refuses_deeply_nested_reasoning_keys_without_writing(self):
+        invalid = copy.deepcopy(self.state)
+        invalid["extensions"] = {"quality_context": {"thinking": "not stored"}}
+
+        with self.assertRaises(EpisodeError) as caught:
+            self.store.create(invalid)
+        self.assertIn("initial_state_forbidden_key:thinking", caught.exception.reasons)
+        self.assertEqual([], list(self.store_dir.glob("*.json")))
+
 
 class TestRead(StoreTestCase):
     def test_read_returns_the_stored_record_with_lifecycle_status(self):
@@ -293,6 +302,25 @@ class TestUpdate(StoreTestCase):
         self.assertIn("feedback[0]:not_object", caught.exception.reasons)
         self.assertIn("feedback[1]:forbidden_key:chain_of_thought", caught.exception.reasons)
         self.assertEqual(self.store.read(self.episode_id)["feedback"], [])
+
+    def test_update_refuses_nested_feedback_evidence_without_changing_file(self):
+        path = self.store.episode_path(self.episode_id)
+        before = path.read_bytes()
+        feedback = [
+            {
+                "evidence": {
+                    "measurements": [
+                        {"samples": [{"chain_of_thought": "not stored"}]},
+                    ],
+                },
+            },
+        ]
+
+        with self.assertRaises(EpisodeError) as caught:
+            self.store.update(self.episode_id, feedback=feedback)
+        self.assertIn("feedback[0]:forbidden_key:chain_of_thought", caught.exception.reasons)
+        self.assertEqual(before, path.read_bytes())
+        self.assertEqual([], self.store.read(self.episode_id)["feedback"])
 
     def test_forbidden_key_check_is_case_insensitive(self):
         for key in sorted(FORBIDDEN_PAYLOAD_KEYS):

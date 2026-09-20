@@ -100,8 +100,22 @@ def new_episode_id() -> str:
     return "ep-" + uuid.uuid4().hex[:24]
 
 
-def _forbidden_keys(value: Dict[str, Any]) -> List[str]:
-    return sorted(key for key in value if isinstance(key, str) and key.lower() in FORBIDDEN_PAYLOAD_KEYS)
+def _forbidden_keys(value: Any) -> List[str]:
+    """Find reasoning-shaped keys at every dict/list level of one payload."""
+    found = set()
+
+    def visit(current: Any) -> None:
+        if isinstance(current, dict):
+            for key, child in current.items():
+                if isinstance(key, str) and key.lower() in FORBIDDEN_PAYLOAD_KEYS:
+                    found.add(key)
+                visit(child)
+        elif isinstance(current, list):
+            for child in current:
+                visit(child)
+
+    visit(value)
+    return sorted(found)
 
 
 def _is_confidence(value: Any) -> bool:
