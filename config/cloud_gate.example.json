@@ -1,0 +1,6 @@
+{
+  "warning_age_seconds": 900,
+  "deny_age_seconds": 18000,
+  "window_seconds": 86400,
+  "max_exploration_water_seconds": 0
+}
