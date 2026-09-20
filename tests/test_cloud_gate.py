@@ -12,7 +12,24 @@ from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
 from services.soil3.state.state_v1 import StateBuilder
 
 
+SAFE_PHASE3_FLAGS = {
+    "pump_active": False,
+    "pending_soak": False,
+    "water_delivery_suspect": {"active": False},
+    "reservoir_empty_suspect": {"active": False},
+    "low_wet_recovery_suspect": {"active": False},
+    "sensor_fault": {"active": False},
+    "dynamic_cooldown": {"active": False},
+    "predictor_circuit": {"state": "CLOSED"},
+    "watering_trigger_guard": {"active": False},
+    "recent_response_guard": {"active": False},
+    "hard_safety_low_guard": {"active": False},
+    "cloud_protection": {"active": False},
+}
+
+
 def fresh_state(*, soil_age_sec=60, phase3_state_age_sec=60, flags=None):
+    phase3_flags = {**SAFE_PHASE3_FLAGS, **(flags or {})}
     state = StateBuilder("soil3").build(
         {
             "observed_at": "2026-09-20T10:00:00Z",
@@ -21,7 +38,7 @@ def fresh_state(*, soil_age_sec=60, phase3_state_age_sec=60, flags=None):
                 {"timestamp": "2026-09-20T09:59:00Z", "humidity": 31.4, "temperature": 24.1}
             ],
             "source_timestamps": {"phase3_state": "2026-09-20T09:59:00Z"},
-            "system_state": {"pump_active": False, **(flags or {})},
+            "system_state": phase3_flags,
         }
     )
     state["data_quality"]["soil_age_sec"] = soil_age_sec
@@ -107,6 +124,43 @@ class CloudGateAdmissionTests(unittest.TestCase):
         self.assertEqual("deny", record["decision"])
         self.assertEqual(["safety_flag_active:sensor_fault"], record["reason_codes"])
 
+    def test_missing_or_malformed_phase3_safety_facts_fail_closed(self):
+        cases = {
+            "flags missing": lambda state: state["safety"].pop("flags"),
+            "flags empty": lambda state: state["safety"].update({"flags": {}}),
+            "predictor missing": lambda state: state["safety"]["flags"].pop("predictor_circuit"),
+            "flags wrong type": lambda state: state["safety"].update({"flags": []}),
+            "protection malformed": lambda state: state["safety"]["flags"].update(
+                {"sensor_fault": {"active": "false"}}
+            ),
+            "predictor malformed": lambda state: state["safety"]["flags"].update(
+                {"predictor_circuit": {"state": "UNKNOWN"}}
+            ),
+        }
+        for required_flag in SAFE_PHASE3_FLAGS:
+            cases[f"{required_flag} missing"] = (
+                lambda state, key=required_flag: state["safety"]["flags"].pop(key)
+            )
+
+        for label, mutate in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                state = fresh_state()
+                mutate(state)
+                ledger_path = Path(directory) / "budget.json"
+                record = evaluate_gate(
+                    state,
+                    valid_strategy(
+                        state,
+                        [{"action_id": "water", "type": "water", "pump_seconds": 1}],
+                    ),
+                    policy(),
+                    True,
+                    BudgetLedger(ledger_path),
+                )
+
+                self.assertEqual("deny", record["decision"])
+                self.assertFalse(ledger_path.exists())
+
     def test_non_boolean_exploration_request_is_denied_without_schema_violation(self):
         state = fresh_state()
 
@@ -166,6 +220,55 @@ class CloudGateBudgetTests(unittest.TestCase):
         self.assertFalse(exhausted.available)
         self.assertEqual(0.0, exhausted.reserved_water_seconds)
         self.assertEqual(4.0, exhausted.remaining_water_seconds)
+
+    def test_budget_denial_leaves_persisted_ledger_bytes_unchanged(self):
+        state = fresh_state()
+        first_strategy = valid_strategy(
+            state, [{"action_id": "water", "type": "water", "pump_seconds": 6}]
+        )
+        denied_strategy = valid_strategy(
+            state, [{"action_id": "water", "type": "water", "pump_seconds": 1}]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "budget.json"
+            ledger = BudgetLedger(ledger_path)
+            allowed = evaluate_gate(state, first_strategy, policy(limit=6), True, ledger)
+            before = ledger_path.read_bytes()
+            denied = evaluate_gate(state, denied_strategy, policy(limit=6), True, ledger)
+            after = ledger_path.read_bytes()
+
+        self.assertEqual("allow", allowed["decision"])
+        self.assertEqual("deny", denied["decision"])
+        self.assertIn("exploration_budget_exhausted", denied["reason_codes"])
+        self.assertEqual(before, after)
+
+    def test_only_allowed_exploration_creates_a_budget_reservation(self):
+        state = fresh_state()
+        strategy = valid_strategy(
+            state, [{"action_id": "water", "type": "water", "pump_seconds": 1}]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "budget.json"
+            denied_state = fresh_state()
+            denied_state["safety"]["flags"] = {}
+            denied = evaluate_gate(
+                denied_state,
+                valid_strategy(
+                    denied_state,
+                    [{"action_id": "water", "type": "water", "pump_seconds": 1}],
+                ),
+                policy(),
+                True,
+                BudgetLedger(ledger_path),
+            )
+            self.assertFalse(ledger_path.exists())
+
+            allowed = evaluate_gate(state, strategy, policy(), True, BudgetLedger(ledger_path))
+            persisted = json.loads(ledger_path.read_text(encoding="utf-8"))
+
+        self.assertEqual("deny", denied["decision"])
+        self.assertEqual("allow", allowed["decision"])
+        self.assertEqual(1, len(persisted["reservations"]))
 
     def test_gate_reserves_water_budget_once_for_repeated_exploration_request(self):
         state = fresh_state()

@@ -11,6 +11,7 @@ from services.soil3.cloud_strategy.validator import (
     fingerprint,
     normalize_timestamp,
 )
+from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS
 
 from .budget import BudgetLedgerError, BudgetReservationConflict
 
@@ -21,18 +22,8 @@ POLICY_FIELDS = {
     "window_seconds",
     "max_exploration_water_seconds",
 }
-ACTIVE_PROTECTION_FLAGS = {
-    "pending_soak",
-    "water_delivery_suspect",
-    "reservoir_empty_suspect",
-    "low_wet_recovery_suspect",
-    "sensor_fault",
-    "dynamic_cooldown",
-    "watering_trigger_guard",
-    "recent_response_guard",
-    "hard_safety_low_guard",
-    "cloud_protection",
-}
+REQUIRED_PROTECTION_FLAGS = frozenset(PHASE3_SAFETY_FLAG_KEYS)
+ACTIVE_PROTECTION_FLAGS = REQUIRED_PROTECTION_FLAGS - {"predictor_circuit"}
 PREDICTOR_CIRCUIT_STATES = {"CLOSED", "HALF_OPEN", "OPEN"}
 
 
@@ -175,11 +166,14 @@ def evaluate_gate(
 
     safety = state.get("safety")
     flags = safety.get("flags") if isinstance(safety, dict) else None
-    if not isinstance(flags, dict):
+    if not isinstance(flags, dict) or not flags:
         reasons.append("safety_flags_unavailable")
         flags = {}
-    for name in sorted(ACTIVE_PROTECTION_FLAGS):
+    for name in sorted(REQUIRED_PROTECTION_FLAGS):
         if name not in flags:
+            reasons.append(f"safety_flag_unavailable:{name}")
+            continue
+        if name == "predictor_circuit":
             continue
         active = _flag_active(flags[name])
         if active is None:
@@ -187,15 +181,14 @@ def evaluate_gate(
         elif active:
             reasons.append(f"safety_flag_active:{name}")
 
-    if "predictor_circuit" in flags:
-        predictor = flags["predictor_circuit"]
-        circuit_state = predictor.get("state") if isinstance(predictor, dict) else None
-        if circuit_state not in PREDICTOR_CIRCUIT_STATES:
-            reasons.append("predictor_circuit_invalid")
-        elif circuit_state == "OPEN":
-            reasons.append("predictor_circuit_open")
-        elif circuit_state == "HALF_OPEN":
-            warnings.append("predictor_circuit_half_open")
+    predictor = flags.get("predictor_circuit")
+    circuit_state = predictor.get("state") if isinstance(predictor, dict) else None
+    if circuit_state not in PREDICTOR_CIRCUIT_STATES:
+        reasons.append("predictor_circuit_invalid")
+    elif circuit_state == "OPEN":
+        reasons.append("predictor_circuit_open")
+    elif circuit_state == "HALF_OPEN":
+        warnings.append("predictor_circuit_half_open")
 
     decided_at = _utc_now()
     state_sha256 = fingerprint(state)

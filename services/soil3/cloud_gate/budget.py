@@ -147,6 +147,8 @@ class BudgetLedger:
                 remaining_water_seconds=remaining - reserved if available else remaining,
                 available=available,
             )
+            if not result.available:
+                return result
             reservations.append(
                 {
                     "device_code": device_code,
