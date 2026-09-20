@@ -19,6 +19,10 @@ class BudgetLedgerError(RuntimeError):
     """A ledger problem that must cause the caller to fail closed."""
 
 
+class BudgetReservationConflict(BudgetLedgerError):
+    """A reservation id was reused with a different budget request."""
+
+
 @dataclass(frozen=True)
 class BudgetReservation:
     reservation_id: str
@@ -48,6 +52,19 @@ def _finite_nonnegative(value: Any) -> float:
     if not math.isfinite(number) or number < 0:
         raise BudgetLedgerError("budget amount must be a finite non-negative number")
     return number
+
+
+def _validate_reservation(value: dict[str, Any]) -> None:
+    if not isinstance(value.get("device_code"), str) or not value["device_code"]:
+        raise BudgetLedgerError("budget ledger has invalid reservation")
+    if not isinstance(value.get("reservation_id"), str) or not value["reservation_id"]:
+        raise BudgetLedgerError("budget ledger has invalid reservation")
+    _timestamp(value.get("decided_at"))
+    _finite_nonnegative(value.get("requested_water_seconds"))
+    _finite_nonnegative(value.get("reserved_water_seconds"))
+    _finite_nonnegative(value.get("remaining_water_seconds"))
+    if not isinstance(value.get("available"), bool):
+        raise BudgetLedgerError("budget ledger has invalid reservation")
 
 
 class BudgetLedger:
@@ -84,6 +101,8 @@ class BudgetLedger:
                 None,
             )
             if existing is not None:
+                if float(existing["requested_water_seconds"]) != requested:
+                    raise BudgetReservationConflict("budget reservation request conflicts")
                 return BudgetReservation(
                     reservation_id=reservation_id,
                     requested_water_seconds=float(existing["requested_water_seconds"]),
@@ -120,7 +139,10 @@ class BudgetLedger:
                     "available": result.available,
                 }
             )
-            self._write(ledger)
+            try:
+                self._write(ledger)
+            except OSError as error:
+                raise BudgetLedgerError("budget ledger cannot be written") from error
             return result
         finally:
             self.lock_path.unlink(missing_ok=True)
@@ -147,6 +169,8 @@ class BudgetLedger:
             or not all(isinstance(item, dict) for item in value["reservations"])
         ):
             raise BudgetLedgerError("budget ledger has invalid shape")
+        for reservation in value["reservations"]:
+            _validate_reservation(reservation)
         return value
 
     def _write(self, ledger: dict[str, list[dict[str, Any]]]) -> None:

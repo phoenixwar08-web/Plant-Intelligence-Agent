@@ -115,6 +115,18 @@ class CloudGateAdmissionTests(unittest.TestCase):
         self.assertEqual(["invalid_exploration_requested"], record["reason_codes"])
         self.assertFalse(record["budget"]["exploration_requested"])
 
+    def test_malformed_exploration_water_is_denied_without_ledger_write(self):
+        state = fresh_state()
+        strategy = valid_strategy(state, [{"action_id": "water", "type": "water"}])
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "budget.json"
+            record = evaluate_gate(state, strategy, policy(), True, BudgetLedger(ledger_path))
+
+            self.assertFalse(ledger_path.exists())
+
+        self.assertEqual("deny", record["decision"])
+        self.assertIn("strategy_invalid:action[0]:invalid_pump_seconds_type", record["reason_codes"])
+
 
 class CloudGateBudgetTests(unittest.TestCase):
     def test_reopening_ledger_with_same_reservation_does_not_charge_budget_twice(self):
@@ -155,6 +167,43 @@ class CloudGateBudgetTests(unittest.TestCase):
         self.assertEqual("allow", first["decision"])
         self.assertEqual(6.0, first["budget"]["reserved_water_seconds"])
         self.assertEqual(first["budget"], repeated["budget"])
+
+    def test_malformed_persisted_reservation_fails_closed_in_gate(self):
+        state = fresh_state()
+        strategy = valid_strategy(
+            state, [{"action_id": "water", "type": "water", "pump_seconds": 6}]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "budget.json"
+            ledger_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "cloud-gate-budget.v1",
+                        "reservations": [{"device_code": "soil3", "reservation_id": "old"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            record = evaluate_gate(state, strategy, policy(), True, BudgetLedger(ledger_path))
+
+        self.assertEqual("deny", record["decision"])
+        self.assertEqual(["budget_ledger_unavailable"], record["reason_codes"])
+
+    def test_changed_water_under_same_strategy_id_is_denied_as_budget_conflict(self):
+        state = fresh_state()
+        strategy = valid_strategy(
+            state, [{"action_id": "water", "type": "water", "pump_seconds": 6}]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = BudgetLedger(Path(directory) / "budget.json")
+            first = evaluate_gate(state, strategy, policy(), True, ledger)
+            strategy["actions"] = [{"action_id": "water", "type": "water", "pump_seconds": 9}]
+            conflicting = evaluate_gate(state, strategy, policy(), True, ledger)
+
+        self.assertEqual("allow", first["decision"])
+        self.assertEqual("deny", conflicting["decision"])
+        self.assertEqual(["budget_reservation_conflict"], conflicting["reason_codes"])
 
 
 class CloudGateCliTests(unittest.TestCase):

@@ -12,7 +12,7 @@ from services.soil3.cloud_strategy.validator import (
     normalize_timestamp,
 )
 
-from .budget import BudgetLedgerError
+from .budget import BudgetLedgerError, BudgetReservationConflict
 
 
 POLICY_FIELDS = {
@@ -195,7 +195,11 @@ def evaluate_gate(
 
     decided_at = _utc_now()
     state_sha256 = fingerprint(state)
-    requested_water_seconds = _requested_water_seconds(strategy) if exploration_requested else 0.0
+    requested_water_seconds = (
+        _requested_water_seconds(strategy)
+        if exploration_requested and validation.accepted
+        else 0.0
+    )
     budget = _budget_record(exploration_requested, requested_water_seconds)
     if exploration_requested and not reasons:
         if ledger is None:
@@ -210,6 +214,8 @@ def evaluate_gate(
                     policy,
                     decided_at,
                 )
+            except BudgetReservationConflict:
+                reasons.append("budget_reservation_conflict")
             except BudgetLedgerError:
                 reasons.append("budget_ledger_unavailable")
             else:
