@@ -21,14 +21,22 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "services" / "soil3" / "runner" / "runner_state.v1.schema.json"
 
 
-def strategy(actions=None):
+def state_snapshot():
+    return {
+        "device_code": "soil3",
+        "observed_at": "2026-09-20T08:00:00Z",
+    }
+
+
+def strategy(actions=None, *, state=None):
+    state = state or state_snapshot()
     return {
         "schema_version": "strategy.v1",
         "strategy_id": str(uuid.uuid4()),
         "device_code": "soil3",
         "state_observed_at": "2026-09-20T08:00:00Z",
         "state_generated_at": "2026-09-20T08:01:00Z",
-        "state_sha256": "a" * 64,
+        "state_sha256": fingerprint(state),
         "created_at": "2026-09-20T08:01:30Z",
         "actions": actions or [
             {"action_id": "a1", "type": "water", "pump_seconds": 5},
@@ -67,7 +75,7 @@ class StrategyRunnerV1Tests(unittest.TestCase):
 
     def test_multi_step_strategy_advances_to_wait_and_persists_current_step(self):
         item = strategy()
-        record = self.runner().run(item)
+        record = self.runner().run(item, state_snapshot())
         self.assertEqual("waiting", record["status"])
         self.assertEqual(1, record["current_step_index"])
         self.assertEqual("completed", record["steps"][0]["status"])
@@ -78,7 +86,7 @@ class StrategyRunnerV1Tests(unittest.TestCase):
 
     def test_wait_resumes_after_restart_and_stop_terminates(self):
         item = strategy()
-        first = self.runner().run(item)
+        first = self.runner().run(item, state_snapshot())
         self.clock.advance(9)
         before_expiry = self.runner().resume(item["strategy_id"])
         self.assertEqual(first, before_expiry)
@@ -101,14 +109,14 @@ class StrategyRunnerV1Tests(unittest.TestCase):
                 {"action_id": "a2", "type": "observe"},
             ]
         )
-        record = self.runner().run(item)
+        record = self.runner().run(item, state_snapshot())
         self.assertEqual("completed", record["status"])
         self.assertEqual(2, record["current_step_index"])
 
     def test_repeated_start_and_resume_never_duplicate_water(self):
         item = strategy()
-        first = self.runner().run(item)
-        second = DryRunRunner(self.store, clock=self.clock).run(item)
+        first = self.runner().run(item, state_snapshot())
+        second = DryRunRunner(self.store, clock=self.clock).run(item, state_snapshot())
         third = self.runner().resume(item["strategy_id"])
         for record in (first, second, third):
             water_results = [
@@ -122,11 +130,11 @@ class StrategyRunnerV1Tests(unittest.TestCase):
 
     def test_same_id_with_changed_content_is_rejected(self):
         item = strategy()
-        self.runner().start(item)
+        self.runner().start(item, state_snapshot())
         changed = copy.deepcopy(item)
         changed["actions"][0]["pump_seconds"] = 6
         with self.assertRaisesRegex(ValueError, "different content"):
-            self.runner().start(changed)
+            self.runner().start(changed, state_snapshot())
 
     def test_rejects_non_strategy_or_unsafe_execution_metadata(self):
         cases = []
@@ -153,10 +161,10 @@ class StrategyRunnerV1Tests(unittest.TestCase):
         for item in cases:
             with self.subTest(strategy_id=item.get("strategy_id")):
                 with self.assertRaises(ValueError):
-                    self.runner().start(item)
+                    self.runner().start(item, state_snapshot())
 
     def test_runner_matches_formal_action_limits_before_persisting(self):
-        state = {"device_code": "soil3", "observed_at": "2026-09-20T08:00:00Z"}
+        state = state_snapshot()
         twelve_actions = [
             {"action_id": f"observe-{index}", "type": "observe"}
             for index in range(12)
@@ -179,12 +187,24 @@ class StrategyRunnerV1Tests(unittest.TestCase):
                 self.assertEqual(accepted, formal.accepted)
 
                 if accepted:
-                    record = self.runner().start(item)
+                    record = self.runner().start(item, state)
                     self.assertEqual(item["strategy_id"], record["strategy_id"])
                 else:
                     with self.assertRaises(ValueError):
-                        self.runner().start(item)
+                        self.runner().start(item, state)
                     self.assertFalse(self.store.exists(item["strategy_id"]))
+
+    def test_runner_refuses_formal_state_binding_mismatch_without_persisting(self):
+        item = strategy()
+        mismatched_state = state_snapshot()
+        mismatched_state["quality"] = {"status": "good"}
+
+        formal = StrategyValidator().validate(item, mismatched_state)
+        self.assertFalse(formal.accepted)
+        self.assertIn("state_sha256_mismatch", formal.reason_codes)
+        with self.assertRaises(ValueError):
+            self.runner().start(item, mismatched_state)
+        self.assertFalse(self.store.exists(item["strategy_id"]))
 
     def test_store_rejects_path_traversal_and_corrupt_state(self):
         with self.assertRaises(ValueError):
@@ -209,10 +229,12 @@ class StrategyRunnerV1Tests(unittest.TestCase):
         item = strategy()
         strategy_path = Path(self.temp.name) / "strategy.json"
         strategy_path.write_text(json.dumps(item), encoding="utf-8")
+        state_path = Path(self.temp.name) / "state.json"
+        state_path.write_text(json.dumps(state_snapshot()), encoding="utf-8")
         directory = Path(self.temp.name) / "cli-store"
         base = [sys.executable, "-m", "services.soil3.runner.service", "--store-dir", str(directory)]
         started = subprocess.run(
-            base + ["start", "--strategy", str(strategy_path)],
+            base + ["start", "--strategy", str(strategy_path), "--state", str(state_path)],
             cwd=ROOT,
             capture_output=True,
             text=True,

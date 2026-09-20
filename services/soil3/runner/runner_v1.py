@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 from services.soil3.cloud_strategy.validator import (
-    EXPECTED_DEVICE_CODE,
     StrategyValidator,
     fingerprint,
     parse_timestamp,
@@ -29,23 +28,12 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _validate_strategy_shape(strategy: Any) -> None:
-    candidate = strategy if isinstance(strategy, dict) else {}
-    # Runner receives a strategy record, not the complete state.v1 snapshot it
-    # was bound to. Reuse the formal validator for every protocol constraint and
-    # suppress only the inevitably unverifiable content-binding mismatch.
-    validation_state = {
-        "device_code": EXPECTED_DEVICE_CODE,
-        "observed_at": candidate.get("state_observed_at"),
-    }
-    validation = StrategyValidator().validate(strategy, validation_state)
-    reasons = [
-        reason
-        for reason in validation.reason_codes
-        if reason != "state_sha256_mismatch"
-    ]
-    if reasons:
-        raise ValueError("runner rejected strategy.v1: " + ", ".join(reasons))
+def _validate_strategy(strategy: Any, state: Any) -> None:
+    if not isinstance(state, dict):
+        raise ValueError("runner requires the bound state.v1 snapshot")
+    validation = StrategyValidator().validate(strategy, state)
+    if not validation.accepted:
+        raise ValueError("runner rejected strategy.v1: " + ", ".join(validation.reason_codes))
 
 
 class RunnerStore:
@@ -99,8 +87,8 @@ class DryRunRunner:
         self.store = store
         self.clock = clock
 
-    def start(self, strategy: Dict[str, Any]) -> Dict[str, Any]:
-        _validate_strategy_shape(strategy)
+    def start(self, strategy: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+        _validate_strategy(strategy, state)
         strategy_id = strategy["strategy_id"]
         strategy_hash = fingerprint(strategy)
         if self.store.exists(strategy_id):
@@ -136,8 +124,8 @@ class DryRunRunner:
         self.store.write(record)
         return record
 
-    def run(self, strategy: Dict[str, Any]) -> Dict[str, Any]:
-        record = self.start(strategy)
+    def run(self, strategy: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+        record = self.start(strategy, state)
         return self.resume(record["strategy_id"])
 
     def read(self, strategy_id: str) -> Dict[str, Any]:

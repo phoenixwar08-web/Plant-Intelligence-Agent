@@ -14,6 +14,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     start = subparsers.add_parser("start")
     start.add_argument("--strategy", required=True, type=Path)
+    start.add_argument("--state", required=True, type=Path)
     resume = subparsers.add_parser("resume")
     resume.add_argument("--strategy-id", required=True)
     read = subparsers.add_parser("read")
@@ -22,7 +23,7 @@ def main() -> int:
 
     runner = DryRunRunner(RunnerStore(args.store_dir))
     if args.command == "start":
-        record = runner.run(load_json(args.strategy))
+        record = runner.run(load_json(args.strategy), load_json(args.state))
     elif args.command == "resume":
         record = runner.resume(args.strategy_id)
     else:

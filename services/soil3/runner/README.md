@@ -12,10 +12,12 @@ after that instant. Re-submitting the same strategy is idempotent, while reusing
 its id for different content is rejected.
 
 ```powershell
-python -m services.soil3.runner.service --store-dir runtime/runner start --strategy strategy.json
+python -m services.soil3.runner.service --store-dir runtime/runner start --strategy strategy.json --state state.json
 python -m services.soil3.runner.service --store-dir runtime/runner resume --strategy-id <uuid>
 python -m services.soil3.runner.service --store-dir runtime/runner read --strategy-id <uuid>
 ```
 
-No production directory default is provided. This first version assumes a
-single writer per strategy state file.
+The start command requires the complete `state.v1` snapshot that the proposal
+claims to answer. It is validated together with the strategy before any runner
+state is written. No production directory default is provided. This first
+version assumes a single writer per strategy state file.
