@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from services.soil3.cloud_gate.budget import BudgetLedger
+from services.soil3.cloud_gate.budget import BudgetLedger, BudgetLedgerError
 from services.soil3.cloud_gate import service
 from services.soil3.cloud_gate.gate_v1 import GatePolicy, evaluate_gate
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
@@ -247,6 +247,22 @@ class CloudGateBudgetTests(unittest.TestCase):
 
         self.assertEqual("deny", record["decision"])
         self.assertEqual(["budget_ledger_unavailable"], record["reason_codes"])
+
+    def test_committed_reservation_remains_allowed_when_lock_release_fails(self):
+        state = fresh_state()
+        strategy = valid_strategy(
+            state, [{"action_id": "water", "type": "water", "pump_seconds": 6}]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = BudgetLedger(Path(directory) / "budget.json")
+            with patch.object(ledger, "_release_lock", side_effect=BudgetLedgerError("stuck")):
+                record = evaluate_gate(state, strategy, policy(), True, ledger)
+
+            persisted = json.loads(ledger.path.read_text(encoding="utf-8"))
+
+        self.assertEqual("allow", record["decision"])
+        self.assertEqual(6.0, record["budget"]["reserved_water_seconds"])
+        self.assertEqual(1, len(persisted["reservations"]))
 
 
 class CloudGateCliTests(unittest.TestCase):

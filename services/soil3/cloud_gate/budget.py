@@ -102,6 +102,7 @@ class BudgetLedger:
         except OSError as error:
             raise BudgetLedgerError("budget ledger directory is unavailable") from error
         self._acquire_lock()
+        result: BudgetReservation | None = None
         try:
             ledger = self._read()
             reservations = ledger["reservations"]
@@ -120,13 +121,14 @@ class BudgetLedger:
                     or existing["strategy_sha256"] != strategy_sha256
                 ):
                     raise BudgetReservationConflict("budget reservation request conflicts")
-                return BudgetReservation(
+                result = BudgetReservation(
                     reservation_id=reservation_id,
                     requested_water_seconds=float(existing["requested_water_seconds"]),
                     reserved_water_seconds=float(existing["reserved_water_seconds"]),
                     remaining_water_seconds=float(existing["remaining_water_seconds"]),
                     available=bool(existing["available"]),
                 )
+                return result
 
             active = [
                 item
@@ -163,7 +165,14 @@ class BudgetLedger:
                 raise BudgetLedgerError("budget ledger cannot be written") from error
             return result
         finally:
-            self._release_lock()
+            try:
+                self._release_lock()
+            except BudgetLedgerError:
+                # A completed reservation must not become a denial after it has
+                # been durably charged. A leftover lock blocks later callers,
+                # which is the safe failure mode until it is repaired.
+                if result is None:
+                    raise
 
     def _acquire_lock(self) -> None:
         try:
@@ -208,6 +217,7 @@ class BudgetLedger:
 
     def _write(self, ledger: dict[str, list[dict[str, Any]]]) -> None:
         temporary = self.path.with_name(self.path.name + ".tmp")
+        replaced = False
         try:
             with temporary.open("w", encoding="utf-8") as output:
                 json.dump(ledger, output, ensure_ascii=False, separators=(",", ":"))
@@ -215,5 +225,10 @@ class BudgetLedger:
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, self.path)
+            replaced = True
         finally:
-            temporary.unlink(missing_ok=True)
+            if not replaced:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
