@@ -159,6 +159,25 @@ class ExperienceRetrievalTests(unittest.TestCase):
         self.assertIn("air_temperature_c", comparison["missing_components"])
         self.assertAlmostEqual(comparison["evidence_coverage"], 0.88)
 
+    def test_structured_inactive_safety_flag_is_not_treated_as_active(self):
+        current = state(flags={
+            "predictor_circuit": {"state": "CLOSED", "active": False},
+            "sensor_fault": False,
+        })
+        historical = state(flags={
+            "predictor_circuit": {"state": "CLOSED", "active": False},
+            "sensor_fault": 0,
+        })
+
+        comparison = compare_states(current, historical)
+        safety = next(
+            item for item in comparison["matched_on"] if item["feature"] == "safety_flags"
+        )
+
+        self.assertEqual(safety["current"], [])
+        self.assertEqual(safety["historical"], [])
+        self.assertEqual(safety["similarity"], 1.0)
+
     def test_retrieval_does_not_modify_episode_files_or_inputs(self):
         value = episode("ep-000000000000000000000030", state(), {"classification": "effective"})
         path = self.write_episode(value)

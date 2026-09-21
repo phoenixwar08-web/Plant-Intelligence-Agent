@@ -81,7 +81,20 @@ def _active_safety_flags(state: Dict[str, Any]) -> Optional[frozenset[str]]:
     flags = _path(state, "safety", "flags")
     if not isinstance(flags, dict):
         return None
-    return frozenset(sorted(key for key, value in flags.items() if bool(value)))
+    return frozenset(sorted(
+        key for key, value in flags.items() if _safety_flag_active(value) is True
+    ))
+
+
+def _safety_flag_active(value: Any) -> Optional[bool]:
+    """Interpret a state.v1 safety fact with the existing Gate semantics."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("active"), bool):
+        return value["active"]
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value in (0, 1):
+        return bool(value)
+    return None
 
 
 def _flag_similarity(
