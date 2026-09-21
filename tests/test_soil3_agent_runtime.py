@@ -58,6 +58,22 @@ class DeploymentAssetTests(unittest.TestCase):
         self.assertNotIn("manual_water", source.lower())
         self.assertNotIn("phase3/main.py", source)
 
+    def test_agent_units_keep_private_tmp_and_expose_only_opengauss_socket(self):
+        """The sandbox may expose only the read-only socket required for SELECTs."""
+        services = (
+            ROOT / "deploy" / "systemd" / "plant-agent-soil3-state.service",
+            ROOT / "deploy" / "systemd" / "plant-agent-soil3-pipeline.service",
+        )
+        for service in services:
+            with self.subTest(service=service.name):
+                source = service.read_text(encoding="utf-8")
+                self.assertIn("PrivateTmp=true", source)
+                self.assertIn(
+                    "BindReadOnlyPaths=-/tmp/.s.PGSQL.7654",
+                    source,
+                )
+                self.assertNotIn("BindReadOnlyPaths=/tmp", source)
+
 
 class StateProducerTests(unittest.TestCase):
     def runtime_config_value(self, root: Path):
