@@ -4,6 +4,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from services.soil3.state.state_v1 import StateBuilder
+from services.soil3.telemetry import events
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_CONFIG = ROOT / "config" / "soil3_agent_runtime.example.json"
@@ -151,6 +154,111 @@ class StateProducerTests(unittest.TestCase):
             self.assertEqual("state.v1", summary["schema_version"])
             self.assertEqual(str(root / "agent_chain" / "state" / "latest.json"), summary["path"])
             self.assertEqual(["predictor_circuit", "pump_active"], summary["safety_flags"])
+
+
+class CanonicalSoilTelemetryTests(unittest.TestCase):
+    def _snapshot(self, root, *, canonical_reading, local_sensor_content=None):
+        state_path = root / "phase3" / "system_state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text('{"pump_active": false}', encoding="utf-8")
+        sensor_path = root / "phase3" / "sensor_log.csv"
+        if local_sensor_content is not None:
+            sensor_path.write_text(local_sensor_content, encoding="utf-8")
+        with mock.patch.object(
+            events, "_service_status", return_value={"status": "active"}
+        ), mock.patch.object(
+            events,
+            "_opengauss_health",
+            return_value={
+                "latest_row_age_seconds": 5.0,
+                "latest_air_age_seconds": None,
+            },
+        ), mock.patch.object(
+            events,
+            "_opengauss_latest_soil_reading",
+            return_value=canonical_reading,
+        ):
+            return events.build_health_snapshot(
+                "soil3",
+                str(state_path),
+                sensor_log_path=str(sensor_path),
+                now=1789955700,
+            )
+
+    def test_reads_valid_opengauss_soil_row(self):
+        """A real canonical row must expose its values to the state producer."""
+
+        class Completed:
+            returncode = 0
+            stdout = "2026-09-21 01:53:00+00|35.0|23.2|610\n"
+            stderr = ""
+
+        reader = getattr(events, "_opengauss_latest_soil_reading", None)
+        self.assertIsNotNone(reader)
+        reading = reader("soil3", runner=lambda *args, **kwargs: Completed())
+        self.assertEqual(
+            {
+                "timestamp": "2026-09-21 01:53:00+00",
+                "humidity": 35.0,
+                "temperature": 23.2,
+                "ec_raw": 610.0,
+            },
+            reading,
+        )
+
+    def test_rejects_invalid_or_unparseable_canonical_soil_row(self):
+        """Unsafe database values must remain absent rather than become facts."""
+
+        class Completed:
+            returncode = 0
+            stderr = ""
+
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+        reader = events._opengauss_latest_soil_reading
+        for row in (
+            "2026-09-21 01:53:00+00|5|23.2|610\n",
+            "2026-09-21 01:53:00+00|35|46|610\n",
+            "not-a-timestamp|35|23.2|610\n",
+        ):
+            with self.subTest(row=row):
+                reading = reader("soil3", runner=lambda *args, **kwargs: Completed(row))
+                self.assertIsNone(reading)
+
+    def test_snapshot_uses_valid_canonical_soil_fact(self):
+        """The state producer must use the database fact, not a local substitute."""
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = self._snapshot(
+                Path(directory),
+                canonical_reading={
+                    "timestamp": "2026-09-21 01:53:00+00",
+                    "humidity": 35.0,
+                    "temperature": 23.2,
+                    "ec_raw": 610.0,
+                },
+            )
+        state = StateBuilder("soil3").build_from_health_snapshot(snapshot)
+        self.assertEqual(35.0, state["soil"]["humidity_percent"])
+        self.assertEqual(
+            "2026-09-21 01:53:00+00",
+            state["source_timestamps"]["soil"],
+        )
+
+    def test_snapshot_keeps_soil_missing_when_canonical_query_has_no_fact(self):
+        """A stale local CSV must not replace a missing canonical database fact."""
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = self._snapshot(
+                Path(directory),
+                canonical_reading=None,
+                local_sensor_content=(
+                    "timestamp,humidity,temperature,ec_raw\n"
+                    "2026-09-21T01:53:00Z,35,23.2,610\n"
+                ),
+            )
+        state = StateBuilder("soil3").build_from_health_snapshot(snapshot)
+        self.assertIsNone(state["soil"]["humidity_percent"])
+        self.assertIsNone(state["data_quality"]["soil_age_sec"])
 
 
 class PipelineTests(StateProducerTests):
