@@ -50,6 +50,7 @@ class StateProducerTests(unittest.TestCase):
         return {
             "device_code": "soil3",
             "provider_mode": "offline_fixture",
+            "provider": {},
             "exploration_requested": False,
             "phase3_state_path": str(root / "phase3" / "system_state.json"),
             "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),
@@ -262,6 +263,129 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
 
 
 class PipelineTests(StateProducerTests):
+    def qwen_runtime_config_value(self, root: Path):
+        value = self.runtime_config_value(root)
+        value["provider_mode"] = "qwen_dashscope"
+        value["provider"] = {
+            "base_url": "https://workspace.example/api/v1",
+            "model": "qwen3.8-Flash",
+            "api_key_env": "QWEN_DASHSCOPE_API_KEY",
+            "timeout_seconds": 30,
+            "max_retries": 1,
+            "temperature": 0,
+            "max_tokens": 1200,
+            "json_response_format": True,
+        }
+        return value
+
+    def test_qwen_mode_requires_complete_nonsecret_provider_config(self):
+        """Qwen must be an explicit non-secret mode, never an implicit default."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig
+
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                config = RuntimeConfig.from_dict(
+                    self.qwen_runtime_config_value(Path(directory))
+                )
+            except ValueError as error:
+                self.fail(f"valid qwen runtime config was rejected: {error}")
+        self.assertEqual("qwen_dashscope", config.provider_mode)
+        self.assertTrue(config.strategy_config()["enabled"])
+        self.assertEqual("qwen_dashscope", config.strategy_config()["provider"])
+        self.assertNotIn("api_key", config.strategy_config())
+
+    def test_qwen_failure_is_persisted_without_fixture_fallback(self):
+        """A Qwen failure is traceable and cannot become an offline proposal."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+
+        failed_chain = {
+            "chain_version": "cloud-strategy-chain.v1",
+            "cloud": {"provider": "qwen_dashscope", "model": "qwen3.8-Flash"},
+            "failure": {
+                "code": "model_auth_failed",
+                "message": "model returned HTTP 401",
+                "retryable": False,
+            },
+            "validation": {
+                "accepted": False,
+                "reason_codes": ["model_auth_failed"],
+                "strategy": None,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.qwen_runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                return_value=failed_chain,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "qwen_dashscope strategy was rejected"
+                ):
+                    run_pipeline(config)
+
+            records = list(config.runs_dir.glob("*.json"))
+            self.assertEqual(1, len(records))
+            record = json.loads(records[0].read_text(encoding="utf-8"))
+            self.assertEqual("qwen_dashscope", record["provider_mode"])
+            self.assertEqual("qwen_dashscope", record["provider"])
+            self.assertEqual("qwen3.8-Flash", record["model"])
+            self.assertEqual(
+                "not_started_provider_or_validation_failure",
+                record["runner_status"],
+            )
+            self.assertEqual(
+                {"physical_actions_performed": False, "phase3_called": False},
+                record["execution"],
+            )
+            self.assertFalse(config.episode_dir.exists())
+
+    def test_accepted_qwen_strategy_is_stored_with_real_provider_provenance(self):
+        """A validated proposal must name the provider that actually produced it."""
+        from services.soil3.agent_runtime.runtime_v1 import (
+            RuntimeConfig,
+            build_offline_fixture,
+            run_pipeline,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.qwen_runtime_config_value(root))
+            state = StateBuilder("soil3").build_from_health_snapshot(
+                self.health_snapshot()
+            )
+            strategy = build_offline_fixture(state)
+            accepted_chain = {
+                "cloud": {
+                    "provider": "qwen_dashscope",
+                    "model": "qwen3.8-Flash",
+                },
+                "validation": {
+                    "accepted": True,
+                    "reason_codes": [],
+                    "strategy": strategy,
+                },
+            }
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.write_state_snapshot",
+                return_value=state,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                return_value=accepted_chain,
+            ):
+                record = run_pipeline(config)
+
+            stored = json.loads(config.strategy_output.read_text(encoding="utf-8"))
+            self.assertEqual("qwen_dashscope", stored["model"]["provider"])
+            self.assertEqual("qwen3.8-Flash", stored["model"]["name"])
+            self.assertEqual("qwen_dashscope", record.get("provider"))
+            self.assertEqual("qwen3.8-Flash", record.get("model"))
+            self.assertEqual("deny", record["gate_decision"])
+            self.assertEqual("skipped_due_to_gate_deny", record["runner_status"])
+
     def test_pipeline_cli_requires_explicit_config_and_reports_non_execution(self):
         """Fails if the pipeline silently acquires a config or claims physical work."""
         from services.soil3.agent_runtime import service
