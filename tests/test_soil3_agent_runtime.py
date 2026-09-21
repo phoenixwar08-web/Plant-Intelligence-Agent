@@ -241,6 +241,44 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
                 reading = reader("soil3", runner=lambda *args, **kwargs: Completed(row))
                 self.assertIsNone(reading)
 
+    def test_future_recv_time_stays_missing_without_csv_fallback(self):
+        """A future database timestamp is invalid, not a fresh soil fact."""
+
+        class Completed:
+            returncode = 0
+            stdout = "2999-01-01 00:00:00+00|35|23.2|610\n"
+            stderr = ""
+
+        reading = events._opengauss_latest_soil_reading(
+            "soil3", runner=lambda *args, **kwargs: Completed()
+        )
+        self.assertIsNone(reading)
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = self._snapshot(
+                Path(directory),
+                canonical_reading=reading,
+                local_sensor_content=(
+                    "timestamp,humidity,temperature,ec_raw\n"
+                    "2026-09-21T01:53:00Z,35,23.2,610\n"
+                ),
+            )
+        state = StateBuilder("soil3").build_from_health_snapshot(snapshot)
+        self.assertIsNone(state["soil"]["humidity_percent"])
+        self.assertIsNone(state["data_quality"]["soil_age_sec"])
+
+    def test_opengauss_query_failure_keeps_canonical_soil_missing(self):
+        """A failed database query must not manufacture a canonical reading."""
+
+        class Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "connection refused"
+
+        reading = events._opengauss_latest_soil_reading(
+            "soil3", runner=lambda *args, **kwargs: Failed()
+        )
+        self.assertIsNone(reading)
+
     def test_snapshot_uses_valid_canonical_soil_fact(self):
         """The state producer must use the database fact, not a local substitute."""
         with tempfile.TemporaryDirectory() as directory:
@@ -259,6 +297,7 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
             "2026-09-21 01:53:00+00",
             state["source_timestamps"]["soil"],
         )
+        self.assertIsNotNone(state["data_quality"]["soil_age_sec"])
 
     def test_snapshot_keeps_soil_missing_when_canonical_query_has_no_fact(self):
         """A stale local CSV must not replace a missing canonical database fact."""

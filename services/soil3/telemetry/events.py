@@ -55,7 +55,7 @@ def _service_status(unit):
         return {"unit": unit, "status": "unknown", "error": str(exc)}
 
 
-def _database_age_seconds(value, now):
+def _database_timestamp_seconds(value):
     text = str(value or "").strip()
     if not text:
         return None
@@ -63,9 +63,16 @@ def _database_age_seconds(value, now):
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.astimezone()
-        return max(0.0, float(now) - parsed.astimezone(timezone.utc).timestamp())
+        return parsed.astimezone(timezone.utc).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def _database_age_seconds(value, now):
+    timestamp = _database_timestamp_seconds(value)
+    if timestamp is None:
+        return None
+    return max(0.0, float(now) - timestamp)
 
 
 def _classify_opengauss_error(message):
@@ -120,7 +127,8 @@ def _parse_canonical_soil_row(stdout):
         or not (0.0 <= values[2] <= 5000.0)
     ):
         return None
-    if _database_age_seconds(timestamp, time.time()) is None:
+    recv_time = _database_timestamp_seconds(timestamp)
+    if recv_time is None or recv_time > time.time():
         return None
     return {
         "timestamp": timestamp,
