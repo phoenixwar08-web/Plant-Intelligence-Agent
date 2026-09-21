@@ -40,6 +40,14 @@ systemctl start plant-agent-soil3-pipeline.service
 systemctl status --no-pager plant-agent-soil3-state.service plant-agent-soil3-pipeline.service
 ```
 
+The state and pipeline units keep `PrivateTmp=true`.  They optionally bind only
+the openGauss local socket `/tmp/.s.PGSQL.7654` read-only, so the existing
+`runuser -u opengauss` SELECT adapter can read canonical telemetry without
+exposing the rest of host `/tmp`.  If that socket is unavailable, the optional
+bind does not make the unit fail open: the adapter query stays unavailable and
+soil humidity/freshness remain missing.  It does not use CSV fallback or write
+to openGauss.
+
 After inspecting the generated `state`, `strategy`, `gate`, `runs`, and
 `episodes` records below `/root/water/runtime/instances/soil3/agent_chain`,
 enable the independently reversible schedules:

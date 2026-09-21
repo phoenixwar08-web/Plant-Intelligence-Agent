@@ -13,6 +13,7 @@ EnvironmentFile=-/root/water/runtime/instances/soil3/agent_chain/secrets/qwen.en
 ExecStart=/usr/bin/python3 -m services.soil3.agent_runtime.service pipeline --config /root/water/runtime/instances/soil3/agent_chain/config/runtime.json
 NoNewPrivileges=true
 PrivateTmp=true
+BindReadOnlyPaths=-/tmp/.s.PGSQL.7654
 ProtectSystem=full
 ReadOnlyPaths=/root/water
 ReadWritePaths=/root/water/runtime/instances/soil3/agent_chain
