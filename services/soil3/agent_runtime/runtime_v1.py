@@ -6,6 +6,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from services.soil3.telemetry.events import build_health_snapshot
 CONFIG_FIELDS = {
     "device_code",
     "provider_mode",
+    "provider",
     "exploration_requested",
     "phase3_state_path",
     "sensor_log_path",
@@ -31,6 +33,17 @@ CONFIG_FIELDS = {
     "prompt_path",
     "strategy_validator",
     "gate_policy",
+}
+
+QWEN_PROVIDER_FIELDS = {
+    "base_url",
+    "model",
+    "api_key_env",
+    "timeout_seconds",
+    "max_retries",
+    "temperature",
+    "max_tokens",
+    "json_response_format",
 }
 
 
@@ -53,6 +66,7 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
 class RuntimeConfig:
     device_code: str
     provider_mode: str
+    provider: dict[str, Any]
     phase3_state_path: Path
     sensor_log_path: Path
     irrigation_trials_path: Path
@@ -69,8 +83,38 @@ class RuntimeConfig:
             raise ValueError("runtime config fields are invalid")
         if value["device_code"] != "soil3":
             raise ValueError("runtime config device_code must be soil3")
-        if value["provider_mode"] != "offline_fixture":
-            raise ValueError("runtime config provider_mode must be offline_fixture")
+        provider_mode = value["provider_mode"]
+        provider = value["provider"]
+        if provider_mode not in {"offline_fixture", "qwen_dashscope"}:
+            raise ValueError("runtime config provider_mode is invalid")
+        if provider_mode == "offline_fixture":
+            if provider != {}:
+                raise ValueError("offline_fixture provider must be empty")
+        else:
+            if not isinstance(provider, dict) or set(provider) != QWEN_PROVIDER_FIELDS:
+                raise ValueError("qwen provider fields are invalid")
+            if (
+                not isinstance(provider["base_url"], str)
+                or not provider["base_url"].startswith("https://")
+                or not isinstance(provider["api_key_env"], str)
+                or not provider["api_key_env"].isidentifier()
+                or provider["model"] != "qwen3.8-Flash"
+                or isinstance(provider["timeout_seconds"], bool)
+                or not isinstance(provider["timeout_seconds"], (int, float))
+                or not isfinite(float(provider["timeout_seconds"]))
+                or float(provider["timeout_seconds"]) <= 0
+                or isinstance(provider["max_retries"], bool)
+                or not isinstance(provider["max_retries"], int)
+                or provider["max_retries"] < 0
+                or isinstance(provider["temperature"], bool)
+                or not isinstance(provider["temperature"], (int, float))
+                or not isfinite(float(provider["temperature"]))
+                or isinstance(provider["max_tokens"], bool)
+                or not isinstance(provider["max_tokens"], int)
+                or provider["max_tokens"] < 1
+                or not isinstance(provider["json_response_format"], bool)
+            ):
+                raise ValueError("qwen provider configuration is invalid")
         if value["exploration_requested"] is not False:
             raise ValueError("runtime config exploration_requested must be false")
         if value["phase3_service_unit"] != "phase3_soil3.service":
@@ -96,7 +140,8 @@ class RuntimeConfig:
         )
         return cls(
             device_code="soil3",
-            provider_mode="offline_fixture",
+            provider_mode=provider_mode,
+            provider=dict(provider),
             phase3_state_path=phase3_state_path,
             sensor_log_path=Path(value["sensor_log_path"]),
             irrigation_trials_path=Path(value["irrigation_trials_path"]),
@@ -109,10 +154,17 @@ class RuntimeConfig:
         )
 
     def strategy_config(self) -> dict[str, Any]:
+        if self.provider_mode == "qwen_dashscope":
+            return {
+                "enabled": True,
+                "provider": "qwen_dashscope",
+                **dict(self.provider),
+                "validator": dict(self.strategy_validator),
+            }
         return {
             "enabled": False,
-            "provider": self.provider_mode,
-            "model": self.provider_mode,
+            "provider": "offline_fixture",
+            "model": "offline_fixture",
             "validator": dict(self.strategy_validator),
         }
 
@@ -202,15 +254,56 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         state=state,
         config=config.strategy_config(),
         prompt=prompt,
-        fixture_content=json.dumps(build_offline_fixture(state)),
+        fixture_content=(
+            json.dumps(build_offline_fixture(state))
+            if config.provider_mode == "offline_fixture"
+            else None
+        ),
     )
     validation = strategy_result.get("validation")
+    if (
+        config.provider_mode == "qwen_dashscope"
+        and isinstance(validation, dict)
+        and validation.get("accepted")
+        and isinstance(validation.get("strategy"), dict)
+    ):
+        strategy_model = dict(validation["strategy"]["model"])
+        strategy_model.update(
+            {
+                "provider": "qwen_dashscope",
+                "name": config.provider["model"],
+            }
+        )
+        validation["strategy"]["model"] = strategy_model
+    audit_path = append_audit(config.audit_dir, strategy_result)
     if not isinstance(validation, dict) or not validation.get("accepted") or not isinstance(validation.get("strategy"), dict):
-        raise RuntimeError("offline fixture strategy was rejected")
+        cloud = strategy_result.get("cloud")
+        cloud = cloud if isinstance(cloud, dict) else {}
+        strategy_config = config.strategy_config()
+        run_id = str(uuid.uuid4())
+        record = {
+            "schema_version": "agent_runtime.v1",
+            "run_id": run_id,
+            "provider_mode": config.provider_mode,
+            "provider": str(cloud.get("provider") or config.provider_mode),
+            "model": str(cloud.get("model") or strategy_config["model"]),
+            "state_path": str(config.state_output),
+            "state_sha256": fingerprint(state),
+            "strategy_path": None,
+            "gate_path": None,
+            "gate_decision": None,
+            "runner_status": "not_started_provider_or_validation_failure",
+            "runner_path": None,
+            "episode_id": None,
+            "episode_path": None,
+            "audit_path": str(audit_path),
+            "execution": {"physical_actions_performed": False, "phase3_called": False},
+        }
+        atomic_write_json(config.runs_dir / f"{run_id}.json", record)
+        raise RuntimeError(f"{config.provider_mode} strategy was rejected")
 
     strategy = validation["strategy"]
     atomic_write_json(config.strategy_output, strategy)
-    audit_path = append_audit(config.audit_dir, strategy_result)
     gate = evaluate_gate(
         state=state,
         strategy=strategy,
@@ -252,6 +345,8 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         "schema_version": "agent_runtime.v1",
         "run_id": run_id,
         "provider_mode": config.provider_mode,
+        "provider": strategy["model"]["provider"],
+        "model": strategy["model"]["name"],
         "state_path": str(config.state_output),
         "state_sha256": fingerprint(state),
         "strategy_path": str(config.strategy_output),

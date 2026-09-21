@@ -4,6 +4,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from services.soil3.state.state_v1 import StateBuilder
+from services.soil3.telemetry import events
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_CONFIG = ROOT / "config" / "soil3_agent_runtime.example.json"
@@ -20,8 +23,22 @@ class DeploymentAssetTests(unittest.TestCase):
         """Fails if the deployable baseline gains a real provider or secret."""
         value = json.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
         self.assertEqual("offline_fixture", value["provider_mode"])
+        self.assertEqual({}, value.get("provider"))
         self.assertFalse(value["exploration_requested"])
         self.assertNotIn("api_key", json.dumps(value).lower())
+
+    def test_pipeline_unit_reads_only_optional_runtime_qwen_secret(self):
+        """The provider secret must be root-only runtime input, never source config."""
+        source = (
+            ROOT / "deploy" / "systemd" / "plant-agent-soil3-pipeline.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "EnvironmentFile=-/root/water/runtime/instances/soil3/agent_chain/secrets/qwen.env",
+            source,
+        )
+        self.assertNotIn("mqtt", source.lower())
+        self.assertNotIn("manual_water", source)
+        self.assertNotIn("phase3/main.py", source)
 
     def test_systemd_units_are_oneshot_and_do_not_name_control_paths(self):
         """Fails if scheduling assets acquire a control or broker dependency."""
@@ -47,6 +64,7 @@ class StateProducerTests(unittest.TestCase):
         return {
             "device_code": "soil3",
             "provider_mode": "offline_fixture",
+            "provider": {},
             "exploration_requested": False,
             "phase3_state_path": str(root / "phase3" / "system_state.json"),
             "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),
@@ -153,7 +171,274 @@ class StateProducerTests(unittest.TestCase):
             self.assertEqual(["predictor_circuit", "pump_active"], summary["safety_flags"])
 
 
+class CanonicalSoilTelemetryTests(unittest.TestCase):
+    def _snapshot(self, root, *, canonical_reading, local_sensor_content=None):
+        state_path = root / "phase3" / "system_state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text('{"pump_active": false}', encoding="utf-8")
+        sensor_path = root / "phase3" / "sensor_log.csv"
+        if local_sensor_content is not None:
+            sensor_path.write_text(local_sensor_content, encoding="utf-8")
+        with mock.patch.object(
+            events, "_service_status", return_value={"status": "active"}
+        ), mock.patch.object(
+            events,
+            "_opengauss_health",
+            return_value={
+                "latest_row_age_seconds": 5.0,
+                "latest_air_age_seconds": None,
+            },
+        ), mock.patch.object(
+            events,
+            "_opengauss_latest_soil_reading",
+            return_value=canonical_reading,
+        ):
+            return events.build_health_snapshot(
+                "soil3",
+                str(state_path),
+                sensor_log_path=str(sensor_path),
+                now=1789955700,
+            )
+
+    def test_reads_valid_opengauss_soil_row(self):
+        """A real canonical row must expose its values to the state producer."""
+
+        class Completed:
+            returncode = 0
+            stdout = "2026-09-21 01:53:00+00|35.0|23.2|610\n"
+            stderr = ""
+
+        reader = getattr(events, "_opengauss_latest_soil_reading", None)
+        self.assertIsNotNone(reader)
+        reading = reader("soil3", runner=lambda *args, **kwargs: Completed())
+        self.assertEqual(
+            {
+                "timestamp": "2026-09-21 01:53:00+00",
+                "humidity": 35.0,
+                "temperature": 23.2,
+                "ec_raw": 610.0,
+            },
+            reading,
+        )
+
+    def test_rejects_invalid_or_unparseable_canonical_soil_row(self):
+        """Unsafe database values must remain absent rather than become facts."""
+
+        class Completed:
+            returncode = 0
+            stderr = ""
+
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+        reader = events._opengauss_latest_soil_reading
+        for row in (
+            "2026-09-21 01:53:00+00|5|23.2|610\n",
+            "2026-09-21 01:53:00+00|35|46|610\n",
+            "not-a-timestamp|35|23.2|610\n",
+        ):
+            with self.subTest(row=row):
+                reading = reader("soil3", runner=lambda *args, **kwargs: Completed(row))
+                self.assertIsNone(reading)
+
+    def test_future_recv_time_stays_missing_without_csv_fallback(self):
+        """A future database timestamp is invalid, not a fresh soil fact."""
+
+        class Completed:
+            returncode = 0
+            stdout = "2999-01-01 00:00:00+00|35|23.2|610\n"
+            stderr = ""
+
+        reading = events._opengauss_latest_soil_reading(
+            "soil3", runner=lambda *args, **kwargs: Completed()
+        )
+        self.assertIsNone(reading)
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = self._snapshot(
+                Path(directory),
+                canonical_reading=reading,
+                local_sensor_content=(
+                    "timestamp,humidity,temperature,ec_raw\n"
+                    "2026-09-21T01:53:00Z,35,23.2,610\n"
+                ),
+            )
+        state = StateBuilder("soil3").build_from_health_snapshot(snapshot)
+        self.assertIsNone(state["soil"]["humidity_percent"])
+        self.assertIsNone(state["data_quality"]["soil_age_sec"])
+
+    def test_opengauss_query_failure_keeps_canonical_soil_missing(self):
+        """A failed database query must not manufacture a canonical reading."""
+
+        class Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "connection refused"
+
+        reading = events._opengauss_latest_soil_reading(
+            "soil3", runner=lambda *args, **kwargs: Failed()
+        )
+        self.assertIsNone(reading)
+
+    def test_snapshot_uses_valid_canonical_soil_fact(self):
+        """The state producer must use the database fact, not a local substitute."""
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = self._snapshot(
+                Path(directory),
+                canonical_reading={
+                    "timestamp": "2026-09-21 01:53:00+00",
+                    "humidity": 35.0,
+                    "temperature": 23.2,
+                    "ec_raw": 610.0,
+                },
+            )
+        state = StateBuilder("soil3").build_from_health_snapshot(snapshot)
+        self.assertEqual(35.0, state["soil"]["humidity_percent"])
+        self.assertEqual(
+            "2026-09-21 01:53:00+00",
+            state["source_timestamps"]["soil"],
+        )
+        self.assertIsNotNone(state["data_quality"]["soil_age_sec"])
+
+    def test_snapshot_keeps_soil_missing_when_canonical_query_has_no_fact(self):
+        """A stale local CSV must not replace a missing canonical database fact."""
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = self._snapshot(
+                Path(directory),
+                canonical_reading=None,
+                local_sensor_content=(
+                    "timestamp,humidity,temperature,ec_raw\n"
+                    "2026-09-21T01:53:00Z,35,23.2,610\n"
+                ),
+            )
+        state = StateBuilder("soil3").build_from_health_snapshot(snapshot)
+        self.assertIsNone(state["soil"]["humidity_percent"])
+        self.assertIsNone(state["data_quality"]["soil_age_sec"])
+
+
 class PipelineTests(StateProducerTests):
+    def qwen_runtime_config_value(self, root: Path):
+        value = self.runtime_config_value(root)
+        value["provider_mode"] = "qwen_dashscope"
+        value["provider"] = {
+            "base_url": "https://workspace.example/api/v1",
+            "model": "qwen3.8-Flash",
+            "api_key_env": "QWEN_DASHSCOPE_API_KEY",
+            "timeout_seconds": 30,
+            "max_retries": 1,
+            "temperature": 0,
+            "max_tokens": 1200,
+            "json_response_format": True,
+        }
+        return value
+
+    def test_qwen_mode_requires_complete_nonsecret_provider_config(self):
+        """Qwen must be an explicit non-secret mode, never an implicit default."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig
+
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                config = RuntimeConfig.from_dict(
+                    self.qwen_runtime_config_value(Path(directory))
+                )
+            except ValueError as error:
+                self.fail(f"valid qwen runtime config was rejected: {error}")
+        self.assertEqual("qwen_dashscope", config.provider_mode)
+        self.assertTrue(config.strategy_config()["enabled"])
+        self.assertEqual("qwen_dashscope", config.strategy_config()["provider"])
+        self.assertNotIn("api_key", config.strategy_config())
+
+    def test_qwen_failure_is_persisted_without_fixture_fallback(self):
+        """A Qwen failure is traceable and cannot become an offline proposal."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+
+        failed_chain = {
+            "chain_version": "cloud-strategy-chain.v1",
+            "cloud": {"provider": "qwen_dashscope", "model": "qwen3.8-Flash"},
+            "failure": {
+                "code": "model_auth_failed",
+                "message": "model returned HTTP 401",
+                "retryable": False,
+            },
+            "validation": {
+                "accepted": False,
+                "reason_codes": ["model_auth_failed"],
+                "strategy": None,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.qwen_runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                return_value=failed_chain,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "qwen_dashscope strategy was rejected"
+                ):
+                    run_pipeline(config)
+
+            records = list(config.runs_dir.glob("*.json"))
+            self.assertEqual(1, len(records))
+            record = json.loads(records[0].read_text(encoding="utf-8"))
+            self.assertEqual("qwen_dashscope", record["provider_mode"])
+            self.assertEqual("qwen_dashscope", record["provider"])
+            self.assertEqual("qwen3.8-Flash", record["model"])
+            self.assertEqual(
+                "not_started_provider_or_validation_failure",
+                record["runner_status"],
+            )
+            self.assertEqual(
+                {"physical_actions_performed": False, "phase3_called": False},
+                record["execution"],
+            )
+            self.assertFalse(config.episode_dir.exists())
+
+    def test_accepted_qwen_strategy_is_stored_with_real_provider_provenance(self):
+        """A validated proposal must name the provider that actually produced it."""
+        from services.soil3.agent_runtime.runtime_v1 import (
+            RuntimeConfig,
+            build_offline_fixture,
+            run_pipeline,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.qwen_runtime_config_value(root))
+            state = StateBuilder("soil3").build_from_health_snapshot(
+                self.health_snapshot()
+            )
+            strategy = build_offline_fixture(state)
+            accepted_chain = {
+                "cloud": {
+                    "provider": "qwen_dashscope",
+                    "model": "qwen3.8-Flash",
+                },
+                "validation": {
+                    "accepted": True,
+                    "reason_codes": [],
+                    "strategy": strategy,
+                },
+            }
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.write_state_snapshot",
+                return_value=state,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                return_value=accepted_chain,
+            ):
+                record = run_pipeline(config)
+
+            stored = json.loads(config.strategy_output.read_text(encoding="utf-8"))
+            self.assertEqual("qwen_dashscope", stored["model"]["provider"])
+            self.assertEqual("qwen3.8-Flash", stored["model"]["name"])
+            self.assertEqual("qwen_dashscope", record.get("provider"))
+            self.assertEqual("qwen3.8-Flash", record.get("model"))
+            self.assertEqual("deny", record["gate_decision"])
+            self.assertEqual("skipped_due_to_gate_deny", record["runner_status"])
+
     def test_pipeline_cli_requires_explicit_config_and_reports_non_execution(self):
         """Fails if the pipeline silently acquires a config or claims physical work."""
         from services.soil3.agent_runtime import service

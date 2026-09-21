@@ -55,7 +55,7 @@ def _service_status(unit):
         return {"unit": unit, "status": "unknown", "error": str(exc)}
 
 
-def _database_age_seconds(value, now):
+def _database_timestamp_seconds(value):
     text = str(value or "").strip()
     if not text:
         return None
@@ -63,9 +63,16 @@ def _database_age_seconds(value, now):
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.astimezone()
-        return max(0.0, float(now) - parsed.astimezone(timezone.utc).timestamp())
+        return parsed.astimezone(timezone.utc).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def _database_age_seconds(value, now):
+    timestamp = _database_timestamp_seconds(value)
+    if timestamp is None:
+        return None
+    return max(0.0, float(now) - timestamp)
 
 
 def _classify_opengauss_error(message):
@@ -87,6 +94,70 @@ def _classify_opengauss_error(message):
     )):
         return "port_unreachable"
     return "query_failed"
+
+
+def _opengauss_command(sql):
+    gauss_user = os.getenv("OPENGAUSS_OS_USER", "opengauss")
+    gsql_path = os.getenv("OPENGAUSS_GSQL_PATH", "/usr/local/opengauss/bin/gsql")
+    library_path = os.getenv("OPENGAUSS_LIBRARY_PATH", "/usr/local/opengauss/lib")
+    database = os.getenv("OPENGAUSS_DATABASE", "soil_data")
+    port = os.getenv("OPENGAUSS_PORT", "7654")
+    return [
+        "runuser", "-u", gauss_user, "--",
+        "env", "LD_LIBRARY_PATH=%s" % library_path,
+        gsql_path,
+        "-d", database,
+        "-p", port,
+        "-t", "-A", "-F", "|",
+        "-c", sql,
+    ]
+
+
+def _parse_canonical_soil_row(stdout):
+    parts = str(stdout or "").strip().split("|", 3)
+    if len(parts) != 4:
+        return None
+    timestamp, humidity, temperature, ec_raw = (part.strip() for part in parts)
+    values = tuple(_safe_float(value) for value in (humidity, temperature, ec_raw))
+    if (
+        not timestamp
+        or any(value is None or not math.isfinite(value) for value in values)
+        or not (5.0 < values[0] <= 100.0)
+        or not (0.0 <= values[1] <= 45.0)
+        or not (0.0 <= values[2] <= 5000.0)
+    ):
+        return None
+    recv_time = _database_timestamp_seconds(timestamp)
+    if recv_time is None or recv_time > time.time():
+        return None
+    return {
+        "timestamp": timestamp,
+        "humidity": values[0],
+        "temperature": values[1],
+        "ec_raw": values[2],
+    }
+
+
+def _opengauss_latest_soil_reading(device_name, *, timeout=12, runner=subprocess.run):
+    safe_device = str(device_name).replace("'", "''")
+    sql = (
+        "SELECT recv_time::text,humidity,temp,ec FROM soil_sensor_readings "
+        "WHERE device_code='%s' AND humidity IS NOT NULL AND temp IS NOT NULL "
+        "AND ec IS NOT NULL ORDER BY recv_time DESC,id DESC LIMIT 1;"
+    ) % safe_device
+    try:
+        result = runner(
+            _opengauss_command(sql),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_canonical_soil_row(result.stdout)
 
 
 def _opengauss_health(device_name, now=None, timeout=12):
@@ -116,23 +187,9 @@ def _opengauss_health(device_name, now=None, timeout=12):
         "WHERE device_code='%s' AND air_humidity IS NOT NULL "
         "ORDER BY recv_time DESC,id DESC LIMIT 1),'');"
     ) % (safe_device, safe_device)
-    gauss_user = os.getenv("OPENGAUSS_OS_USER", "opengauss")
-    gsql_path = os.getenv("OPENGAUSS_GSQL_PATH", "/usr/local/opengauss/bin/gsql")
-    library_path = os.getenv("OPENGAUSS_LIBRARY_PATH", "/usr/local/opengauss/lib")
-    database = os.getenv("OPENGAUSS_DATABASE", "soil_data")
-    port = os.getenv("OPENGAUSS_PORT", "7654")
-    command = [
-        "runuser", "-u", gauss_user, "--",
-        "env", "LD_LIBRARY_PATH=%s" % library_path,
-        gsql_path,
-        "-d", database,
-        "-p", port,
-        "-t", "-A", "-F", "|",
-        "-c", sql,
-    ]
     try:
         result = subprocess.run(
-            command,
+            _opengauss_command(sql),
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -347,7 +404,8 @@ def build_health_snapshot(
     gauss_source = str(gauss.get("source") or "")
     gauss_health = _opengauss_health(device_name, now=current)
     gauss_age = gauss_health.get("latest_row_age_seconds")
-    sensor_readings = _recent_sensor_readings(sensor_path, sensor_limit)
+    canonical_soil = _opengauss_latest_soil_reading(device_name)
+    sensor_readings = [canonical_soil] if canonical_soil is not None else []
     latest_sensor = sensor_readings[-1] if sensor_readings else {}
     local_observation = _latest_local_sensor_observation(local_sensor_log_path, now=current)
     local_observation_age = (

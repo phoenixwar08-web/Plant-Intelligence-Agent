@@ -1,6 +1,7 @@
 {
   "device_code": "soil3",
   "provider_mode": "offline_fixture",
+  "provider": {},
   "exploration_requested": false,
   "phase3_state_path": "/root/water/runtime/instances/soil3/phase3/system_state.json",
   "sensor_log_path": "/root/water/runtime/instances/soil3/phase3/sensor_log.csv",
