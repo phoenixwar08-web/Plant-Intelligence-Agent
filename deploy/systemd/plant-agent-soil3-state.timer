@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Plant Agent soil3 state.v1 snapshots
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=plant-agent-soil3-state.service
+
+[Install]
+WantedBy=timers.target

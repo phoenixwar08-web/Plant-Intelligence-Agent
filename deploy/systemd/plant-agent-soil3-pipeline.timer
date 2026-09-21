@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Plant Agent soil3 proposal-only pipeline
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=plant-agent-soil3-pipeline.service
+
+[Install]
+WantedBy=timers.target

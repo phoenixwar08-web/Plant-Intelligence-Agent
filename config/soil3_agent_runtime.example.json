@@ -1,0 +1,25 @@
+{
+  "device_code": "soil3",
+  "provider_mode": "offline_fixture",
+  "exploration_requested": false,
+  "phase3_state_path": "/root/water/runtime/instances/soil3/phase3/system_state.json",
+  "sensor_log_path": "/root/water/runtime/instances/soil3/phase3/sensor_log.csv",
+  "irrigation_trials_path": "/root/water/runtime/instances/soil3/phase3/irrigation_trials.json",
+  "phase3_service_unit": "phase3_soil3.service",
+  "runtime_root": "/root/water/runtime/instances/soil3/agent_chain",
+  "state_output": "/root/water/runtime/instances/soil3/agent_chain/state/latest.json",
+  "prompt_path": "/root/water/releases/plant-intelligence-release/services/soil3/cloud_strategy/prompts/strategy_v1.txt",
+  "strategy_validator": {
+    "max_actions": 12,
+    "max_pump_seconds": 120,
+    "max_wait_seconds": 86400,
+    "max_total_pump_seconds": 240,
+    "max_total_seconds": 86400
+  },
+  "gate_policy": {
+    "warning_age_seconds": 900,
+    "deny_age_seconds": 18000,
+    "window_seconds": 86400,
+    "max_exploration_water_seconds": 0
+  }
+}
