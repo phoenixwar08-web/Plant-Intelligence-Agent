@@ -78,7 +78,7 @@ time is unparseable, the timing check is skipped instead of guessed.
 | `read(feedback_id)` | Returns the stored record, as a deep copy | id is malformed or unknown, file is corrupt |
 | `list_for_episode(episode_id)` | All records of one episode, oldest observation first | id is malformed; a record file is corrupt (fails loudly, never silently skipped) |
 | `outcome(episode_id)` | Aggregates records into one outcome payload (returned, not written) | id is malformed |
-| `attach_to_episode(episode_id, store)` | Appends the records to the episode's `feedback` and sets its `outcome` once | episode has no records, is unknown, or is closed |
+| `attach_to_episode(episode_id, store, finalize=False)` | Incrementally appends records while open; with `finalize=True`, sets the final `outcome` once and closes the Episode | episode has no records, is unknown, or is closed |
 
 ### Outcome aggregation rules
 
@@ -95,13 +95,14 @@ outcome — the honest statement that nothing was observed.
 
 ### Attach semantics
 
-`attach_to_episode` writes through `EpisodeStore.update`, so episode.v1's own
-rules apply: feedback entries append, the outcome is set-once, and a closed
-episode is immutable. Attach is idempotent — records already on the episode
-(by `feedback_id`) are not appended twice, and an outcome the episode already
-holds is never rewritten. Because the outcome is set-once, attach it after the
-last window you intend to record (normally `24h`); an outcome attached earlier
-cannot be refreshed by this module.
+`attach_to_episode` writes through `EpisodeStore`, so episode.v1's own rules
+apply: feedback entries append, the outcome is set-once, and a closed episode
+is immutable. Normal attaches keep the Episode open and do not set Outcome;
+records already present (by `feedback_id`) are not appended twice. After the
+last intended window (normally `24h`), call with `finalize=True`: the module
+attaches remaining records, writes the one final aggregate Outcome, then calls
+`EpisodeStore.close()`. Missing windows remain explicit in that Outcome. The
+module never reopens or changes a closed Episode.
 
 ## Storage
 
@@ -123,7 +124,7 @@ python -m services.soil3.feedback.service --store-dir /path/to/feedback list \
 python -m services.soil3.feedback.service --store-dir /path/to/feedback outcome \
   --episode-id ep-xxxx
 python -m services.soil3.feedback.service --store-dir /path/to/feedback attach \
-  --episode-id ep-xxxx --episode-store-dir /path/to/episodes
+  --episode-id ep-xxxx --episode-store-dir /path/to/episodes --finalize
 ```
 
 Every payload input is a caller-supplied JSON file; the CLI reads facts, it
@@ -132,5 +133,6 @@ and exit non-zero.
 
 `feedback.v1` is marked `implemented` in `docs/PROTOCOLS_AND_BOUNDARIES.md`:
 the contract exists and is covered by `tests/test_feedback_v1.py`, but it is
-not frozen, so compatibility iteration may continue inside later Issues. No
-producer writes feedback records yet, and no consumer reads outcomes yet.
+not frozen, so compatibility iteration may continue inside later Issues. The
+Day3 runtime now leaves Episodes open for this attachment/finalization path;
+observation scheduling remains outside this module.

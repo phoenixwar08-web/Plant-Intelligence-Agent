@@ -2,15 +2,21 @@
 
 This runtime reads existing soil3 health facts, writes a frozen `state.v1`
 snapshot, creates an explicitly labelled `offline_fixture` or
-`qwen_dashscope` `strategy.v1`, and records its Gate result plus a closed
-Episode. Both modes are proposal-only: the runtime does not create an actuator
+`qwen_dashscope` `strategy.v1`, and records its Gate result in an open Episode
+that remains writable for delayed `feedback.v1`. Both modes are proposal-only: the runtime does not create an actuator
 command, call Phase3, or publish MQTT.
 
 The first deployment intentionally sets `exploration_requested` to `false`.
-Gate denial is an expected safety result: Runner is skipped, and the closed
-Episode lists absent executed actions, feedback, and outcome as missing facts.
+Gate denial is an expected safety result: Runner is skipped, while the Episode
+stays open with absent executed actions until the feedback lifecycle finalizes it.
 If Gate admits the fixture, Runner performs only its persisted dry-run logic;
 its record declares both physical actions and Phase3 calls false.
+
+Every successful pipeline record states `episode_status: open` and
+`feedback_status: pending`. Feedback windows may be attached incrementally;
+the final intended window attaches the aggregated Outcome and closes the
+Episode through `EpisodeStore.close()`. The runtime never reopens or mutates a
+closed Episode.
 
 `offline_fixture` is the release-default test and explicit rollback mode. It
 is never a silent replacement for Qwen. A Qwen request/validation failure

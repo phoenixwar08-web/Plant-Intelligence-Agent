@@ -286,12 +286,13 @@ class ClientAndChainTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
-    def test_protocol_doc_states_the_binding_without_conditioning_the_status(self):
+    def test_protocol_doc_states_binding_runtime_consumer_and_provider_status(self):
         """The lifecycle legend and this module's contract must not drift apart again."""
         doc = (ROOT / "docs" / "PROTOCOLS_AND_BOUNDARIES.md").read_text(encoding="utf-8")
         row = next(line for line in doc.splitlines() if line.startswith("| `strategy.v1`"))
         self.assertIn("implemented", row)
-        self.assertIn("Not enabled", row)
+        self.assertIn("runtime consumes", row)
+        self.assertIn("provider configuration remains disabled", row)
         for field in ("device_code", "`observed_at`", "state_sha256"):
             self.assertIn(field, row)
         self.assertIn("not a binding condition", row)

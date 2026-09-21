@@ -12,9 +12,10 @@ never reconciles, repairs, or deletes them.
 Boundaries: records facts only. It controls no pump, publishes no MQTT, never
 imports or modifies Phase3, fabricates no observation or timestamp, and does
 not depend on Experience or Bridge work. It builds on the Day-3 ``episode.v1``
-contract: every feedback record names the episode it belongs to, and the
-optional attach step appends records to that episode and sets the episode's
-outcome exactly once, respecting episode.v1's set-once semantics.
+contract: every feedback record names the episode it belongs to. Incremental
+attach keeps that Episode open; explicit finalization writes its one aggregate
+Outcome and closes it, respecting episode.v1's set-once and immutable-closed
+semantics.
 """
 from __future__ import annotations
 
@@ -414,16 +415,26 @@ class FeedbackStore:
             "contradictions": sorted({code for record in records for code in record["contradictions"]}),
         }
 
-    def attach_to_episode(self, episode_id: str, episode_store: Any) -> Dict[str, Any]:
-        """Append this episode's feedback records to the episode and set its outcome once.
+    def attach_to_episode(
+        self,
+        episode_id: str,
+        episode_store: Any,
+        *,
+        finalize: bool = False,
+    ) -> Dict[str, Any]:
+        """Append feedback records and optionally finalize the open episode.
 
         ``episode_store`` is an ``EpisodeStore`` or a directory path for one.
         Idempotent: records already present on the episode (by ``feedback_id``)
         are not appended twice, and an outcome the episode already holds is
         never rewritten — episode.v1's outcome is set-once, and this module
-        does not change that. Attaching to a closed or unknown episode is
-        refused. Returns a summary of what the episode now holds.
+        does not change that. Outcome is written only when ``finalize=True``;
+        the same operation then closes the Episode through ``EpisodeStore``.
+        Attaching to a closed or unknown episode is refused. Returns a summary
+        of what the episode now holds.
         """
+        if not isinstance(finalize, bool):
+            raise FeedbackError("invalid_finalize")
         self._check_episode_id(episode_id)
         records = self.list_for_episode(episode_id)
         if not records:
@@ -447,10 +458,12 @@ class FeedbackStore:
         update_kwargs: Dict[str, Any] = {}
         if new_records:
             update_kwargs["feedback"] = new_records
-        if not outcome_was_present:
+        if finalize and not outcome_was_present:
             update_kwargs["outcome"] = self.outcome(episode_id)
         if update_kwargs:
             store.update(episode_id, **update_kwargs)
+        if finalize:
+            store.close(episode_id)
 
         return {
             "episode_id": episode_id,
@@ -458,6 +471,8 @@ class FeedbackStore:
             "already_present_feedback_ids": already_present,
             "outcome_set": bool(update_kwargs.get("outcome") is not None) and not outcome_was_present,
             "outcome_already_present": outcome_was_present,
+            "finalized": finalize,
+            "episode_status": "closed" if finalize else "open",
         }
 
     # -- storage -------------------------------------------------------------

@@ -61,10 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
     outcome.add_argument("--episode-id", required=True)
 
     attach = subparsers.add_parser(
-        "attach", help="Append an episode's feedback records to its episode.v1 record and set its outcome once")
+        "attach", help="Append feedback to an open episode; optionally finalize its Outcome and close it")
     attach.add_argument("--episode-id", required=True)
     attach.add_argument("--episode-store-dir", type=Path, required=True,
                         help="Directory holding the episode.v1 record store")
+    attach.add_argument("--finalize", action="store_true",
+                        help="Set the final Outcome and close the Episode after attaching")
 
     return parser
 
@@ -87,7 +89,11 @@ def run(args: argparse.Namespace) -> int:
     elif args.command == "outcome":
         output = store.outcome(args.episode_id)
     else:  # attach
-        output = store.attach_to_episode(args.episode_id, args.episode_store_dir)
+        output = store.attach_to_episode(
+            args.episode_id,
+            args.episode_store_dir,
+            finalize=args.finalize,
+        )
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0
 

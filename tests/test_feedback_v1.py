@@ -405,18 +405,21 @@ class TestAttach(StoreTestCase):
         self.episode = self.episodes.create(real_state())
         self.episode_id = self.episode["episode_id"]
 
-    def test_attach_appends_feedback_and_sets_outcome_once(self):
+    def test_finalize_attaches_feedback_sets_outcome_and_closes_episode(self):
         first = self.store.record(payload(window="30min", episode_id=self.episode_id))
         second = self.store.record(payload(window="24h", episode_id=self.episode_id))
-        summary = self.store.attach_to_episode(self.episode_id, self.episode_dir)
+        summary = self.store.attach_to_episode(
+            self.episode_id, self.episode_dir, finalize=True
+        )
         self.assertEqual(summary["attached_feedback_ids"],
                          [first["feedback_id"], second["feedback_id"]])
         self.assertEqual(summary["already_present_feedback_ids"], [])
         self.assertTrue(summary["outcome_set"])
         self.assertFalse(summary["outcome_already_present"])
+        self.assertTrue(summary["finalized"])
 
         episode = self.episodes.read(self.episode_id)
-        self.assertEqual(episode["status"], "open")
+        self.assertEqual(episode["status"], "closed")
         self.assertEqual([entry["feedback_id"] for entry in episode["feedback"]],
                          [first["feedback_id"], second["feedback_id"]])
         self.assertEqual(episode["feedback"][0], self.store.read(first["feedback_id"]))
@@ -424,6 +427,9 @@ class TestAttach(StoreTestCase):
         self.assertEqual(episode["outcome"]["windows_included"], ["30min", "24h"])
         self.assertEqual(episode["outcome"]["windows_missing"], ["2-3h", "6-12h"])
         self.assertEqual(episode["outcome"]["assessments"]["recovery"], "good")
+        with self.assertRaises(FeedbackError) as caught:
+            self.store.attach_to_episode(self.episode_id, self.episode_dir)
+        self.assertEqual(caught.exception.code, "episode_not_open")
 
     def test_attach_is_idempotent(self):
         self.store.record(payload(window="30min", episode_id=self.episode_id))
@@ -432,10 +438,11 @@ class TestAttach(StoreTestCase):
         summary = self.store.attach_to_episode(self.episode_id, self.episode_dir)
         self.assertEqual(summary["attached_feedback_ids"], [])
         self.assertFalse(summary["outcome_set"])
-        self.assertTrue(summary["outcome_already_present"])
+        self.assertFalse(summary["outcome_already_present"])
+        self.assertFalse(summary["finalized"])
         episode_after = self.episodes.read(self.episode_id)
         self.assertEqual(episode_after["feedback"], episode_before["feedback"])
-        self.assertEqual(episode_after["outcome"], episode_before["outcome"])
+        self.assertIsNone(episode_after["outcome"])
         self.assertEqual(episode_after["updated_at"], episode_before["updated_at"])
 
     def test_attach_never_rewrites_a_caller_set_outcome(self):
@@ -449,18 +456,30 @@ class TestAttach(StoreTestCase):
         self.assertEqual(episode["outcome"], caller_outcome)
         self.assertEqual(len(episode["feedback"]), 1)
 
-    def test_later_windows_append_but_do_not_refresh_the_set_once_outcome(self):
+    def test_later_windows_stay_open_until_final_outcome_then_close(self):
         self.store.record(payload(window="30min", episode_id=self.episode_id))
         self.store.attach_to_episode(self.episode_id, self.episode_dir)
-        outcome_first = self.episodes.read(self.episode_id)["outcome"]
+        pending = self.episodes.read(self.episode_id)
+        self.assertEqual(pending["status"], "open")
+        self.assertIsNone(pending["outcome"])
         later = self.store.record(payload(window="24h", episode_id=self.episode_id,
                                           assessments=dict(full_assessments(), recovery="poor")))
-        summary = self.store.attach_to_episode(self.episode_id, self.episode_dir)
+        summary = self.store.attach_to_episode(
+            self.episode_id, self.episode_dir, finalize=True
+        )
         self.assertEqual(summary["attached_feedback_ids"], [later["feedback_id"]])
         episode = self.episodes.read(self.episode_id)
+        self.assertEqual(episode["status"], "closed")
         self.assertEqual(len(episode["feedback"]), 2)
-        self.assertEqual(episode["outcome"], outcome_first)
-        self.assertEqual(episode["outcome"]["assessments"]["recovery"], "good")
+        self.assertEqual(episode["outcome"]["assessments"]["recovery"], "poor")
+
+    def test_attach_rejects_non_boolean_finalize(self):
+        self.store.record(payload(window="30min", episode_id=self.episode_id))
+        with self.assertRaises(FeedbackError) as caught:
+            self.store.attach_to_episode(
+                self.episode_id, self.episode_dir, finalize="yes"
+            )
+        self.assertEqual(caught.exception.code, "invalid_finalize")
 
     def test_attach_refuses_closed_episode(self):
         self.store.record(payload(window="30min", episode_id=self.episode_id))
@@ -622,12 +641,14 @@ class TestCli(StoreTestCase):
         self.write_payload("obs.json", payload(window="30min", episode_id=episode["episode_id"]))
         self.assertEqual(self.run_cli("record", "--input", str(self.dir / "obs.json")).returncode, 0)
         attached = self.run_cli("attach", "--episode-id", episode["episode_id"],
-                                "--episode-store-dir", str(episode_dir))
+                                "--episode-store-dir", str(episode_dir), "--finalize")
         self.assertEqual(attached.returncode, 0, attached.stderr)
         summary = json.loads(attached.stdout)
         self.assertEqual(len(summary["attached_feedback_ids"]), 1)
         self.assertTrue(summary["outcome_set"])
+        self.assertTrue(summary["finalized"])
         stored = EpisodeStore(episode_dir).read(episode["episode_id"])
+        self.assertEqual(stored["status"], "closed")
         self.assertEqual(len(stored["feedback"]), 1)
         self.assertEqual(stored["outcome"]["source_schema"], SCHEMA_VERSION)
 
