@@ -23,8 +23,22 @@ class DeploymentAssetTests(unittest.TestCase):
         """Fails if the deployable baseline gains a real provider or secret."""
         value = json.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
         self.assertEqual("offline_fixture", value["provider_mode"])
+        self.assertEqual({}, value.get("provider"))
         self.assertFalse(value["exploration_requested"])
         self.assertNotIn("api_key", json.dumps(value).lower())
+
+    def test_pipeline_unit_reads_only_optional_runtime_qwen_secret(self):
+        """The provider secret must be root-only runtime input, never source config."""
+        source = (
+            ROOT / "deploy" / "systemd" / "plant-agent-soil3-pipeline.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "EnvironmentFile=-/root/water/runtime/instances/soil3/agent_chain/secrets/qwen.env",
+            source,
+        )
+        self.assertNotIn("mqtt", source.lower())
+        self.assertNotIn("manual_water", source)
+        self.assertNotIn("phase3/main.py", source)
 
     def test_systemd_units_are_oneshot_and_do_not_name_control_paths(self):
         """Fails if scheduling assets acquire a control or broker dependency."""
