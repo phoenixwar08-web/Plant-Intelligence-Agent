@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -13,6 +14,32 @@ from services.soil3.telemetry.common import atomic_write_json, load_json
 
 SCHEMA_VERSION = "trace.v1"
 TRACE_ID_PATTERN = re.compile(r"^tr-[0-9a-f]{24}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+DECISION_FIELDS = frozenset({
+    "state_ref",
+    "vision",
+    "experience",
+    "model_metrics",
+    "strategy_ref",
+    "gate_ref",
+    "gate_decision",
+    "gate_reason_codes",
+    "runner_ref",
+    "bridge_ref",
+    "episode_ref",
+})
+REFERENCE_FIELDS = frozenset({
+    "state_ref",
+    "strategy_ref",
+    "gate_ref",
+    "runner_ref",
+    "bridge_ref",
+    "episode_ref",
+})
+AVAILABILITY_FIELDS = frozenset({"vision", "experience"})
+AVAILABILITY_VALUES = frozenset({"available", "unavailable", "not_requested"})
+GATE_DECISIONS = frozenset({"allow", "allow_with_warning", "deny"})
+METRIC_UNITS = {"token_usage": "tokens", "cost": "CNY", "latency": "ms"}
 
 
 class TraceError(Exception):
@@ -69,6 +96,111 @@ def _new_record() -> dict[str, Any]:
     }
 
 
+def _initial_decision() -> dict[str, Any]:
+    return _new_record()["decision"]
+
+
+def _reference_reasons(value: Any, *, label: str) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{label}_not_object"]
+    if set(value) != {"schema_version", "path", "sha256", "record_id"}:
+        return [f"{label}_fields_invalid"]
+    reasons = []
+    if not isinstance(value["schema_version"], str) or not value["schema_version"].strip():
+        reasons.append(f"{label}_schema_version_invalid")
+    if not isinstance(value["path"], str) or not value["path"].strip():
+        reasons.append(f"{label}_path_invalid")
+    if not isinstance(value["sha256"], str) or not SHA256_PATTERN.fullmatch(value["sha256"]):
+        reasons.append(f"{label}_sha256_invalid")
+    if value["record_id"] is not None and (
+        not isinstance(value["record_id"], str) or not value["record_id"].strip()
+    ):
+        reasons.append(f"{label}_record_id_invalid")
+    return reasons
+
+
+def _association_reasons(field: str, value: Any) -> list[str]:
+    if not isinstance(value, dict) or set(value) != {"availability", "ref"}:
+        return [f"{field}_association_invalid"]
+    availability = value["availability"]
+    reference = value["ref"]
+    if availability not in AVAILABILITY_VALUES:
+        return [f"{field}_availability_invalid"]
+    if availability == "available":
+        if reference is None:
+            return [f"{field}_available_requires_ref"]
+        return _reference_reasons(reference, label=f"{field}_ref")
+    if reference is not None:
+        return [f"{field}_{availability}_requires_null_ref"]
+    return []
+
+
+def _metric_reasons(name: str, value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, dict) or set(value) != {"source", "value", "unit"}:
+        return [f"{name}_metric_invalid"]
+    if (
+        not isinstance(value["source"], str)
+        or not value["source"].strip()
+        or isinstance(value["value"], bool)
+        or not isinstance(value["value"], (int, float))
+        or not math.isfinite(float(value["value"]))
+        or float(value["value"]) < 0
+        or value["unit"] != METRIC_UNITS[name]
+    ):
+        return [f"{name}_metric_invalid"]
+    return []
+
+
+def _model_metrics_reasons(value: Any) -> list[str]:
+    if not isinstance(value, dict) or set(value) != {
+        "provider", "model", "token_usage", "cost", "latency"
+    }:
+        return ["model_metrics_fields_invalid"]
+    reasons = []
+    for key in ("provider", "model"):
+        current = value[key]
+        if current is not None and (not isinstance(current, str) or not current.strip()):
+            reasons.append(f"model_metrics_{key}_invalid")
+    for name in METRIC_UNITS:
+        reasons.extend(_metric_reasons(name, value[name]))
+    return reasons
+
+
+def _decision_field_reasons(field: str, value: Any) -> list[str]:
+    if field in REFERENCE_FIELDS:
+        if value is None:
+            return [f"{field}_required"]
+        return _reference_reasons(value, label=field)
+    if field in AVAILABILITY_FIELDS:
+        return _association_reasons(field, value)
+    if field == "model_metrics":
+        return _model_metrics_reasons(value)
+    if field == "gate_decision":
+        if value not in GATE_DECISIONS:
+            return ["invalid_gate_decision"]
+        return []
+    if field == "gate_reason_codes":
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item.strip() for item in value
+        ):
+            return ["gate_reason_codes_invalid"]
+        return []
+    return [f"unknown_decision_field:{field}"]
+
+
+def _apply_set_once(container: dict[str, Any], field: str, value: Any) -> bool:
+    current = container[field]
+    initial = _initial_decision()[field]
+    if current == value:
+        return False
+    if current != initial:
+        raise TraceError("validation_failed", [f"{field}_already_set"])
+    container[field] = copy.deepcopy(value)
+    return True
+
+
 class TraceStore:
     """Persist one trace record per generated identifier under a caller-owned root."""
 
@@ -82,6 +214,29 @@ class TraceStore:
 
     def read(self, trace_id: str) -> dict[str, Any]:
         return copy.deepcopy(self._load(trace_id))
+
+    def set_decision(self, trace_id: str, **updates: Any) -> dict[str, Any]:
+        reasons = []
+        if not updates:
+            reasons.append("nothing_to_update")
+        for field, value in updates.items():
+            if field not in DECISION_FIELDS:
+                reasons.append(f"unknown_decision_field:{field}")
+            else:
+                reasons.extend(_decision_field_reasons(field, value))
+        if reasons:
+            raise TraceError("validation_failed", reasons)
+
+        record = self._load(trace_id)
+        candidate = copy.deepcopy(record)
+        changed = False
+        for field, value in updates.items():
+            changed = _apply_set_once(candidate["decision"], field, value) or changed
+        if not changed:
+            return copy.deepcopy(record)
+        candidate["updated_at"] = utc_now()
+        self._write(candidate)
+        return copy.deepcopy(candidate)
 
     def trace_path(self, trace_id: str) -> Path:
         if not isinstance(trace_id, str) or not TRACE_ID_PATTERN.fullmatch(trace_id):

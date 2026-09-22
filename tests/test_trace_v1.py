@@ -1,3 +1,4 @@
+import copy
 import json
 import re
 import tempfile
@@ -7,12 +8,35 @@ from pathlib import Path
 from services.soil3.trace.trace_v1 import (
     SCHEMA_VERSION,
     TRACE_ID_PATTERN,
+    TraceError,
     TraceStore,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "services" / "soil3" / "trace" / "trace.v1.schema.json"
+REFERENCE_SHA256 = "a" * 64
+
+
+def reference(schema_version, path, record_id=None):
+    return {
+        "schema_version": schema_version,
+        "path": path,
+        "sha256": REFERENCE_SHA256,
+        "record_id": record_id,
+    }
+
+
+def model_metrics(**overrides):
+    value = {
+        "provider": "qwen_dashscope",
+        "model": "qwen3.8-Flash",
+        "token_usage": {"source": "provider_response.usage", "value": 123, "unit": "tokens"},
+        "cost": {"source": "provider_response.billing", "value": 0.0125, "unit": "CNY"},
+        "latency": {"source": "runtime_monotonic_clock", "value": 842, "unit": "ms"},
+    }
+    value.update(overrides)
+    return value
 
 
 class TestTraceCreation(unittest.TestCase):
@@ -67,6 +91,93 @@ class TestTraceSchema(unittest.TestCase):
         self.assertEqual(TRACE_ID_PATTERN.pattern, self.schema["properties"]["trace_id"]["pattern"])
         self.assertRegex(record["created_at"], re.compile(self.schema["$defs"]["rfc3339_utc"]["pattern"]))
         self.assertRegex(record["updated_at"], re.compile(self.schema["$defs"]["rfc3339_utc"]["pattern"]))
+
+
+class TestDecisionUpdates(unittest.TestCase):
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.store = TraceStore(Path(self._temporary.name) / "traces")
+
+    def test_state_reference_is_set_once_and_identical_retry_is_a_noop(self):
+        """Catches replacing a decision-stage State binding after it was recorded."""
+        trace_id = self.store.create()["trace_id"]
+        state_ref = reference("state.v1", "runtime/state/latest.json")
+
+        first = self.store.set_decision(trace_id, state_ref=state_ref)
+        self.assertEqual(state_ref, first["decision"]["state_ref"])
+        self.assertEqual(
+            first,
+            self.store.set_decision(trace_id, state_ref=copy.deepcopy(state_ref)),
+        )
+        with self.assertRaises(TraceError) as caught:
+            self.store.set_decision(
+                trace_id,
+                state_ref=reference("state.v1", "runtime/state/other.json"),
+            )
+        self.assertIn("state_ref_already_set", caught.exception.reasons)
+
+    def test_invalid_multi_field_update_keeps_record_byte_identical(self):
+        """Catches partial persistence when one requested decision update is invalid."""
+        trace_id = self.store.create()["trace_id"]
+        path = self.store.trace_path(trace_id)
+        before = path.read_bytes()
+
+        with self.assertRaises(TraceError) as caught:
+            self.store.set_decision(
+                trace_id,
+                state_ref=reference("state.v1", "runtime/state/latest.json"),
+                gate_decision="approve",
+            )
+        self.assertIn("invalid_gate_decision", caught.exception.reasons)
+        self.assertEqual(before, path.read_bytes())
+
+    def test_vision_availability_requires_a_matching_reference_shape(self):
+        """Catches unavailable/available Vision fields that silently invent or lose a record."""
+        trace_id = self.store.create()["trace_id"]
+
+        with self.assertRaises(TraceError) as caught:
+            self.store.set_decision(
+                trace_id,
+                vision={"availability": "available", "ref": None},
+            )
+        self.assertIn("vision_available_requires_ref", caught.exception.reasons)
+        stored = self.store.set_decision(
+            trace_id,
+            vision={
+                "availability": "available",
+                "ref": reference("vision.v1", "runtime/vision/zone-a.json"),
+            },
+        )
+        self.assertEqual("available", stored["decision"]["vision"]["availability"])
+
+    def test_metrics_accept_only_sourced_actual_values(self):
+        """Catches fabricated or calculated-looking metrics without a real reported source."""
+        trace_id = self.store.create()["trace_id"]
+
+        stored = self.store.set_decision(trace_id, model_metrics=model_metrics())
+        self.assertEqual("provider_response.usage", stored["decision"]["model_metrics"]["token_usage"]["source"])
+
+        another_trace = self.store.create()["trace_id"]
+        with self.assertRaises(TraceError) as caught:
+            self.store.set_decision(
+                another_trace,
+                model_metrics=model_metrics(
+                    latency={"source": "runtime_monotonic_clock", "value": -1, "unit": "ms"},
+                ),
+            )
+        self.assertIn("latency_metric_invalid", caught.exception.reasons)
+
+    def test_unknown_decision_field_is_refused_without_a_write(self):
+        """Catches a generic patch path that could change unreviewed Trace state."""
+        trace_id = self.store.create()["trace_id"]
+        path = self.store.trace_path(trace_id)
+        before = path.read_bytes()
+
+        with self.assertRaises(TraceError) as caught:
+            self.store.set_decision(trace_id, execution={"phase3_called": True})
+        self.assertIn("unknown_decision_field:execution", caught.exception.reasons)
+        self.assertEqual(before, path.read_bytes())
 
 
 if __name__ == "__main__":
