@@ -81,9 +81,14 @@ def _active_safety_flags(state: Dict[str, Any]) -> Optional[frozenset[str]]:
     flags = _path(state, "safety", "flags")
     if not isinstance(flags, dict):
         return None
-    return frozenset(sorted(
-        key for key, value in flags.items() if _safety_flag_active(value) is True
-    ))
+    active = []
+    for key, value in flags.items():
+        is_active = _safety_flag_active(value)
+        if is_active is None:
+            return None
+        if is_active:
+            active.append(key)
+    return frozenset(sorted(active))
 
 
 def _safety_flag_active(value: Any) -> Optional[bool]:

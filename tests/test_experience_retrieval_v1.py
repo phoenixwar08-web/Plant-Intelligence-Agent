@@ -178,6 +178,18 @@ class ExperienceRetrievalTests(unittest.TestCase):
         self.assertEqual(safety["historical"], [])
         self.assertEqual(safety["similarity"], 1.0)
 
+    def test_unrecognized_safety_flag_value_makes_safety_comparison_unavailable(self):
+        current = state(flags={"cloud_protection": {"active": "unknown"}})
+        historical = state(flags={"cloud_protection": False})
+
+        comparison = compare_states(current, historical)
+
+        self.assertIn("safety_flags", comparison["missing_components"])
+        self.assertNotIn(
+            "safety_flags", {item["feature"] for item in comparison["matched_on"]}
+        )
+        self.assertAlmostEqual(comparison["evidence_coverage"], 0.83)
+
     def test_retrieval_does_not_modify_episode_files_or_inputs(self):
         value = episode("ep-000000000000000000000030", state(), {"classification": "effective"})
         path = self.write_episode(value)
