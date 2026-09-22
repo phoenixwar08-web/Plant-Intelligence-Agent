@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Trace V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "trace_id",
+    "created_at",
+    "updated_at",
+    "decision",
+    "execution",
+    "feedback_refs",
+    "outcome_ref"
+  ],
+  "properties": {
+    "schema_version": {"const": "trace.v1"},
+    "trace_id": {"type": "string", "pattern": "^tr-[0-9a-f]{24}$"},
+    "created_at": {"$ref": "#/$defs/rfc3339_utc"},
+    "updated_at": {"$ref": "#/$defs/rfc3339_utc"},
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_ref", "vision", "experience", "model_metrics", "strategy_ref",
+        "gate_ref", "gate_decision", "gate_reason_codes", "runner_ref",
+        "bridge_ref", "episode_ref"
+      ],
+      "properties": {
+        "state_ref": {"type": "null"},
+        "vision": {"$ref": "#/$defs/unavailable_association"},
+        "experience": {"$ref": "#/$defs/unavailable_association"},
+        "model_metrics": {"$ref": "#/$defs/empty_model_metrics"},
+        "strategy_ref": {"type": "null"},
+        "gate_ref": {"type": "null"},
+        "gate_decision": {"type": "null"},
+        "gate_reason_codes": {"type": "null"},
+        "runner_ref": {"type": "null"},
+        "bridge_ref": {"type": "null"},
+        "episode_ref": {"type": "null"}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase3_called", "physical_actions_performed"],
+      "properties": {
+        "phase3_called": {"const": false},
+        "physical_actions_performed": {"const": false}
+      }
+    },
+    "feedback_refs": {"type": "array", "maxItems": 0},
+    "outcome_ref": {"type": "null"}
+  },
+  "$defs": {
+    "rfc3339_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"
+    },
+    "unavailable_association": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "ref"],
+      "properties": {
+        "availability": {"const": "not_requested"},
+        "ref": {"type": "null"}
+      }
+    },
+    "empty_model_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model", "token_usage", "cost", "latency"],
+      "properties": {
+        "provider": {"type": "null"},
+        "model": {"type": "null"},
+        "token_usage": {"type": "null"},
+        "cost": {"type": "null"},
+        "latency": {"type": "null"}
+      }
+    }
+  }
+}
