@@ -92,17 +92,17 @@
     "token_metric": {
       "type": "object", "additionalProperties": false,
       "required": ["source", "value", "unit"],
-      "properties": {"source": {"type": "string", "minLength": 1}, "value": {"type": "number", "minimum": 0}, "unit": {"const": "tokens"}}
+      "properties": {"source": {"const": "provider_response.usage"}, "value": {"type": "number", "minimum": 0}, "unit": {"const": "tokens"}}
     },
     "cost_metric": {
       "type": "object", "additionalProperties": false,
       "required": ["source", "value", "unit"],
-      "properties": {"source": {"type": "string", "minLength": 1}, "value": {"type": "number", "minimum": 0}, "unit": {"const": "CNY"}}
+      "properties": {"source": {"const": "provider_response.billing"}, "value": {"type": "number", "minimum": 0}, "unit": {"const": "CNY"}}
     },
     "latency_metric": {
       "type": "object", "additionalProperties": false,
       "required": ["source", "value", "unit"],
-      "properties": {"source": {"type": "string", "minLength": 1}, "value": {"type": "number", "minimum": 0}, "unit": {"const": "ms"}}
+      "properties": {"source": {"const": "runtime_monotonic_clock"}, "value": {"type": "number", "minimum": 0}, "unit": {"const": "ms"}}
     }
   }
 }

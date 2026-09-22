@@ -14,6 +14,7 @@
 | ActuatorLayer | Phase3-owned actuator interface. |
 | Feedback | Record subsequent factual observations at defined times. |
 | Episode | Link state, strategy, gate result, actions, feedback, and outcome. |
+| Trace | Correlate existing Shadow records and sourced experiment metrics; never decide or execute. |
 | Experience Retrieval | Read closed Episodes and return separately ranked, explainable successful and failed analogues; never generate a strategy. |
 | Replay | Read historical facts into reproducible samples. |
 
@@ -31,4 +32,4 @@ LLM → manual_water
 LLM → ESP32
 ```
 
-State, Vision, Strategy, Episode, Feedback, and Replay may read facts and create records within their authorized Issue boundaries. They do not bypass Phase3 or become an actuator path.
+State, Vision, Strategy, Episode, Feedback, Trace, and Replay may read facts and create records within their authorized Issue boundaries. They do not bypass Phase3 or become an actuator path.

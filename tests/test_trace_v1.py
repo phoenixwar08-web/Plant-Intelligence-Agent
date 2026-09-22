@@ -1,6 +1,8 @@
 import copy
 import json
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -168,6 +170,16 @@ class TestDecisionUpdates(unittest.TestCase):
             )
         self.assertIn("latency_metric_invalid", caught.exception.reasons)
 
+        estimated_trace = self.store.create()["trace_id"]
+        with self.assertRaises(TraceError) as caught:
+            self.store.set_decision(
+                estimated_trace,
+                model_metrics=model_metrics(
+                    token_usage={"source": "estimated_from_prompt", "value": 123, "unit": "tokens"},
+                ),
+            )
+        self.assertIn("token_usage_metric_invalid", caught.exception.reasons)
+
     def test_unknown_decision_field_is_refused_without_a_write(self):
         """Catches a generic patch path that could change unreviewed Trace state."""
         trace_id = self.store.create()["trace_id"]
@@ -178,6 +190,21 @@ class TestDecisionUpdates(unittest.TestCase):
             self.store.set_decision(trace_id, execution={"phase3_called": True})
         self.assertIn("unknown_decision_field:execution", caught.exception.reasons)
         self.assertEqual(before, path.read_bytes())
+
+    def test_unhashable_gate_or_availability_values_are_structured_refusals(self):
+        """Catches malformed JSON types escaping validation as implementation exceptions."""
+        gate_trace = self.store.create()["trace_id"]
+        with self.assertRaises(TraceError) as caught:
+            self.store.set_decision(gate_trace, gate_decision=[])
+        self.assertIn("invalid_gate_decision", caught.exception.reasons)
+
+        vision_trace = self.store.create()["trace_id"]
+        with self.assertRaises(TraceError) as caught:
+            self.store.set_decision(
+                vision_trace,
+                vision={"availability": [], "ref": None},
+            )
+        self.assertIn("vision_availability_invalid", caught.exception.reasons)
 
 
 class TestFeedbackAndOutcome(unittest.TestCase):
@@ -240,6 +267,68 @@ class TestFeedbackAndOutcome(unittest.TestCase):
             )
         self.assertIn("outcome_ref_already_set", caught.exception.reasons)
         self.assertEqual(before, path.read_bytes())
+
+
+class TestTraceCli(unittest.TestCase):
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
+        self.store_dir = self.root / "traces"
+
+    def run_cli(self, *arguments):
+        return subprocess.run(
+            [sys.executable, "-m", "services.soil3.trace.service", *arguments],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def write_json(self, name, value):
+        path = self.root / name
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def test_cli_creates_updates_and_reads_the_same_trace(self):
+        """Catches a CLI that cannot persist the documented analysis-only lifecycle."""
+        created = self.run_cli("--store-dir", str(self.store_dir), "create")
+        self.assertEqual(0, created.returncode, created.stderr)
+        trace_id = json.loads(created.stdout)["trace_id"]
+
+        updates_path = self.write_json(
+            "updates.json",
+            {"state_ref": reference("state.v1", "runtime/state/latest.json")},
+        )
+        updated = self.run_cli(
+            "--store-dir", str(self.store_dir),
+            "set-decision",
+            "--trace-id", trace_id,
+            "--updates", str(updates_path),
+        )
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        self.assertEqual("state.v1", json.loads(updated.stdout)["decision"]["state_ref"]["schema_version"])
+
+        read = self.run_cli("--store-dir", str(self.store_dir), "read", "--trace-id", trace_id)
+        self.assertEqual(0, read.returncode, read.stderr)
+        self.assertEqual(trace_id, json.loads(read.stdout)["trace_id"])
+
+    def test_cli_returns_structured_refusal_for_execution_update(self):
+        """Catches a command-line bypass that would let Trace become an execution input."""
+        created = self.run_cli("--store-dir", str(self.store_dir), "create")
+        trace_id = json.loads(created.stdout)["trace_id"]
+        updates_path = self.write_json("invalid.json", {"execution": {"phase3_called": True}})
+
+        result = self.run_cli(
+            "--store-dir", str(self.store_dir),
+            "set-decision",
+            "--trace-id", trace_id,
+            "--updates", str(updates_path),
+        )
+        self.assertEqual(2, result.returncode)
+        error = json.loads(result.stderr)
+        self.assertEqual("validation_failed", error["error"])
+        self.assertIn("unknown_decision_field:execution", error["reasons"])
 
 
 if __name__ == "__main__":

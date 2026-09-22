@@ -135,10 +135,12 @@ only when a real model invocation identifies them; otherwise they remain
 {"source": "runtime_monotonic_clock", "value": 842, "unit": "ms"}
 ```
 
-The Store requires a non-empty source, a finite non-negative numeric value,
-and the fixed unit appropriate to the metric.  It performs no calculation,
-estimation, currency conversion, aggregation, or fallback.  A caller that has
-no observed value leaves the metric `null`.
+The Store accepts only `provider_response.usage` for token usage,
+`provider_response.billing` for cost, and `runtime_monotonic_clock` for
+latency, alongside a finite non-negative numeric value and each metric's fixed
+unit. It performs no calculation, estimation, currency conversion,
+aggregation, or fallback. A caller that has no observed value leaves the
+metric `null`.
 
 ## Update invariants
 
