@@ -40,6 +40,11 @@ AVAILABILITY_FIELDS = frozenset({"vision", "experience"})
 AVAILABILITY_VALUES = frozenset({"available", "unavailable", "not_requested"})
 GATE_DECISIONS = frozenset({"allow", "allow_with_warning", "deny"})
 METRIC_UNITS = {"token_usage": "tokens", "cost": "CNY", "latency": "ms"}
+METRIC_SOURCES = {
+    "token_usage": frozenset({"provider_response.usage"}),
+    "cost": frozenset({"provider_response.billing"}),
+    "latency": frozenset({"runtime_monotonic_clock"}),
+}
 
 
 class TraceError(Exception):
@@ -124,7 +129,7 @@ def _association_reasons(field: str, value: Any) -> list[str]:
         return [f"{field}_association_invalid"]
     availability = value["availability"]
     reference = value["ref"]
-    if availability not in AVAILABILITY_VALUES:
+    if not isinstance(availability, str) or availability not in AVAILABILITY_VALUES:
         return [f"{field}_availability_invalid"]
     if availability == "available":
         if reference is None:
@@ -143,6 +148,7 @@ def _metric_reasons(name: str, value: Any) -> list[str]:
     if (
         not isinstance(value["source"], str)
         or not value["source"].strip()
+        or value["source"] not in METRIC_SOURCES[name]
         or isinstance(value["value"], bool)
         or not isinstance(value["value"], (int, float))
         or not math.isfinite(float(value["value"]))
@@ -178,7 +184,7 @@ def _decision_field_reasons(field: str, value: Any) -> list[str]:
     if field == "model_metrics":
         return _model_metrics_reasons(value)
     if field == "gate_decision":
-        if value not in GATE_DECISIONS:
+        if not isinstance(value, str) or value not in GATE_DECISIONS:
             return ["invalid_gate_decision"]
         return []
     if field == "gate_reason_codes":
