@@ -201,6 +201,22 @@ def _apply_set_once(container: dict[str, Any], field: str, value: Any) -> bool:
     return True
 
 
+def _validated_new_feedback_refs(value: Any, existing: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise TraceError("validation_failed", ["feedback_refs_required"])
+    reasons = []
+    seen = list(existing)
+    for index, reference in enumerate(value):
+        reasons.extend(_reference_reasons(reference, label=f"feedback_ref[{index}]"))
+        if reference in seen:
+            reasons.append("feedback_ref_already_appended")
+        else:
+            seen.append(reference)
+    if reasons:
+        raise TraceError("validation_failed", reasons)
+    return copy.deepcopy(value)
+
+
 class TraceStore:
     """Persist one trace record per generated identifier under a caller-owned root."""
 
@@ -234,6 +250,31 @@ class TraceStore:
             changed = _apply_set_once(candidate["decision"], field, value) or changed
         if not changed:
             return copy.deepcopy(record)
+        candidate["updated_at"] = utc_now()
+        self._write(candidate)
+        return copy.deepcopy(candidate)
+
+    def append_feedback_refs(self, trace_id: str, refs: list[dict[str, Any]]) -> dict[str, Any]:
+        record = self._load(trace_id)
+        values = _validated_new_feedback_refs(refs, record["feedback_refs"])
+        candidate = copy.deepcopy(record)
+        candidate["feedback_refs"].extend(values)
+        candidate["updated_at"] = utc_now()
+        self._write(candidate)
+        return copy.deepcopy(candidate)
+
+    def set_outcome_ref(self, trace_id: str, ref: dict[str, Any]) -> dict[str, Any]:
+        reasons = _reference_reasons(ref, label="outcome_ref")
+        if reasons:
+            raise TraceError("validation_failed", reasons)
+        record = self._load(trace_id)
+        current = record["outcome_ref"]
+        if current == ref:
+            return copy.deepcopy(record)
+        if current is not None:
+            raise TraceError("validation_failed", ["outcome_ref_already_set"])
+        candidate = copy.deepcopy(record)
+        candidate["outcome_ref"] = copy.deepcopy(ref)
         candidate["updated_at"] = utc_now()
         self._write(candidate)
         return copy.deepcopy(candidate)

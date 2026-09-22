@@ -180,5 +180,67 @@ class TestDecisionUpdates(unittest.TestCase):
         self.assertEqual(before, path.read_bytes())
 
 
+class TestFeedbackAndOutcome(unittest.TestCase):
+    def setUp(self):
+        self._temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary.cleanup)
+        self.store = TraceStore(Path(self._temporary.name) / "traces")
+
+    def test_feedback_references_only_append_new_records_in_order(self):
+        """Catches replacement, reordering, or duplicate counting of feedback facts."""
+        trace_id = self.store.create()["trace_id"]
+        first = reference("feedback.v1", "runtime/feedback/fb-1.json", "fb-1")
+        second = reference("feedback.v1", "runtime/feedback/fb-2.json", "fb-2")
+
+        self.store.append_feedback_refs(trace_id, [first])
+        updated = self.store.append_feedback_refs(trace_id, [second])
+        self.assertEqual([first, second], updated["feedback_refs"])
+
+        path = self.store.trace_path(trace_id)
+        before = path.read_bytes()
+        with self.assertRaises(TraceError) as caught:
+            self.store.append_feedback_refs(trace_id, [first])
+        self.assertIn("feedback_ref_already_appended", caught.exception.reasons)
+        self.assertEqual(before, path.read_bytes())
+
+    def test_feedback_refusal_for_empty_or_invalid_request_does_not_write(self):
+        """Catches append endpoints that accept no fact or partially persist a malformed one."""
+        trace_id = self.store.create()["trace_id"]
+        path = self.store.trace_path(trace_id)
+        before = path.read_bytes()
+
+        with self.assertRaises(TraceError) as caught:
+            self.store.append_feedback_refs(trace_id, [])
+        self.assertIn("feedback_refs_required", caught.exception.reasons)
+        self.assertEqual(before, path.read_bytes())
+
+        with self.assertRaises(TraceError) as caught:
+            self.store.append_feedback_refs(
+                trace_id,
+                [reference("feedback.v1", "runtime/feedback/fb-1.json", "fb-1"), {"bad": "ref"}],
+            )
+        self.assertIn("feedback_ref[1]_fields_invalid", caught.exception.reasons)
+        self.assertEqual(before, path.read_bytes())
+
+    def test_outcome_reference_moves_from_null_once_only(self):
+        """Catches replacing the one later experiment Outcome tied to a trace."""
+        trace_id = self.store.create()["trace_id"]
+        outcome = reference("feedback.outcome.v1", "runtime/feedback/outcome.json")
+
+        first = self.store.set_outcome_ref(trace_id, outcome)
+        self.assertEqual(outcome, first["outcome_ref"])
+        self.assertEqual(first, self.store.set_outcome_ref(trace_id, copy.deepcopy(outcome)))
+
+        path = self.store.trace_path(trace_id)
+        before = path.read_bytes()
+        with self.assertRaises(TraceError) as caught:
+            self.store.set_outcome_ref(
+                trace_id,
+                reference("feedback.outcome.v1", "runtime/feedback/other-outcome.json"),
+            )
+        self.assertIn("outcome_ref_already_set", caught.exception.reasons)
+        self.assertEqual(before, path.read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main()
