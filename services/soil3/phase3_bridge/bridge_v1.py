@@ -140,12 +140,10 @@ def _expected_result(action: Dict[str, Any], result: Any) -> bool:
             and float(result["pump_seconds"]) == float(action["pump_seconds"])
         )
     if action_type == "wait":
-        return (
-            result.get("kind") == "dry_run_wait"
-            and _finite_nonnegative(result.get("requested_seconds"))
-            and _finite_nonnegative(action.get("seconds"))
-            and float(result["requested_seconds"]) == float(action["seconds"])
-        )
+        return result == {
+            "kind": "dry_run_wait",
+            "requested_seconds": float(action["seconds"]),
+        }
     if action_type == "observe":
         return result == {"kind": "dry_run_observe", "observation_collected": False}
     if action_type == "stop":

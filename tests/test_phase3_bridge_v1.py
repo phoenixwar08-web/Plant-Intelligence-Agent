@@ -193,6 +193,33 @@ class Phase3BridgeTests(unittest.TestCase):
         self.assertFalse(response["accepted"])
         self.assertIn("runner_step_binding_mismatch:0", response["reason_codes"])
 
+    def test_dry_run_wait_cannot_claim_a_physical_action(self):
+        wait_strategy = strategy_for(
+            self.state,
+            [{"action_id": "wait", "type": "wait", "seconds": 5}],
+        )
+        wait_gate = evaluate_gate_v2(
+            self.state, wait_strategy, policy(), exploration_requested=False
+        )
+        instants = iter(
+            [
+                datetime(2026, 9, 21, 8, 0, 3, tzinfo=timezone.utc),
+                datetime(2026, 9, 21, 8, 0, 3, tzinfo=timezone.utc),
+                datetime(2026, 9, 21, 8, 0, 9, tzinfo=timezone.utc),
+            ]
+        )
+        forged_runner = DryRunRunner(
+            RunnerStore(self.root / "wait-physical-forgery"), clock=lambda: next(instants)
+        )
+        forged_runner.run(wait_strategy, self.state)
+        forged_runner = forged_runner.resume(wait_strategy["strategy_id"])
+        forged_runner["steps"][0]["result"]["physical_action_performed"] = True
+
+        response = self.verify(gate=wait_gate, runner=forged_runner, strategy=wait_strategy)
+
+        self.assertFalse(response["accepted"])
+        self.assertIn("runner_step_result_invalid:0", response["reason_codes"])
+
     def test_invalid_strategy_is_rejected_even_with_matching_forged_hashes(self):
         changed = copy.deepcopy(self.strategy)
         changed["actions"][0]["pump_seconds"] = 121
