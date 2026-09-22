@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from services.soil3.cloud_gate.gate_v1 import GatePolicy, evaluate_gate
+from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
 from services.soil3.phase3_bridge.bridge_v1 import FORMAL_PHASE3_ENTRYPOINT, Phase3Bridge
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
@@ -75,7 +76,7 @@ class Phase3BridgeTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.state = state_snapshot()
         self.strategy = strategy_for(self.state)
-        self.gate = evaluate_gate(self.state, self.strategy, policy(), exploration_requested=False)
+        self.gate = evaluate_gate_v2(self.state, self.strategy, policy(), exploration_requested=False)
         self.runner = DryRunRunner(
             RunnerStore(self.root / "runner"), clock=FixedClock()
         ).run(self.strategy, self.state)
@@ -134,6 +135,40 @@ class Phase3BridgeTests(unittest.TestCase):
             "gate_execution_boundary_invalid",
         ):
             self.assertIn(reason, response["reason_codes"])
+
+    def test_gate_v1_is_rejected_without_strategy_id_compatibility_fallback(self):
+        legacy_gate = evaluate_gate(
+            self.state, self.strategy, policy(), exploration_requested=False
+        )
+
+        response = self.verify(gate=legacy_gate)
+
+        self.assertFalse(response["accepted"])
+        self.assertIn("gate_schema_invalid", response["reason_codes"])
+
+    def test_gate_approved_water_seconds_cannot_change_with_same_strategy_id(self):
+        changed = copy.deepcopy(self.strategy)
+        changed["actions"][0]["pump_seconds"] = 6
+        changed_runner = DryRunRunner(
+            RunnerStore(self.root / "water-seconds-tamper"), clock=FixedClock()
+        ).run(changed, self.state)
+
+        response = self.verify(strategy=changed, runner=changed_runner)
+
+        self.assertFalse(response["accepted"])
+        self.assertIn("gate_strategy_hash_mismatch", response["reason_codes"])
+
+    def test_gate_approved_strategy_metadata_cannot_change_with_same_strategy_id(self):
+        changed = copy.deepcopy(self.strategy)
+        changed["reason_summary"] = ["changed but still valid"]
+        changed_runner = DryRunRunner(
+            RunnerStore(self.root / "metadata-tamper"), clock=FixedClock()
+        ).run(changed, self.state)
+
+        response = self.verify(strategy=changed, runner=changed_runner)
+
+        self.assertFalse(response["accepted"])
+        self.assertIn("gate_strategy_hash_mismatch", response["reason_codes"])
 
     def test_runner_must_be_terminal_bound_and_entirely_nonphysical(self):
         forged = copy.deepcopy(self.runner)

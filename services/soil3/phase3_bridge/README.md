@@ -4,10 +4,11 @@ Bridge V1 is a verification-only adapter between an admitted Runner trace and
 the existing formal Phase3 entrypoint. It independently revalidates:
 
 1. `strategy.v1` against the exact `state.v1` snapshot;
-2. the non-deny `gate.v1` binding, admission-only metadata and any exploration
-   reservation;
+2. the non-deny `gate.v2` binding, including its Gate-local
+   `strategy_sha256`, admission-only metadata and any exploration reservation;
 3. the terminal `runner_state.v1` binding, ordered action copies, dry-run
-   result for every step, and both no-execution flags.
+result for every step, and both no-execution flags. `gate.v1` is rejected;
+Bridge V1 does not infer a strategy-content binding from `strategy_id`.
 
 Only after all checks pass does it return a `phase3_bridge_request.v1` handoff.
 That request names the one permitted next interface,

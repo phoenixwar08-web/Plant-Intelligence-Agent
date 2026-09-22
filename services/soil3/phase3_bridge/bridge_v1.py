@@ -21,7 +21,7 @@ from services.soil3.cloud_strategy.validator import (
 FORMAL_PHASE3_ENTRYPOINT = "services.soil3.phase3.decision_brain.DecisionBrain.run_cycle"
 GATE_KEYS = {
     "schema_version", "gate_id", "decided_at", "device_code", "strategy_id",
-    "state_observed_at", "state_sha256", "decision", "reason_codes",
+    "state_observed_at", "state_sha256", "strategy_sha256", "decision", "reason_codes",
     "warning_codes", "budget", "execution",
 }
 RUNNER_KEYS = {
@@ -64,7 +64,7 @@ def _validate_gate(
         return ["gate_not_object"]
     if set(gate) != GATE_KEYS:
         reasons.append("gate_shape_invalid")
-    if gate.get("schema_version") != "gate.v1":
+    if gate.get("schema_version") != "gate.v2":
         reasons.append("gate_schema_invalid")
     if not _is_uuid(gate.get("gate_id")):
         reasons.append("gate_id_invalid")
@@ -74,6 +74,8 @@ def _validate_gate(
         reasons.append("gate_device_mismatch")
     if gate.get("strategy_id") != strategy.get("strategy_id"):
         reasons.append("gate_strategy_mismatch")
+    if gate.get("strategy_sha256") != fingerprint(strategy):
+        reasons.append("gate_strategy_hash_mismatch")
     if gate.get("state_sha256") != fingerprint(state):
         reasons.append("gate_state_hash_mismatch")
     if normalize_timestamp(gate.get("state_observed_at")) != normalize_timestamp(state.get("observed_at")):
