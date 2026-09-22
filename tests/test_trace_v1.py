@@ -42,6 +42,17 @@ def model_metrics(**overrides):
     return value
 
 
+def _imported_modules(source):
+    modules = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            prefix = f"{node.module}." if node.module else ""
+            modules.extend(prefix + alias.name for alias in node.names)
+    return modules
+
+
 class TestTraceCreation(unittest.TestCase):
     def setUp(self):
         self._temporary = tempfile.TemporaryDirectory()
@@ -352,23 +363,30 @@ class TestTraceCli(unittest.TestCase):
 
 
 class TestTraceImportBoundary(unittest.TestCase):
+    def test_import_extraction_expands_from_import_aliases(self):
+        """Catches dependency guards that miss MQTT or pump modules hidden in aliases."""
+        modules = _imported_modules(
+            "from paho import mqtt\n"
+            "from services.soil3.phase1 import water_test_soil3\n"
+        )
+
+        self.assertIn("paho.mqtt", modules)
+        self.assertIn("services.soil3.phase1.water_test_soil3", modules)
+
     def test_trace_package_import_graph_excludes_execution_control_modules(self):
         """Catches a new import dependency that could couple Trace to the control path."""
         package = ROOT / "services" / "soil3" / "trace"
         forbidden_prefixes = (
             "services.soil3.phase3",
+            "services.soil3.phase1",
             "services.soil3.mqtt",
             "services.soil3.actuator",
             "services.soil3.manual_water",
+            "paho.mqtt",
         )
         imported = []
         for path in package.glob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    imported.extend(alias.name for alias in node.names)
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    imported.append(node.module)
+            imported.extend(_imported_modules(path.read_text(encoding="utf-8")))
         for module in imported:
             self.assertFalse(module.startswith(forbidden_prefixes), module)
 
