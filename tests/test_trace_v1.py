@@ -1,3 +1,4 @@
+import ast
 import copy
 import json
 import re
@@ -93,6 +94,25 @@ class TestTraceSchema(unittest.TestCase):
         self.assertEqual(TRACE_ID_PATTERN.pattern, self.schema["properties"]["trace_id"]["pattern"])
         self.assertRegex(record["created_at"], re.compile(self.schema["$defs"]["rfc3339_utc"]["pattern"]))
         self.assertRegex(record["updated_at"], re.compile(self.schema["$defs"]["rfc3339_utc"]["pattern"]))
+
+    def test_schema_requires_available_associations_to_carry_a_reference(self):
+        """Catches a schema that accepts an impossible available-without-ref record."""
+        variants = self.schema["$defs"]["association"]["oneOf"]
+        available = next(
+            value for value in variants
+            if value["properties"]["availability"] == {"const": "available"}
+        )
+        unavailable = next(
+            value for value in variants
+            if value["properties"]["availability"].get("enum") == ["unavailable", "not_requested"]
+        )
+
+        self.assertEqual({"$ref": "#/$defs/record_ref"}, available["properties"]["ref"])
+        self.assertEqual({"type": "null"}, unavailable["properties"]["ref"])
+
+    def test_schema_rejects_duplicate_feedback_references(self):
+        """Catches schema drift that permits duplicate experiment observations."""
+        self.assertTrue(self.schema["properties"]["feedback_refs"]["uniqueItems"])
 
 
 class TestDecisionUpdates(unittest.TestCase):
@@ -329,6 +349,28 @@ class TestTraceCli(unittest.TestCase):
         error = json.loads(result.stderr)
         self.assertEqual("validation_failed", error["error"])
         self.assertIn("unknown_decision_field:execution", error["reasons"])
+
+
+class TestTraceImportBoundary(unittest.TestCase):
+    def test_trace_package_import_graph_excludes_execution_control_modules(self):
+        """Catches a new import dependency that could couple Trace to the control path."""
+        package = ROOT / "services" / "soil3" / "trace"
+        forbidden_prefixes = (
+            "services.soil3.phase3",
+            "services.soil3.mqtt",
+            "services.soil3.actuator",
+            "services.soil3.manual_water",
+        )
+        imported = []
+        for path in package.glob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported.extend(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported.append(node.module)
+        for module in imported:
+            self.assertFalse(module.startswith(forbidden_prefixes), module)
 
 
 if __name__ == "__main__":
