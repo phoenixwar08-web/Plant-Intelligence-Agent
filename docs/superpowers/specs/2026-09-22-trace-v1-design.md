@@ -1,7 +1,7 @@
 # Trace V1 Design
 
 **Issue:** #23 — Day 5 Trace 和实验数据
-**Status:** approved design, pending implementation plan
+**Status:** implemented locally, pending independent review
 **Date:** 2026-09-22
 
 ## Purpose

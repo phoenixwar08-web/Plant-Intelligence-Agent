@@ -49,7 +49,7 @@
         "physical_actions_performed": {"const": false}
       }
     },
-    "feedback_refs": {"type": "array", "items": {"$ref": "#/$defs/record_ref"}},
+    "feedback_refs": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/record_ref"}},
     "outcome_ref": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/record_ref"}]}
   },
   "$defs": {
@@ -69,13 +69,26 @@
       }
     },
     "association": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["availability", "ref"],
-      "properties": {
-        "availability": {"enum": ["available", "unavailable", "not_requested"]},
-        "ref": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/record_ref"}]}
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["availability", "ref"],
+          "properties": {
+            "availability": {"const": "available"},
+            "ref": {"$ref": "#/$defs/record_ref"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["availability", "ref"],
+          "properties": {
+            "availability": {"enum": ["unavailable", "not_requested"]},
+            "ref": {"type": "null"}
+          }
+        }
+      ]
     },
     "model_metrics": {
       "type": "object",
