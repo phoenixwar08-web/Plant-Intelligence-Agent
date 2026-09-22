@@ -42,10 +42,10 @@ nothing is deleted or repaired by this module.
   supplied. No unified reward is computed.
 - `gate.v1` is implemented, but this Issue does not make Episode a Gate
   consumer, so `gate_result` remains a caller's structured payload with only
-  envelope checks. `feedback.v1` remains planned and is stored with the same
-  envelope checks (object / list of objects, decision vocabulary when present).
-  This module writes no
-  consumer that assumes a planned contract exists.
+  envelope checks. `feedback.v1` is implemented by its own module; Episode
+  still stores its caller-supplied records with envelope checks only. The
+  Day3 runtime leaves new Episodes open, and Feedback finalization writes the
+  one aggregate Outcome before closing them through this store.
 - A section nobody supplied stays `null`/empty and is listed in
   `missing_facts` at close. Missing facts are stated, never invented —
   including timestamps: an unparseable caller timestamp is left exactly as the

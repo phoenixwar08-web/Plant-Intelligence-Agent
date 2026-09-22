@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plant-agent.local/schemas/feedback.v1.schema.json",
+  "title": "soil3 Feedback V1",
+  "x-lifecycle-notes": "One record stores one factual observation window (30min, 2-3h, 6-12h, or 24h after the reference action) of one episode.v1 care experience. Records are write-once facts: the store appends and reads them and never edits or deletes one. feedback_id, created_at, contradictions, and missing_observations are store-computed and are refused from callers. observed_at is required and must be parseable, because window placement and ordering depend on it; reference_action_at is optional, and an unparseable string value is kept exactly as the producer wrote it with the timing check skipped. Assessments nobody supplied stay \"unknown\" and observations nobody supplied stay null and are listed in missing_observations — absence is stated, never filled in. Contradictory data is preserved and flagged with a machine code (sustained dry and wet at once, an assessment without the observation backing it, an observation time before or outside its window); a flag never edits or drops the conflicting facts. The outcome payload aggregated from these records (documented in README.md) keeps the independent assessments and computes no unified reward. Reasoning-shaped keys (chain_of_thought, hidden_reasoning, raw_reasoning, reasoning_trace, thinking) are refused anywhere in a payload, recursively. Window-range and cross-record semantics are enforced by services/soil3/feedback/feedback_v1.py.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "feedback_id",
+    "device_code",
+    "episode_id",
+    "window",
+    "observed_at",
+    "reference_action_at",
+    "created_at",
+    "observations",
+    "assessments",
+    "contradictions",
+    "missing_observations"
+  ],
+  "properties": {
+    "schema_version": {"const": "feedback.v1"},
+    "feedback_id": {"type": "string", "pattern": "^fb-[0-9a-f]{24}$"},
+    "device_code": {"const": "soil3"},
+    "episode_id": {
+      "type": "string",
+      "pattern": "^ep-[0-9a-f]{24}$",
+      "description": "The episode.v1 record this observation belongs to. Pattern-checked only; the store does not require the episode to exist at record time, and attach_to_episode fails loudly when it does not."
+    },
+    "window": {
+      "enum": ["30min", "2-3h", "6-12h", "24h"],
+      "description": "Which of the four observation windows this record belongs to, in the canonical chronological order 30min < 2-3h < 6-12h < 24h."
+    },
+    "observed_at": {
+      "$ref": "#/$defs/rfc3339_utc",
+      "description": "When the observation was actually made, normalized to the canonical notation; required and refused when unparseable, because window placement and ordering depend on it. Never invented."
+    },
+    "reference_action_at": {
+      "type": ["string", "null"],
+      "description": "The action time the window is measured from (for example the watering's executed_at), as a caller-supplied fact. Normalized when parseable; an unparseable string is kept exactly as the producer wrote it and the window timing check is skipped; null when the caller supplied none."
+    },
+    "created_at": {"$ref": "#/$defs/rfc3339_utc"},
+    "observations": {
+      "type": "object",
+      "required": ["soil", "vision"],
+      "properties": {
+        "soil": {
+          "oneOf": [{"type": "object"}, {"type": "null"}],
+          "description": "Caller-supplied structured soil facts (for example humidity readings around the window). Envelope-checked only; the facts belong to their producers. null when nobody supplied any."
+        },
+        "vision": {
+          "oneOf": [{"type": "object"}, {"type": "null"}],
+          "description": "Caller-supplied structured visual facts (for example a vision.v1 observation). Envelope-checked only. null when nobody supplied any. This module records visual facts handed to it; collection scheduling belongs to Issue #30."
+        }
+      },
+      "additionalProperties": false
+    },
+    "assessments": {
+      "type": "object",
+      "required": ["recovery", "sustained_dry", "sustained_wet", "rewater_needed", "visual_recovery", "data_quality"],
+      "properties": {
+        "recovery": {
+          "enum": ["good", "partial", "poor", "none", "unknown"],
+          "description": "Humidity recovery magnitude and speed after the action. \"unknown\" when nobody supplied it."
+        },
+        "sustained_dry": {
+          "oneOf": [{"type": "boolean"}, {"const": "unknown"}],
+          "description": "Whether the soil stayed or dried back too far across the window (persistent dryness)."
+        },
+        "sustained_wet": {
+          "oneOf": [{"type": "boolean"}, {"const": "unknown"}],
+          "description": "Whether the soil stayed persistently wet across the window (over-wet)."
+        },
+        "rewater_needed": {
+          "oneOf": [{"type": "boolean"}, {"const": "unknown"}],
+          "description": "Whether a short-interval rewatering need was observed."
+        },
+        "visual_recovery": {
+          "enum": ["improved", "unchanged", "worse", "unknown"],
+          "description": "Whether the visual state improved, as supplied by the caller; never a diagnosis."
+        },
+        "data_quality": {
+          "enum": ["good", "degraded", "poor", "unknown"],
+          "description": "The caller's assessment of the observation data quality for this window."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Independent assessments kept exactly as supplied; no unified reward is computed anywhere in feedback.v1."
+    },
+    "contradictions": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "assessment_without_soil_observation",
+          "assessment_without_vision_observation",
+          "observed_at_before_reference",
+          "observed_at_outside_window",
+          "sustained_dry_and_wet"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Store-computed conflict flags for the facts in this record. The conflicting data is preserved unchanged; a flag states the conflict, it never resolves, repairs, or deletes it."
+    },
+    "missing_observations": {
+      "type": "array",
+      "items": {"enum": ["soil", "vision"]},
+      "uniqueItems": true,
+      "description": "Store-computed: the observation sections nobody supplied. Absence is stated, never filled in."
+    }
+  },
+  "$defs": {
+    "rfc3339_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{6})?Z$",
+      "description": "The one timestamp notation feedback.v1 writes: RFC 3339 in UTC with a Z suffix, the same form episode.v1 and strategy.v1 carry."
+    }
+  },
+  "additionalProperties": false
+}

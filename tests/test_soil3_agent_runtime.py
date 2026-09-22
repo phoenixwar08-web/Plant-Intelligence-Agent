@@ -478,7 +478,7 @@ class PipelineTests(StateProducerTests):
                 summary["execution"],
             )
 
-    def test_gate_deny_skips_runner_and_closes_episode_with_missing_facts(self):
+    def test_gate_deny_skips_runner_and_keeps_episode_open_for_feedback(self):
         """Fails if a deny is ever treated as permission to start dry-run work."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
         from services.soil3.episode.episode_v1 import EpisodeStore
@@ -501,10 +501,11 @@ class PipelineTests(StateProducerTests):
                 record["execution"],
             )
             episode = EpisodeStore(config.episode_dir).read(record["episode_id"])
-            self.assertEqual("closed", episode["status"])
-            self.assertIn("executed_actions", episode["missing_facts"])
-            self.assertIn("feedback", episode["missing_facts"])
-            self.assertIn("outcome", episode["missing_facts"])
+            self.assertEqual("open", episode["status"])
+            self.assertEqual("open", record["episode_status"])
+            self.assertEqual("pending", record["feedback_status"])
+            self.assertEqual([], episode["executed_actions"])
+            self.assertIsNone(episode["outcome"])
 
     def test_gate_allow_records_runner_dry_run_without_physical_action(self):
         """Fails if an admitted proposal can gain a Phase3 or physical side effect."""
@@ -538,8 +539,73 @@ class PipelineTests(StateProducerTests):
             self.assertFalse(runner["execution"]["physical_actions_performed"])
             self.assertFalse(runner["execution"]["phase3_called"])
             episode = EpisodeStore(config.episode_dir).read(record["episode_id"])
+            self.assertEqual("open", episode["status"])
+            self.assertEqual("pending", record["feedback_status"])
             self.assertNotIn("executed_actions", episode["missing_facts"])
             self.assertEqual("dry_run_stop", episode["executed_actions"][0]["kind"])
+
+    def test_day3_runtime_episode_accepts_delayed_feedback_then_finalizes(self):
+        """The real runtime lifecycle must stay writable through all four windows."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.episode.episode_v1 import EpisodeStore
+        from services.soil3.feedback.feedback_v1 import FeedbackStore
+
+        allowed_gate = {
+            "schema_version": "gate.v1",
+            "decision": "allow",
+            "reason_codes": [],
+            "warning_codes": [],
+            "execution": {"mode": "admission_only", "actuator_commands_allowed": False},
+        }
+        observed_at = {
+            "30min": "2026-09-20T12:30:00Z",
+            "2-3h": "2026-09-20T14:30:00Z",
+            "6-12h": "2026-09-20T20:00:00Z",
+            "24h": "2026-09-21T12:00:00Z",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate",
+                return_value=allowed_gate,
+            ):
+                run = run_pipeline(config)
+
+            episodes = EpisodeStore(config.episode_dir)
+            feedback = FeedbackStore(config.feedback_dir)
+            episode_id = run["episode_id"]
+            for window in ("30min", "2-3h", "6-12h"):
+                feedback.record({
+                    "episode_id": episode_id,
+                    "window": window,
+                    "observed_at": observed_at[window],
+                })
+                summary = feedback.attach_to_episode(episode_id, episodes)
+                self.assertFalse(summary["finalized"])
+                self.assertEqual("open", episodes.read(episode_id)["status"])
+
+            feedback.record({
+                "episode_id": episode_id,
+                "window": "24h",
+                "observed_at": observed_at["24h"],
+            })
+            summary = feedback.attach_to_episode(
+                episode_id, episodes, finalize=True
+            )
+            finalized = episodes.read(episode_id)
+
+            self.assertTrue(summary["finalized"])
+            self.assertEqual("closed", finalized["status"])
+            self.assertEqual(4, len(finalized["feedback"]))
+            self.assertEqual(
+                ["30min", "2-3h", "6-12h", "24h"],
+                finalized["outcome"]["windows_included"],
+            )
+            self.assertEqual([], finalized["outcome"]["windows_missing"])
 
 
 if __name__ == "__main__":

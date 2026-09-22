@@ -185,6 +185,10 @@ class RuntimeConfig:
         return self.runtime_root / "episodes"
 
     @property
+    def feedback_dir(self) -> Path:
+        return self.runtime_root / "feedback"
+
+    @property
     def audit_dir(self) -> Path:
         return self.runtime_root / "audit"
 
@@ -320,7 +324,6 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     runner_path: str | None = None
     if gate["decision"] == "deny":
         runner_status = "skipped_due_to_gate_deny"
-        episode_store.close(episode_id)
     elif gate["decision"] in {"allow", "allow_with_warning"}:
         runner_store = RunnerStore(config.runner_dir)
         runner_result = DryRunRunner(runner_store).run(strategy, state)
@@ -335,7 +338,6 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
             if step["status"] == "completed" and isinstance(step.get("result"), dict)
         ]
         episode_store.update(episode_id, executed_actions=executed_actions)
-        episode_store.close(episode_id)
         runner_status = "dry_run_completed"
     else:
         raise RuntimeError(f"unexpected gate decision: {gate['decision']}")
@@ -356,6 +358,8 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         "runner_path": runner_path,
         "episode_id": episode_id,
         "episode_path": str(episode_store.episode_path(episode_id)),
+        "episode_status": "open",
+        "feedback_status": "pending",
         "audit_path": str(audit_path),
         "execution": {"physical_actions_performed": False, "phase3_called": False},
     }
