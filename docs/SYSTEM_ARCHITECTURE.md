@@ -14,6 +14,7 @@
 | ActuatorLayer | Phase3-owned actuator interface. |
 | Feedback | Record subsequent factual observations at defined times. |
 | Episode | Link state, strategy, gate result, actions, feedback, and outcome. |
+| Experience Retrieval | Read closed Episodes and return separately ranked, explainable successful and failed analogues; never generate a strategy. |
 | Replay | Read historical facts into reproducible samples. |
 
 ## Formal control chain

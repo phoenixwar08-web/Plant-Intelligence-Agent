@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plant-agent.local/schemas/experience_retrieval.v1.schema.json",
+  "title": "soil3 Experience Retrieval V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "device_code", "current_state_observed_at", "history_scanned", "usable_history", "availability", "empty_reasons", "successful_cases", "failed_cases", "skipped_history"],
+  "properties": {
+    "schema_version": {"const": "experience_retrieval.v1"},
+    "device_code": {"const": "soil3"},
+    "current_state_observed_at": {"type": ["string", "null"]},
+    "history_scanned": {"type": "integer", "minimum": 0},
+    "usable_history": {"$ref": "#/$defs/class_counts"},
+    "availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["success", "failure", "both_classes"],
+      "properties": {
+        "success": {"type": "boolean"},
+        "failure": {"type": "boolean"},
+        "both_classes": {"type": "boolean"}
+      }
+    },
+    "empty_reasons": {"type": "array", "items": {"enum": ["no_usable_success_history", "no_usable_failure_history"]}, "uniqueItems": true},
+    "successful_cases": {"type": "array", "items": {"$ref": "#/$defs/match"}},
+    "failed_cases": {"type": "array", "items": {"$ref": "#/$defs/match"}},
+    "skipped_history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["malformed_or_unreadable", "not_closed", "outcome_unclassified", "insufficient_state_evidence"],
+      "properties": {
+        "malformed_or_unreadable": {"type": "integer", "minimum": 0},
+        "not_closed": {"type": "integer", "minimum": 0},
+        "outcome_unclassified": {"type": "integer", "minimum": 0},
+        "insufficient_state_evidence": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "$defs": {
+    "class_counts": {
+      "type": "object", "additionalProperties": false, "required": ["success", "failure"],
+      "properties": {"success": {"type": "integer", "minimum": 0}, "failure": {"type": "integer", "minimum": 0}}
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_id", "outcome_class", "similarity_score", "evidence_coverage", "usable", "matched_on", "missing_components", "summary"],
+      "properties": {
+        "episode_id": {"type": "string"},
+        "outcome_class": {"enum": ["success", "failure"]},
+        "similarity_score": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidence_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+        "usable": {"const": true},
+        "matched_on": {"type": "array", "items": {"type": "object"}},
+        "missing_components": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "summary": {"type": "object"}
+      }
+    }
+  }
+}
