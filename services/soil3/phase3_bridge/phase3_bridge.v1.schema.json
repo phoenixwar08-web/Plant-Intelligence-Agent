@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plant-agent.local/schemas/phase3_bridge.v1.schema.json",
+  "title": "soil3 Phase3 Bridge V1 request or response",
+  "oneOf": [
+    {"$ref": "#/$defs/request"},
+    {"$ref": "#/$defs/response"}
+  ],
+  "$defs": {
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "phase3_called", "physical_actions_performed"],
+      "properties": {
+        "mode": {"const": "verification_only"},
+        "phase3_called": {"const": false},
+        "physical_actions_performed": {"const": false}
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "created_at", "device_code", "operation", "bindings", "phase3_interface", "execution"],
+      "properties": {
+        "schema_version": {"const": "phase3_bridge_request.v1"},
+        "request_id": {"type": "string", "format": "uuid"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "device_code": {"const": "soil3"},
+        "operation": {"const": "run_cycle"},
+        "bindings": {
+          "type": "object", "additionalProperties": false,
+          "required": ["state_sha256", "strategy_id", "strategy_sha256", "gate_id"],
+          "properties": {
+            "state_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "strategy_id": {"type": "string", "format": "uuid"},
+            "strategy_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "gate_id": {"type": "string", "format": "uuid"}
+          }
+        },
+        "phase3_interface": {
+          "type": "object", "additionalProperties": false, "required": ["entrypoint", "arguments"],
+          "properties": {
+            "entrypoint": {"const": "services.soil3.phase3.decision_brain.DecisionBrain.run_cycle"},
+            "arguments": {"const": []}
+          }
+        },
+        "execution": {"$ref": "#/$defs/execution"}
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "accepted", "checked_at", "reason_codes", "handoff", "execution"],
+      "properties": {
+        "schema_version": {"const": "phase3_bridge_response.v1"},
+        "accepted": {"type": "boolean"},
+        "checked_at": {"type": "string", "format": "date-time"},
+        "reason_codes": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "handoff": {"oneOf": [{"$ref": "#/$defs/request"}, {"type": "null"}]},
+        "execution": {"$ref": "#/$defs/execution"}
+      }
+    }
+  }
+}

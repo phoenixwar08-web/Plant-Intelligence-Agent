@@ -10,6 +10,7 @@
 | Validator | Reject malformed, unknown, or invalid strategy content. |
 | Gate | Apply the small set of cloud-side admission and exploration constraints. |
 | Runner | Persist and progress approved strategy steps; initially dry-run only. |
+| Phase3 Bridge | Revalidate Strategy, Gate, and Runner bindings and produce only a zero-argument handoff to Phase3's formal cycle interface. V1 is verification-only. |
 | Phase3 | Final safety and irrigation decision authority. |
 | ActuatorLayer | Phase3-owned actuator interface. |
 | Feedback | Record subsequent factual observations at defined times. |
@@ -20,7 +21,7 @@
 ## Formal control chain
 
 ```text
-LLM → Strategy → Validator → Gate → Runner → Phase3 → ActuatorLayer → MQTT → ESP32
+LLM → Strategy → Validator → Gate → Runner → Phase3 Bridge → Phase3 → ActuatorLayer → MQTT → ESP32
 ```
 
 The following paths are prohibited:
