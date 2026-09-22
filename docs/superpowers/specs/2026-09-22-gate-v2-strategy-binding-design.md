@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-**Proposed; approved direction, awaiting review of this written design.**
+**Approved design.**
 
 This is a standalone Gate protocol change. It precedes and is intentionally
 separate from PR #47 (Phase3 Bridge). It adds a content binding to new
