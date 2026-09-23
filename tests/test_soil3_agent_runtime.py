@@ -1,9 +1,11 @@
+import ast
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry import events
 
@@ -332,6 +334,19 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
 
 
 class PipelineTests(StateProducerTests):
+    @staticmethod
+    def admitted_gate(state, strategy, policy, exploration_requested):
+        gate = evaluate_gate_v2(
+            state,
+            strategy,
+            policy,
+            exploration_requested,
+        )
+        gate["decision"] = "allow"
+        gate["reason_codes"] = []
+        gate["warning_codes"] = []
+        return gate
+
     def qwen_runtime_config_value(self, root: Path):
         value = self.runtime_config_value(root)
         value["provider_mode"] = "qwen_dashscope"
@@ -366,6 +381,7 @@ class PipelineTests(StateProducerTests):
     def test_qwen_failure_is_persisted_without_fixture_fallback(self):
         """A Qwen failure is traceable and cannot become an offline proposal."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.trace.trace_v1 import TraceStore
 
         failed_chain = {
             "chain_version": "cloud-strategy-chain.v1",
@@ -410,6 +426,13 @@ class PipelineTests(StateProducerTests):
                 {"physical_actions_performed": False, "phase3_called": False},
                 record["execution"],
             )
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            self.assertIsNotNone(trace["decision"]["state_ref"])
+            self.assertIsNone(trace["decision"]["strategy_ref"])
+            self.assertIsNone(trace["decision"]["gate_ref"])
+            self.assertIsNone(trace["decision"]["runner_ref"])
+            self.assertIsNone(trace["decision"]["bridge_ref"])
+            self.assertIsNone(trace["decision"]["episode_ref"])
             self.assertFalse(config.episode_dir.exists())
 
     def test_accepted_qwen_strategy_is_stored_with_real_provider_provenance(self):
@@ -426,6 +449,8 @@ class PipelineTests(StateProducerTests):
             state = StateBuilder("soil3").build_from_health_snapshot(
                 self.health_snapshot()
             )
+            config.state_output.parent.mkdir(parents=True, exist_ok=True)
+            config.state_output.write_text(json.dumps(state), encoding="utf-8")
             strategy = build_offline_fixture(state)
             accepted_chain = {
                 "cloud": {
@@ -512,16 +537,6 @@ class PipelineTests(StateProducerTests):
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
         from services.soil3.episode.episode_v1 import EpisodeStore
 
-        allowed_gate = {
-            "schema_version": "gate.v1",
-            "decision": "allow",
-            "reason_codes": [],
-            "warning_codes": [],
-            "execution": {
-                "mode": "admission_only",
-                "actuator_commands_allowed": False,
-            },
-        }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = RuntimeConfig.from_dict(self.runtime_config_value(root))
@@ -529,8 +544,8 @@ class PipelineTests(StateProducerTests):
                 "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
                 return_value=self.health_snapshot(),
             ), mock.patch(
-                "services.soil3.agent_runtime.runtime_v1.evaluate_gate",
-                return_value=allowed_gate,
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=self.admitted_gate,
             ):
                 record = run_pipeline(config)
 
@@ -544,19 +559,184 @@ class PipelineTests(StateProducerTests):
             self.assertNotIn("executed_actions", episode["missing_facts"])
             self.assertEqual("dry_run_stop", episode["executed_actions"][0]["kind"])
 
+    def test_day5_full_shadow_chain_is_correlated_and_non_executing(self):
+        """One trace must bind every produced artifact without reaching Phase3."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.episode.episode_v1 import EpisodeStore
+        from services.soil3.trace.trace_v1 import TraceStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=self.admitted_gate,
+            ):
+                record = run_pipeline(config)
+
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            self.assertEqual(record["trace_path"], str(config.trace_dir / f'{record["trace_id"]}.json'))
+            self.assertEqual("verified", record["bridge_status"])
+            self.assertEqual("state.v1", trace["decision"]["state_ref"]["schema_version"])
+            self.assertEqual("not_requested", trace["decision"]["vision"]["availability"])
+            self.assertEqual("not_requested", trace["decision"]["experience"]["availability"])
+            self.assertEqual("strategy.v1", trace["decision"]["strategy_ref"]["schema_version"])
+            self.assertEqual("gate.v2", trace["decision"]["gate_ref"]["schema_version"])
+            self.assertEqual("runner_state.v1", trace["decision"]["runner_ref"]["schema_version"])
+            self.assertEqual(
+                "phase3_bridge_response.v1",
+                trace["decision"]["bridge_ref"]["schema_version"],
+            )
+            self.assertEqual(record["episode_id"], trace["decision"]["episode_ref"]["record_id"])
+            self.assertEqual(
+                {"phase3_called": False, "physical_actions_performed": False},
+                trace["execution"],
+            )
+            bridge = json.loads(Path(record["bridge_path"]).read_text(encoding="utf-8"))
+            self.assertTrue(bridge["accepted"])
+            self.assertFalse(bridge["execution"]["phase3_called"])
+            self.assertFalse(bridge["execution"]["physical_actions_performed"])
+            episode = EpisodeStore(config.episode_dir).read(record["episode_id"])
+            self.assertEqual("open", episode["status"])
+            self.assertIsNone(episode["outcome"])
+
+    def test_day5_gate_v1_never_reaches_runner_or_bridge(self):
+        """A legacy Gate output stops before dry-run and Bridge."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_gate.gate_v1 import evaluate_gate
+
+        def legacy_gate(state, strategy, policy, exploration_requested):
+            gate = evaluate_gate(state, strategy, policy, exploration_requested)
+            gate["decision"] = "allow"
+            gate["reason_codes"] = []
+            gate["warning_codes"] = []
+            return gate
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=legacy_gate,
+            ):
+                record = run_pipeline(config)
+
+            self.assertEqual("skipped_due_to_invalid_gate_binding", record["runner_status"])
+            self.assertEqual("not_started_invalid_gate_binding", record["bridge_status"])
+            self.assertIsNone(record["runner_path"])
+            self.assertIsNone(record["bridge_path"])
+            self.assertFalse(config.runner_dir.exists())
+            self.assertFalse(config.bridge_dir.exists())
+
+    def test_day5_gate_hash_mismatch_never_reaches_runner_or_bridge(self):
+        """A Gate v2 bound to different Strategy content fails closed."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+
+        def mismatched_gate(state, strategy, policy, exploration_requested):
+            gate = self.admitted_gate(
+                state, strategy, policy, exploration_requested
+            )
+            gate["strategy_sha256"] = "0" * 64
+            return gate
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=mismatched_gate,
+            ):
+                record = run_pipeline(config)
+
+            self.assertEqual("skipped_due_to_invalid_gate_binding", record["runner_status"])
+            self.assertEqual("not_started_invalid_gate_binding", record["bridge_status"])
+            self.assertIsNone(record["runner_path"])
+            self.assertIsNone(record["bridge_path"])
+
+    def test_day5_bridge_rejection_is_persisted_and_fails_closed(self):
+        """A rejected verification leaves evidence but never reports success."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.trace.trace_v1 import TraceStore
+
+        rejected = {
+            "schema_version": "phase3_bridge_response.v1",
+            "accepted": False,
+            "checked_at": "2026-09-23T00:00:00Z",
+            "reason_codes": ["runner_strategy_hash_mismatch"],
+            "handoff": None,
+            "execution": {
+                "mode": "verification_only",
+                "phase3_called": False,
+                "physical_actions_performed": False,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=self.admitted_gate,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.Phase3Bridge.verify",
+                return_value=rejected,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "bridge verification"):
+                    run_pipeline(config)
+
+            run_files = list(config.runs_dir.glob("*.json"))
+            self.assertEqual(1, len(run_files))
+            record = json.loads(run_files[0].read_text(encoding="utf-8"))
+            self.assertEqual("rejected", record["bridge_status"])
+            self.assertEqual(
+                {"physical_actions_performed": False, "phase3_called": False},
+                record["execution"],
+            )
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            self.assertIsNotNone(trace["decision"]["bridge_ref"])
+            self.assertEqual(
+                {"phase3_called": False, "physical_actions_performed": False},
+                trace["execution"],
+            )
+
+    def test_day5_runtime_has_no_control_path_imports(self):
+        """The Shadow orchestrator must not acquire an actuator dependency."""
+        source = (
+            ROOT / "services" / "soil3" / "agent_runtime" / "runtime_v1.py"
+        ).read_text(encoding="utf-8")
+        imported = []
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+        forbidden = ("services.soil3.phase3", "services.soil3.phase1", "paho.mqtt")
+        self.assertFalse(
+            [
+                name
+                for name in imported
+                if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
+            ],
+            imported,
+        )
+
     def test_day3_runtime_episode_accepts_delayed_feedback_then_finalizes(self):
         """The real runtime lifecycle must stay writable through all four windows."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
         from services.soil3.episode.episode_v1 import EpisodeStore
         from services.soil3.feedback.feedback_v1 import FeedbackStore
 
-        allowed_gate = {
-            "schema_version": "gate.v1",
-            "decision": "allow",
-            "reason_codes": [],
-            "warning_codes": [],
-            "execution": {"mode": "admission_only", "actuator_commands_allowed": False},
-        }
         observed_at = {
             "30min": "2026-09-20T12:30:00Z",
             "2-3h": "2026-09-20T14:30:00Z",
@@ -570,8 +750,8 @@ class PipelineTests(StateProducerTests):
                 "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
                 return_value=self.health_snapshot(),
             ), mock.patch(
-                "services.soil3.agent_runtime.runtime_v1.evaluate_gate",
-                return_value=allowed_gate,
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=self.admitted_gate,
             ):
                 run = run_pipeline(config)
 

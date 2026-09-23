@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,13 +12,15 @@ from math import isfinite
 from pathlib import Path
 from typing import Any
 
-from services.soil3.cloud_gate.gate_v1 import GatePolicy, evaluate_gate
+from services.soil3.cloud_gate import GatePolicy, evaluate_gate_v2
 from services.soil3.cloud_strategy.service import append_audit, run_chain
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, StrategyValidator, fingerprint, normalize_timestamp
 from services.soil3.episode.episode_v1 import EpisodeStore
+from services.soil3.phase3_bridge import Phase3Bridge
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry.events import build_health_snapshot
+from services.soil3.trace import TraceStore
 
 
 CONFIG_FIELDS = {
@@ -189,6 +193,14 @@ class RuntimeConfig:
         return self.runtime_root / "feedback"
 
     @property
+    def trace_dir(self) -> Path:
+        return self.runtime_root / "traces"
+
+    @property
+    def bridge_dir(self) -> Path:
+        return self.runtime_root / "bridge"
+
+    @property
     def audit_dir(self) -> Path:
         return self.runtime_root / "audit"
 
@@ -218,6 +230,57 @@ def _resolve_prompt_path(prompt_path: Path) -> Path:
     if prompt_path.is_absolute():
         return prompt_path
     return Path(__file__).resolve().parents[3] / prompt_path
+
+
+def _artifact_ref(
+    schema_version: str,
+    path: Path,
+    *,
+    record_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a trace reference from an artifact that was actually persisted."""
+
+    return {
+        "schema_version": schema_version,
+        "path": str(path),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "record_id": record_id,
+    }
+
+
+def _model_metrics(strategy_result: dict[str, Any], latency_ms: float) -> dict[str, Any]:
+    """Keep only model facts with sources accepted by trace.v1."""
+
+    cloud = strategy_result.get("cloud")
+    cloud = cloud if isinstance(cloud, dict) else {}
+    usage = cloud.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    total_tokens = usage.get("total_tokens")
+    token_usage = None
+    if (
+        not isinstance(total_tokens, bool)
+        and isinstance(total_tokens, (int, float))
+        and isfinite(float(total_tokens))
+        and float(total_tokens) >= 0
+    ):
+        token_usage = {
+            "source": "provider_response.usage",
+            "value": total_tokens,
+            "unit": "tokens",
+        }
+    provider = cloud.get("provider")
+    model = cloud.get("model")
+    return {
+        "provider": provider if isinstance(provider, str) and provider.strip() else None,
+        "model": model if isinstance(model, str) and model.strip() else None,
+        "token_usage": token_usage,
+        "cost": None,
+        "latency": {
+            "source": "runtime_monotonic_clock",
+            "value": max(0.0, float(latency_ms)),
+            "unit": "ms",
+        },
+    }
 
 
 def build_offline_fixture(state: dict[str, Any]) -> dict[str, Any]:
@@ -250,10 +313,21 @@ def build_offline_fixture(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
-    """Run one proposal-only state-to-episode cycle without actuator access."""
+    """Run one traceable end-to-end Shadow cycle without actuator access."""
 
+    trace_store = TraceStore(config.trace_dir)
+    trace = trace_store.create()
+    trace_id = trace["trace_id"]
+    trace_path = trace_store.trace_path(trace_id)
     state = write_state_snapshot(config)
+    trace_store.set_decision(
+        trace_id,
+        state_ref=_artifact_ref("state.v1", config.state_output),
+        vision={"availability": "not_requested", "ref": None},
+        experience={"availability": "not_requested", "ref": None},
+    )
     prompt = _resolve_prompt_path(config.prompt_path).read_text(encoding="utf-8")
+    strategy_started = time.monotonic()
     strategy_result = run_chain(
         state=state,
         config=config.strategy_config(),
@@ -263,6 +337,11 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
             if config.provider_mode == "offline_fixture"
             else None
         ),
+    )
+    strategy_latency_ms = (time.monotonic() - strategy_started) * 1000.0
+    trace_store.set_decision(
+        trace_id,
+        model_metrics=_model_metrics(strategy_result, strategy_latency_ms),
     )
     validation = strategy_result.get("validation")
     if (
@@ -291,6 +370,8 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
             "provider_mode": config.provider_mode,
             "provider": str(cloud.get("provider") or config.provider_mode),
             "model": str(cloud.get("model") or strategy_config["model"]),
+            "trace_id": trace_id,
+            "trace_path": str(trace_path),
             "state_path": str(config.state_output),
             "state_sha256": fingerprint(state),
             "strategy_path": None,
@@ -298,6 +379,8 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
             "gate_decision": None,
             "runner_status": "not_started_provider_or_validation_failure",
             "runner_path": None,
+            "bridge_status": "not_started_provider_or_validation_failure",
+            "bridge_path": None,
             "episode_id": None,
             "episode_path": None,
             "audit_path": str(audit_path),
@@ -308,13 +391,31 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
 
     strategy = validation["strategy"]
     atomic_write_json(config.strategy_output, strategy)
-    gate = evaluate_gate(
+    trace_store.set_decision(
+        trace_id,
+        strategy_ref=_artifact_ref(
+            "strategy.v1",
+            config.strategy_output,
+            record_id=strategy["strategy_id"],
+        ),
+    )
+    gate = evaluate_gate_v2(
         state=state,
         strategy=strategy,
         policy=config.gate_policy,
         exploration_requested=False,
     )
     atomic_write_json(config.gate_output, gate)
+    trace_store.set_decision(
+        trace_id,
+        gate_ref=_artifact_ref(
+            str(gate.get("schema_version") or "unknown"),
+            config.gate_output,
+            record_id=(gate.get("gate_id") if isinstance(gate.get("gate_id"), str) else None),
+        ),
+        gate_decision=gate["decision"],
+        gate_reason_codes=gate["reason_codes"],
+    )
 
     episode_store = EpisodeStore(config.episode_dir)
     episode = episode_store.create(state)
@@ -322,12 +423,32 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     episode_store.update(episode_id, strategy=strategy, gate_result=gate)
 
     runner_path: str | None = None
-    if gate["decision"] == "deny":
+    bridge_path: str | None = None
+    bridge_status = "not_started"
+    gate_binding_valid = (
+        gate.get("schema_version") == "gate.v2"
+        and gate.get("strategy_sha256") == fingerprint(strategy)
+        and gate.get("decision") in {"allow", "allow_with_warning", "deny"}
+    )
+    if not gate_binding_valid:
+        runner_status = "skipped_due_to_invalid_gate_binding"
+        bridge_status = "not_started_invalid_gate_binding"
+    elif gate["decision"] == "deny":
         runner_status = "skipped_due_to_gate_deny"
+        bridge_status = "not_started_gate_deny"
     elif gate["decision"] in {"allow", "allow_with_warning"}:
         runner_store = RunnerStore(config.runner_dir)
         runner_result = DryRunRunner(runner_store).run(strategy, state)
-        runner_path = str(runner_store.path_for(strategy["strategy_id"]))
+        runner_artifact = runner_store.path_for(strategy["strategy_id"])
+        runner_path = str(runner_artifact)
+        trace_store.set_decision(
+            trace_id,
+            runner_ref=_artifact_ref(
+                "runner_state.v1",
+                runner_artifact,
+                record_id=strategy["strategy_id"],
+            ),
+        )
         executed_actions = [
             {
                 **step["result"],
@@ -339,8 +460,49 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         ]
         episode_store.update(episode_id, executed_actions=executed_actions)
         runner_status = "dry_run_completed"
+        bridge = Phase3Bridge().verify(state, strategy, gate, runner_result)
+        bridge_artifact = config.bridge_dir / f"{trace_id}.json"
+        atomic_write_json(bridge_artifact, bridge)
+        bridge_path = str(bridge_artifact)
+        handoff = bridge.get("handoff")
+        bridge_record_id = (
+            handoff.get("request_id")
+            if isinstance(handoff, dict) and isinstance(handoff.get("request_id"), str)
+            else None
+        )
+        trace_store.set_decision(
+            trace_id,
+            bridge_ref=_artifact_ref(
+                "phase3_bridge_response.v1",
+                bridge_artifact,
+                record_id=bridge_record_id,
+            ),
+        )
+        expected_bridge_execution = {
+            "mode": "verification_only",
+            "phase3_called": False,
+            "physical_actions_performed": False,
+        }
+        bridge_status = (
+            "verified"
+            if bridge.get("accepted") is True
+            and bridge.get("execution") == expected_bridge_execution
+            and isinstance(handoff, dict)
+            and handoff.get("execution") == expected_bridge_execution
+            else "rejected"
+        )
     else:
         raise RuntimeError(f"unexpected gate decision: {gate['decision']}")
+
+    episode_artifact = episode_store.episode_path(episode_id)
+    trace_store.set_decision(
+        trace_id,
+        episode_ref=_artifact_ref(
+            "episode.v1",
+            episode_artifact,
+            record_id=episode_id,
+        ),
+    )
 
     run_id = str(uuid.uuid4())
     record = {
@@ -349,6 +511,8 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         "provider_mode": config.provider_mode,
         "provider": strategy["model"]["provider"],
         "model": strategy["model"]["name"],
+        "trace_id": trace_id,
+        "trace_path": str(trace_path),
         "state_path": str(config.state_output),
         "state_sha256": fingerprint(state),
         "strategy_path": str(config.strategy_output),
@@ -356,6 +520,8 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         "gate_decision": gate["decision"],
         "runner_status": runner_status,
         "runner_path": runner_path,
+        "bridge_status": bridge_status,
+        "bridge_path": bridge_path,
         "episode_id": episode_id,
         "episode_path": str(episode_store.episode_path(episode_id)),
         "episode_status": "open",
@@ -364,4 +530,6 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         "execution": {"physical_actions_performed": False, "phase3_called": False},
     }
     atomic_write_json(config.runs_dir / f"{run_id}.json", record)
+    if bridge_status == "rejected":
+        raise RuntimeError("phase3 bridge verification was rejected")
     return record
