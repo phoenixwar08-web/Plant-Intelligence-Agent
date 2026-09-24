@@ -17,6 +17,7 @@ from services.soil3.cloud_strategy.service import append_audit, run_chain
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, StrategyValidator, fingerprint, normalize_timestamp
 from services.soil3.episode.episode_v1 import EpisodeStore
 from services.soil3.phase3_bridge import Phase3Bridge
+from services.soil3.phase3_bridge.bridge_v1 import _validate_gate
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry.events import build_health_snapshot
@@ -425,11 +426,16 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     runner_path: str | None = None
     bridge_path: str | None = None
     bridge_status = "not_started"
+    gate_decision = gate.get("decision") if isinstance(gate, dict) else None
     gate_binding_valid = (
         gate.get("schema_version") == "gate.v2"
         and gate.get("strategy_sha256") == fingerprint(strategy)
-        and gate.get("decision") in {"allow", "allow_with_warning", "deny"}
+        and gate_decision in {"allow", "allow_with_warning", "deny"}
     )
+    if gate_binding_valid and gate_decision in {"allow", "allow_with_warning"}:
+        # Reuse the Bridge admission contract before a dry-run Runner record
+        # can be created. A Gate denial never reaches Runner either way.
+        gate_binding_valid = not _validate_gate(gate, state, strategy)
     if not gate_binding_valid:
         runner_status = "skipped_due_to_invalid_gate_binding"
         bridge_status = "not_started_invalid_gate_binding"

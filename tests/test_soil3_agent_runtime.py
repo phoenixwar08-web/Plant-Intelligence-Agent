@@ -662,6 +662,66 @@ class PipelineTests(StateProducerTests):
             self.assertIsNone(record["runner_path"])
             self.assertIsNone(record["bridge_path"])
 
+    def test_day5_invalid_gate_admission_never_reaches_runner_or_bridge(self):
+        """State and execution-boundary Gate changes must stop before dry-run."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+
+        def corrupt_gate(field, value):
+            def evaluate(state, strategy, policy, exploration_requested):
+                gate = self.admitted_gate(
+                    state, strategy, policy, exploration_requested
+                )
+                gate[field] = value
+                return gate
+            return evaluate
+
+        corruptions = (
+            ("state_sha256", "0" * 64),
+            (
+                "execution",
+                {"mode": "admission_only", "actuator_commands_allowed": True},
+            ),
+        )
+        bridge_execution = {
+            "mode": "verification_only",
+            "phase3_called": False,
+            "physical_actions_performed": False,
+        }
+        accepted_bridge = {
+            "schema_version": "phase3_bridge_response.v1",
+            "accepted": True,
+            "checked_at": "2026-09-23T00:00:00Z",
+            "reason_codes": [],
+            "handoff": {
+                "request_id": "test-verified-handoff",
+                "execution": bridge_execution,
+            },
+            "execution": bridge_execution,
+        }
+        for field, value in corruptions:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+                with mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                    return_value=self.health_snapshot(),
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                    side_effect=corrupt_gate(field, value),
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.Phase3Bridge.verify",
+                    return_value=accepted_bridge,
+                ) as verify:
+                    record = run_pipeline(config)
+
+                self.assertEqual("skipped_due_to_invalid_gate_binding", record["runner_status"])
+                self.assertEqual("not_started_invalid_gate_binding", record["bridge_status"])
+                self.assertIsNone(record["runner_path"])
+                self.assertIsNone(record["bridge_path"])
+                self.assertFalse(config.runner_dir.exists())
+                self.assertFalse(config.bridge_dir.exists())
+                verify.assert_not_called()
+
     def test_day5_bridge_rejection_is_persisted_and_fails_closed(self):
         """A rejected verification leaves evidence but never reports success."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
