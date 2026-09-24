@@ -1,6 +1,7 @@
 import ast
 import copy
 import json
+import os
 import tempfile
 import unittest
 import uuid
@@ -8,11 +9,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+from services.soil3.agent_runtime.runtime_v1 import (
+    RuntimeConfig,
+    build_offline_fixture,
+    run_pipeline,
+)
 from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
-from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS
+from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS, StateBuilder
 from services.soil3.trace.trace_v1 import TraceError, TraceStore
 
 
@@ -53,11 +58,23 @@ def health_snapshot(*, soil_age_seconds=1, include_sensor=True, complete_safety=
     }
 
 
-def runtime_config(root):
+def runtime_config(root, *, provider_mode="offline_fixture"):
+    provider = {}
+    if provider_mode == "qwen_dashscope":
+        provider = {
+            "base_url": "https://provider.example/v1",
+            "model": "qwen3.8-Flash",
+            "api_key_env": "QWEN_DASHSCOPE_API_KEY",
+            "timeout_seconds": 30,
+            "max_retries": 0,
+            "temperature": 0,
+            "max_tokens": 1200,
+            "json_response_format": True,
+        }
     return RuntimeConfig.from_dict({
         "device_code": "soil3",
-        "provider_mode": "offline_fixture",
-        "provider": {},
+        "provider_mode": provider_mode,
+        "provider": provider,
         "exploration_requested": False,
         "phase3_state_path": str(root / "phase3" / "system_state.json"),
         "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),
@@ -80,6 +97,35 @@ def runtime_config(root):
             "max_exploration_water_seconds": 0,
         },
     })
+
+
+class ProviderResponse:
+    def __init__(self, status_code, content=None):
+        self.status_code = status_code
+        self.content = content
+
+    def json(self):
+        if self.status_code != 200:
+            return {"error": {"message": "provider failure"}}
+        return {
+            "id": "day5-fault-request",
+            "model": "qwen3.8-Flash",
+            "choices": [{"message": {"content": self.content}}],
+            "usage": {"total_tokens": 12},
+        }
+
+
+class ProviderHttp:
+    Timeout = TimeoutError
+    RequestException = OSError
+
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def post(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.response
 
 
 def admitted_gate(state, strategy, policy, exploration_requested):
@@ -142,11 +188,33 @@ class Day5FaultSafetyTests(unittest.TestCase):
 
     def test_stale_missing_sensor_and_incomplete_safety_facts_fail_closed(self):
         cases = {
-            "stale_sensor": health_snapshot(soil_age_seconds=18001),
-            "missing_sensor": health_snapshot(include_sensor=False),
-            "incomplete_safety": health_snapshot(complete_safety=False),
+            "stale_sensor": (
+                health_snapshot(soil_age_seconds=18001),
+                ["soil_data_age_denied"],
+            ),
+            "missing_sensor": (
+                health_snapshot(include_sensor=False),
+                ["soil_humidity_unavailable", "soil_data_age_unavailable"],
+            ),
+            "incomplete_safety": (
+                health_snapshot(complete_safety=False),
+                [
+                    "safety_flag_unavailable:cloud_protection",
+                    "safety_flag_unavailable:dynamic_cooldown",
+                    "safety_flag_unavailable:hard_safety_low_guard",
+                    "safety_flag_unavailable:low_wet_recovery_suspect",
+                    "safety_flag_unavailable:pending_soak",
+                    "safety_flag_unavailable:predictor_circuit",
+                    "safety_flag_unavailable:recent_response_guard",
+                    "safety_flag_unavailable:reservoir_empty_suspect",
+                    "safety_flag_unavailable:sensor_fault",
+                    "safety_flag_unavailable:water_delivery_suspect",
+                    "safety_flag_unavailable:watering_trigger_guard",
+                    "predictor_circuit_invalid",
+                ],
+            ),
         }
-        for label, snapshot in cases.items():
+        for label, (snapshot, expected_reasons) in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
                 config = runtime_config(Path(directory))
                 with mock.patch(
@@ -159,70 +227,97 @@ class Day5FaultSafetyTests(unittest.TestCase):
                 self.assertEqual("skipped_due_to_gate_deny", record["runner_status"])
                 self.assertEqual("not_started_gate_deny", record["bridge_status"])
                 self.assert_stopped_before_bridge(record)
+                state = json.loads(config.state_output.read_text(encoding="utf-8"))
+                gate = json.loads(config.gate_output.read_text(encoding="utf-8"))
+                self.assertEqual(expected_reasons, gate["reason_codes"])
+                if label == "stale_sensor":
+                    self.assertEqual(31.5, state["soil"]["humidity_percent"])
+                    self.assertGreater(state["data_quality"]["soil_age_sec"], 18000)
+                elif label == "missing_sensor":
+                    self.assertIsNone(state["soil"]["humidity_percent"])
+                    self.assertIsNone(state["source_timestamps"]["soil"])
+                    self.assertIsNone(state["data_quality"]["soil_age_sec"])
+                else:
+                    self.assertEqual({"pump_active": False}, state["safety"]["flags"])
                 trace = TraceStore(config.trace_dir).read(record["trace_id"])
                 self.assertEqual("deny", trace["decision"]["gate_decision"])
+                self.assertEqual(expected_reasons, trace["decision"]["gate_reason_codes"])
                 self.assertEqual(NO_EXECUTION, trace["execution"])
 
-    def test_vision_and_experience_absence_is_explicit_and_never_fabricated(self):
-        with tempfile.TemporaryDirectory() as directory:
-            store = TraceStore(Path(directory) / "traces")
-            trace_id = store.create()["trace_id"]
-            updated = store.set_decision(
-                trace_id,
-                vision={"availability": "unavailable", "ref": None},
-                experience={"availability": "not_requested", "ref": None},
-            )
-
-            self.assertEqual(
-                {"availability": "unavailable", "ref": None},
-                updated["decision"]["vision"],
-            )
-            self.assertEqual(
-                {"availability": "not_requested", "ref": None},
-                updated["decision"]["experience"],
-            )
-            self.assertEqual(NO_EXECUTION, updated["execution"])
-
-    def test_model_timeout_failure_invalid_json_and_validator_rejection_stop_early(self):
+    def test_provider_failure_invalid_json_and_validator_rejection_stop_early(self):
+        snapshot = health_snapshot()
+        state = StateBuilder("soil3").build_from_health_snapshot(snapshot)
+        rejected_strategy = build_offline_fixture(state)
+        rejected_strategy["actions"] = [{"action_id": "bad", "type": "launch"}]
         cases = {
-            "timeout": {
-                "cloud": {"provider": "qwen_dashscope", "model": "qwen3.8-Flash"},
-                "failure": {"code": "model_timeout", "message": "timeout", "retryable": True},
-                "validation": {"accepted": False, "reason_codes": ["model_timeout"], "strategy": None},
-            },
-            "invalid_json": {
-                "cloud": {"provider": "qwen_dashscope", "model": "qwen3.8-Flash"},
-                "parse_error": {"code": "invalid_model_json", "message": "bad json"},
-                "validation": {"accepted": False, "reason_codes": ["invalid_model_json"], "strategy": None},
-            },
-            "validator_rejected": {
-                "cloud": {"provider": "qwen_dashscope", "model": "qwen3.8-Flash"},
-                "validation": {"accepted": False, "reason_codes": ["unknown_action_type"], "strategy": None},
-            },
+            "provider_failure": (
+                ProviderResponse(503),
+                ["model_http_error"],
+                "model_http_error",
+            ),
+            "invalid_json": (
+                ProviderResponse(200, "not json"),
+                ["invalid_model_json"],
+                "invalid_model_json",
+            ),
+            "validator_rejected": (
+                ProviderResponse(200, json.dumps(rejected_strategy)),
+                ["action[0]:unknown_action"],
+                None,
+            ),
         }
-        for label, result in cases.items():
+        for label, (response, expected_reasons, expected_failure) in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
-                config = runtime_config(Path(directory))
+                config = runtime_config(
+                    Path(directory), provider_mode="qwen_dashscope"
+                )
+                provider = ProviderHttp(response)
                 with mock.patch(
                     "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
-                    return_value=health_snapshot(),
+                    return_value=snapshot,
                 ), mock.patch(
-                    "services.soil3.agent_runtime.runtime_v1.run_chain",
-                    return_value=result,
+                    "services.soil3.cloud_strategy.client.requests",
+                    new=provider,
+                ), mock.patch.dict(
+                    os.environ,
+                    {"QWEN_DASHSCOPE_API_KEY": "test-only-key"},
                 ):
                     with self.assertRaisesRegex(RuntimeError, "strategy was rejected"):
                         run_pipeline(config)
 
+                self.assertEqual(1, len(provider.calls))
                 records = list(config.runs_dir.glob("*.json"))
                 self.assertEqual(1, len(records))
                 record = json.loads(records[0].read_text(encoding="utf-8"))
+                audit = json.loads(
+                    Path(record["audit_path"]).read_text(encoding="utf-8").splitlines()[0]
+                )
+                self.assertEqual(expected_reasons, audit["validation"]["reason_codes"])
+                self.assertIsNone(audit["validation"]["strategy"])
+                if expected_failure is None:
+                    self.assertIsNone(audit["failure"])
+                elif expected_failure == "invalid_model_json":
+                    self.assertIsNone(audit["failure"])
+                    self.assertEqual(expected_failure, audit["parse_error"]["code"])
+                else:
+                    self.assertEqual(expected_failure, audit["failure"]["code"])
                 self.assertEqual("not_started_provider_or_validation_failure", record["runner_status"])
                 self.assertEqual("not_started_provider_or_validation_failure", record["bridge_status"])
                 self.assert_stopped_before_bridge(record)
+                self.assertIsNone(record["episode_id"])
+                self.assertIsNone(record["episode_path"])
+                self.assertIsNone(record["gate_path"])
+                self.assertFalse(config.strategy_output.exists())
+                self.assertFalse(config.gate_output.exists())
+                self.assertFalse(config.episode_dir.exists())
+                self.assertFalse(config.runner_dir.exists())
+                self.assertFalse(config.bridge_dir.exists())
                 trace = TraceStore(config.trace_dir).read(record["trace_id"])
                 self.assertIsNone(trace["decision"]["strategy_ref"])
                 self.assertIsNone(trace["decision"]["gate_ref"])
+                self.assertIsNone(trace["decision"]["runner_ref"])
                 self.assertIsNone(trace["decision"]["bridge_ref"])
+                self.assertIsNone(trace["decision"]["episode_ref"])
 
     def test_gate_deny_and_strategy_hash_mismatch_do_not_reach_bridge(self):
         def mismatched_gate(state, strategy, policy, exploration_requested):
@@ -246,11 +341,19 @@ class Day5FaultSafetyTests(unittest.TestCase):
                 ), mock.patch(
                     "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
                     side_effect=evaluator,
-                ):
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.DryRunRunner.run"
+                ) as runner_run, mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.Phase3Bridge.verify"
+                ) as bridge_verify:
                     record = run_pipeline(config)
 
                 self.assert_stopped_before_bridge(record)
                 self.assertNotEqual("verified", record["bridge_status"])
+                runner_run.assert_not_called()
+                bridge_verify.assert_not_called()
+                self.assertFalse(config.runner_dir.exists())
+                self.assertFalse(config.bridge_dir.exists())
 
     def test_runner_hash_mismatch_and_non_dry_run_are_rejected_by_bridge(self):
         original_run = DryRunRunner.run

@@ -9,8 +9,7 @@ pump action.
 | Soil data older than the Gate deny limit | Gate deny; Runner and Bridge absent |
 | Soil sensor missing | Gate deny; no fabricated humidity |
 | Phase3 safety facts incomplete | Gate deny with missing-safety reasons |
-| Vision unavailable / Experience not requested | Explicit null references in `trace.v1` |
-| Qwen timeout or provider failure | Strategy rejected; Gate, Runner, Bridge, Episode absent |
+| Qwen provider failure | Real `run_chain()` rejection; Gate, Runner, Bridge, Episode absent |
 | Invalid model JSON | Strategy rejected; no fixture fallback |
 | StrategyValidator rejection | No Gate, Runner, Bridge, or successful Episode path |
 | Gate deny | Runner and Bridge absent |
@@ -25,6 +24,15 @@ Every test asserts `phase3_called=false` and
 `physical_actions_performed=false` in the artifacts it reaches. The suite also
 uses an AST import check to prevent the Shadow runtime and tests from importing
 Phase3, Phase1 actuator code, or `paho.mqtt`.
+
+## Unmet runtime integration gap
+
+The current main runtime records both Vision and Experience as
+`not_requested`; it does not call Vision or Experience Retrieval. Therefore
+this suite does not claim that their availability, references, or failures are
+integrated into the complete Shadow runtime. Closing that gap requires an
+explicit production runtime integration change outside Issue #22; no test-only
+injection seam is added here.
 
 Run the focused suite:
 
