@@ -666,21 +666,26 @@ class PipelineTests(StateProducerTests):
         """State and execution-boundary Gate changes must stop before dry-run."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
 
-        def corrupt_gate(field, value):
+        def corrupt_gate(updates):
             def evaluate(state, strategy, policy, exploration_requested):
                 gate = self.admitted_gate(
                     state, strategy, policy, exploration_requested
                 )
-                gate[field] = value
+                gate.update(updates)
                 return gate
             return evaluate
 
         corruptions = (
-            ("state_sha256", "0" * 64),
-            (
-                "execution",
-                {"mode": "admission_only", "actuator_commands_allowed": True},
-            ),
+            {"state_sha256": "0" * 64},
+            {
+                "execution": {
+                    "mode": "admission_only",
+                    "actuator_commands_allowed": True,
+                }
+            },
+            {"reason_codes": ["unexpected_allow_reason"]},
+            {"warning_codes": ["unexpected_allow_warning"]},
+            {"decision": "allow_with_warning", "warning_codes": []},
         )
         bridge_execution = {
             "mode": "verification_only",
@@ -698,8 +703,8 @@ class PipelineTests(StateProducerTests):
             },
             "execution": bridge_execution,
         }
-        for field, value in corruptions:
-            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+        for updates in corruptions:
+            with self.subTest(updates=updates), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 config = RuntimeConfig.from_dict(self.runtime_config_value(root))
                 with mock.patch(
@@ -707,7 +712,7 @@ class PipelineTests(StateProducerTests):
                     return_value=self.health_snapshot(),
                 ), mock.patch(
                     "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
-                    side_effect=corrupt_gate(field, value),
+                    side_effect=corrupt_gate(updates),
                 ), mock.patch(
                     "services.soil3.agent_runtime.runtime_v1.Phase3Bridge.verify",
                     return_value=accepted_bridge,
@@ -770,17 +775,22 @@ class PipelineTests(StateProducerTests):
                 trace["execution"],
             )
 
-    def test_day5_runtime_has_no_control_path_imports(self):
-        """The Shadow orchestrator must not acquire an actuator dependency."""
+    def test_day5_runtime_has_no_control_path_or_private_bridge_imports(self):
+        """The Shadow orchestrator uses only the Bridge public interface."""
         source = (
             ROOT / "services" / "soil3" / "agent_runtime" / "runtime_v1.py"
         ).read_text(encoding="utf-8")
         imported = []
+        private_bridge_imports = []
         for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.Import):
                 imported.extend(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported.append(node.module)
+                if node.module.startswith("services.soil3.phase3_bridge"):
+                    private_bridge_imports.extend(
+                        alias.name for alias in node.names if alias.name.startswith("_")
+                    )
         forbidden = ("services.soil3.phase3", "services.soil3.phase1", "paho.mqtt")
         self.assertFalse(
             [
@@ -790,6 +800,7 @@ class PipelineTests(StateProducerTests):
             ],
             imported,
         )
+        self.assertEqual([], private_bridge_imports)
 
     def test_day3_runtime_episode_accepts_delayed_feedback_then_finalizes(self):
         """The real runtime lifecycle must stay writable through all four windows."""

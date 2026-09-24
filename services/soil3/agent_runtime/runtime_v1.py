@@ -17,7 +17,6 @@ from services.soil3.cloud_strategy.service import append_audit, run_chain
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, StrategyValidator, fingerprint, normalize_timestamp
 from services.soil3.episode.episode_v1 import EpisodeStore
 from services.soil3.phase3_bridge import Phase3Bridge
-from services.soil3.phase3_bridge.bridge_v1 import _validate_gate
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry.events import build_health_snapshot
@@ -284,6 +283,43 @@ def _model_metrics(strategy_result: dict[str, Any], latency_ms: float) -> dict[s
     }
 
 
+def _gate_contract_valid(
+    gate: Any,
+    state: dict[str, Any],
+    strategy: dict[str, Any],
+) -> bool:
+    """Check the minimal public gate.v2 contract before dry-run progress."""
+
+    if not isinstance(gate, dict):
+        return False
+    decision = gate.get("decision")
+    if (
+        gate.get("schema_version") != "gate.v2"
+        or gate.get("strategy_sha256") != fingerprint(strategy)
+        or gate.get("state_sha256") != fingerprint(state)
+        or decision not in {"allow", "allow_with_warning", "deny"}
+        or gate.get("execution")
+        != {"mode": "admission_only", "actuator_commands_allowed": False}
+    ):
+        return False
+    if decision == "deny":
+        return True
+
+    reason_codes = gate.get("reason_codes")
+    warning_codes = gate.get("warning_codes")
+    if (
+        not isinstance(reason_codes, list)
+        or any(not isinstance(code, str) for code in reason_codes)
+        or reason_codes
+        or not isinstance(warning_codes, list)
+        or any(not isinstance(code, str) for code in warning_codes)
+    ):
+        return False
+    if decision == "allow":
+        return not warning_codes
+    return bool(warning_codes)
+
+
 def build_offline_fixture(state: dict[str, Any]) -> dict[str, Any]:
     """Build a visibly offline proposal for integration-only validation."""
 
@@ -427,15 +463,7 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     bridge_path: str | None = None
     bridge_status = "not_started"
     gate_decision = gate.get("decision") if isinstance(gate, dict) else None
-    gate_binding_valid = (
-        gate.get("schema_version") == "gate.v2"
-        and gate.get("strategy_sha256") == fingerprint(strategy)
-        and gate_decision in {"allow", "allow_with_warning", "deny"}
-    )
-    if gate_binding_valid and gate_decision in {"allow", "allow_with_warning"}:
-        # Reuse the Bridge admission contract before a dry-run Runner record
-        # can be created. A Gate denial never reaches Runner either way.
-        gate_binding_valid = not _validate_gate(gate, state, strategy)
+    gate_binding_valid = _gate_contract_valid(gate, state, strategy)
     if not gate_binding_valid:
         runner_status = "skipped_due_to_invalid_gate_binding"
         bridge_status = "not_started_invalid_gate_binding"
