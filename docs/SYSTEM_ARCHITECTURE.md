@@ -33,4 +33,9 @@ LLM → manual_water
 LLM → ESP32
 ```
 
+The soil3 Shadow runtime associates State, explicit Vision/Experience
+availability, Strategy, Gate v2, dry-run Runner, verification-only Bridge, and
+an open Episode through one `trace.v1`. Missing facts stay explicit. This
+integration never calls Phase3 and never performs a physical action.
+
 State, Vision, Strategy, Episode, Feedback, Trace, and Replay may read facts and create records within their authorized Issue boundaries. They do not bypass Phase3 or become an actuator path.

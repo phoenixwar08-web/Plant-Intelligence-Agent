@@ -1,9 +1,12 @@
+import ast
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from services.soil3.cloud_gate.budget import BudgetLedger
+from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry import events
 
@@ -332,6 +335,19 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
 
 
 class PipelineTests(StateProducerTests):
+    @staticmethod
+    def admitted_gate(state, strategy, policy, exploration_requested):
+        gate = evaluate_gate_v2(
+            state,
+            strategy,
+            policy,
+            exploration_requested,
+        )
+        gate["decision"] = "allow"
+        gate["reason_codes"] = []
+        gate["warning_codes"] = []
+        return gate
+
     def qwen_runtime_config_value(self, root: Path):
         value = self.runtime_config_value(root)
         value["provider_mode"] = "qwen_dashscope"
@@ -366,6 +382,7 @@ class PipelineTests(StateProducerTests):
     def test_qwen_failure_is_persisted_without_fixture_fallback(self):
         """A Qwen failure is traceable and cannot become an offline proposal."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.trace.trace_v1 import TraceStore
 
         failed_chain = {
             "chain_version": "cloud-strategy-chain.v1",
@@ -410,6 +427,13 @@ class PipelineTests(StateProducerTests):
                 {"physical_actions_performed": False, "phase3_called": False},
                 record["execution"],
             )
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            self.assertIsNotNone(trace["decision"]["state_ref"])
+            self.assertIsNone(trace["decision"]["strategy_ref"])
+            self.assertIsNone(trace["decision"]["gate_ref"])
+            self.assertIsNone(trace["decision"]["runner_ref"])
+            self.assertIsNone(trace["decision"]["bridge_ref"])
+            self.assertIsNone(trace["decision"]["episode_ref"])
             self.assertFalse(config.episode_dir.exists())
 
     def test_accepted_qwen_strategy_is_stored_with_real_provider_provenance(self):
@@ -426,6 +450,8 @@ class PipelineTests(StateProducerTests):
             state = StateBuilder("soil3").build_from_health_snapshot(
                 self.health_snapshot()
             )
+            config.state_output.parent.mkdir(parents=True, exist_ok=True)
+            config.state_output.write_text(json.dumps(state), encoding="utf-8")
             strategy = build_offline_fixture(state)
             accepted_chain = {
                 "cloud": {
@@ -512,16 +538,6 @@ class PipelineTests(StateProducerTests):
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
         from services.soil3.episode.episode_v1 import EpisodeStore
 
-        allowed_gate = {
-            "schema_version": "gate.v1",
-            "decision": "allow",
-            "reason_codes": [],
-            "warning_codes": [],
-            "execution": {
-                "mode": "admission_only",
-                "actuator_commands_allowed": False,
-            },
-        }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = RuntimeConfig.from_dict(self.runtime_config_value(root))
@@ -529,8 +545,8 @@ class PipelineTests(StateProducerTests):
                 "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
                 return_value=self.health_snapshot(),
             ), mock.patch(
-                "services.soil3.agent_runtime.runtime_v1.evaluate_gate",
-                return_value=allowed_gate,
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=self.admitted_gate,
             ):
                 record = run_pipeline(config)
 
@@ -544,19 +560,426 @@ class PipelineTests(StateProducerTests):
             self.assertNotIn("executed_actions", episode["missing_facts"])
             self.assertEqual("dry_run_stop", episode["executed_actions"][0]["kind"])
 
+    def test_day5_full_shadow_chain_is_correlated_and_non_executing(self):
+        """One trace must bind every produced artifact without reaching Phase3."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.episode.episode_v1 import EpisodeStore
+        from services.soil3.trace.trace_v1 import TraceStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=self.admitted_gate,
+            ):
+                record = run_pipeline(config)
+
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            self.assertEqual(record["trace_path"], str(config.trace_dir / f'{record["trace_id"]}.json'))
+            self.assertEqual("verified", record["bridge_status"])
+            self.assertEqual("state.v1", trace["decision"]["state_ref"]["schema_version"])
+            self.assertEqual("not_requested", trace["decision"]["vision"]["availability"])
+            self.assertEqual("not_requested", trace["decision"]["experience"]["availability"])
+            self.assertEqual("strategy.v1", trace["decision"]["strategy_ref"]["schema_version"])
+            self.assertEqual("gate.v2", trace["decision"]["gate_ref"]["schema_version"])
+            self.assertEqual("runner_state.v1", trace["decision"]["runner_ref"]["schema_version"])
+            self.assertEqual(
+                "phase3_bridge_response.v1",
+                trace["decision"]["bridge_ref"]["schema_version"],
+            )
+            self.assertEqual(record["episode_id"], trace["decision"]["episode_ref"]["record_id"])
+            self.assertEqual(
+                {"phase3_called": False, "physical_actions_performed": False},
+                trace["execution"],
+            )
+            bridge = json.loads(Path(record["bridge_path"]).read_text(encoding="utf-8"))
+            self.assertTrue(bridge["accepted"])
+            self.assertFalse(bridge["execution"]["phase3_called"])
+            self.assertFalse(bridge["execution"]["physical_actions_performed"])
+            episode = EpisodeStore(config.episode_dir).read(record["episode_id"])
+            self.assertEqual("open", episode["status"])
+            self.assertIsNone(episode["outcome"])
+
+    def test_day5_gate_v1_never_reaches_runner_or_bridge(self):
+        """A legacy Gate output stops before dry-run and Bridge."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_gate.gate_v1 import evaluate_gate
+
+        def legacy_gate(state, strategy, policy, exploration_requested):
+            gate = evaluate_gate(state, strategy, policy, exploration_requested)
+            gate["decision"] = "allow"
+            gate["reason_codes"] = []
+            gate["warning_codes"] = []
+            return gate
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=legacy_gate,
+            ):
+                record = run_pipeline(config)
+
+            self.assertEqual("skipped_due_to_invalid_gate_binding", record["runner_status"])
+            self.assertEqual("not_started_invalid_gate_binding", record["bridge_status"])
+            self.assertIsNone(record["runner_path"])
+            self.assertIsNone(record["bridge_path"])
+            self.assertFalse(config.runner_dir.exists())
+            self.assertFalse(config.bridge_dir.exists())
+
+    def test_day5_gate_hash_mismatch_never_reaches_runner_or_bridge(self):
+        """A Gate v2 bound to different Strategy content fails closed."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+
+        def mismatched_gate(state, strategy, policy, exploration_requested):
+            gate = self.admitted_gate(
+                state, strategy, policy, exploration_requested
+            )
+            gate["strategy_sha256"] = "0" * 64
+            return gate
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=mismatched_gate,
+            ):
+                record = run_pipeline(config)
+
+            self.assertEqual("skipped_due_to_invalid_gate_binding", record["runner_status"])
+            self.assertEqual("not_started_invalid_gate_binding", record["bridge_status"])
+            self.assertIsNone(record["runner_path"])
+            self.assertIsNone(record["bridge_path"])
+
+    def test_real_exhausted_budget_gate_is_a_normal_deny_before_runner(self):
+        """A real Gate budget denial is valid evidence, never a binding error."""
+        from services.soil3.agent_runtime.runtime_v1 import (
+            RuntimeConfig,
+            build_offline_fixture,
+            run_pipeline,
+        )
+
+        safe_flags = {
+            "pump_active": False,
+            "pending_soak": False,
+            "water_delivery_suspect": {"active": False},
+            "reservoir_empty_suspect": {"active": False},
+            "low_wet_recovery_suspect": {"active": False},
+            "sensor_fault": {"active": False},
+            "dynamic_cooldown": {"active": False},
+            "predictor_circuit": {"state": "CLOSED"},
+            "watering_trigger_guard": {"active": False},
+            "recent_response_guard": {"active": False},
+            "hard_safety_low_guard": {"active": False},
+            "cloud_protection": {"active": False},
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            state = StateBuilder("soil3").build(
+                {
+                    "observed_at": "2026-09-20T10:00:00Z",
+                    "generated_at": "2026-09-20T10:00:00Z",
+                    "sensor_readings": [
+                        {
+                            "timestamp": "2026-09-20T09:59:00Z",
+                            "humidity": 31.4,
+                            "temperature": 24.1,
+                        }
+                    ],
+                    "source_timestamps": {
+                        "phase3_state": "2026-09-20T09:59:00Z"
+                    },
+                    "system_state": safe_flags,
+                }
+            )
+            state["data_quality"]["soil_age_sec"] = 60
+            state["data_quality"]["phase3_state_age_sec"] = 60
+            config.state_output.parent.mkdir(parents=True, exist_ok=True)
+            config.state_output.write_text(json.dumps(state), encoding="utf-8")
+            ledger = BudgetLedger(root / "budget.json")
+            actual_gate = None
+
+            def water_fixture(current_state):
+                strategy = build_offline_fixture(current_state)
+                strategy["actions"] = [
+                    {
+                        "action_id": "budget-water",
+                        "type": "water",
+                        "pump_seconds": 1,
+                    }
+                ]
+                return strategy
+
+            def exhausted_gate(state, strategy, policy, exploration_requested):
+                nonlocal actual_gate
+                actual_gate = evaluate_gate_v2(
+                    state,
+                    strategy,
+                    policy,
+                    True,
+                    ledger,
+                )
+                return actual_gate
+
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.write_state_snapshot",
+                return_value=state,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_offline_fixture",
+                side_effect=water_fixture,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=exhausted_gate,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.Phase3Bridge.verify"
+            ) as verify:
+                record = run_pipeline(config)
+
+            self.assertIsNotNone(actual_gate)
+            self.assertEqual("deny", actual_gate["decision"])
+            self.assertEqual(
+                ["exploration_budget_exhausted"], actual_gate["reason_codes"]
+            )
+            self.assertEqual(
+                {
+                    "exploration_requested": True,
+                    "requested_water_seconds": 1.0,
+                    "reserved_water_seconds": 0.0,
+                    "remaining_water_seconds": 0.0,
+                    "reservation_id": actual_gate["budget"]["reservation_id"],
+                },
+                actual_gate["budget"],
+            )
+            self.assertTrue(actual_gate["budget"]["reservation_id"])
+            self.assertEqual("skipped_due_to_gate_deny", record["runner_status"])
+            self.assertEqual("not_started_gate_deny", record["bridge_status"])
+            self.assertIsNone(record["runner_path"])
+            self.assertIsNone(record["bridge_path"])
+            self.assertFalse(config.runner_dir.exists())
+            self.assertFalse(config.bridge_dir.exists())
+            verify.assert_not_called()
+
+    def test_day5_invalid_gate_admission_never_reaches_runner_or_bridge(self):
+        """State and execution-boundary Gate changes must stop before dry-run."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+
+        def corrupt_gate(updates):
+            def evaluate(state, strategy, policy, exploration_requested):
+                gate = self.admitted_gate(
+                    state, strategy, policy, exploration_requested
+                )
+                gate.update(updates)
+                return gate
+            return evaluate
+
+        corruptions = (
+            {"gate_id": "not-a-uuid"},
+            {"decided_at": "not-a-timestamp"},
+            {"device_code": "soil2"},
+            {"strategy_id": "different-strategy-id"},
+            {"state_observed_at": "2999-01-01T00:00:00Z"},
+            {"state_sha256": "0" * 64},
+            {
+                "execution": {
+                    "mode": "admission_only",
+                    "actuator_commands_allowed": True,
+                }
+            },
+            {"reason_codes": ["unexpected_allow_reason"]},
+            {"warning_codes": ["unexpected_allow_warning"]},
+            {"decision": "allow_with_warning", "warning_codes": []},
+            {
+                "budget": {
+                    "exploration_requested": False,
+                    "requested_water_seconds": 0.0,
+                    "reserved_water_seconds": 0.0,
+                    "remaining_water_seconds": None,
+                }
+            },
+            {
+                "budget": {
+                    "exploration_requested": False,
+                    "requested_water_seconds": 0.0,
+                    "reserved_water_seconds": 1.0,
+                    "remaining_water_seconds": None,
+                    "reservation_id": "unexpected-reservation",
+                }
+            },
+            {
+                "budget": {
+                    "exploration_requested": True,
+                    "requested_water_seconds": 2.0,
+                    "reserved_water_seconds": 1.0,
+                    "remaining_water_seconds": 0.0,
+                    "reservation_id": "under-reserved",
+                }
+            },
+            {
+                "budget": {
+                    "exploration_requested": False,
+                    "requested_water_seconds": 1.0,
+                    "reserved_water_seconds": 0.0,
+                    "remaining_water_seconds": None,
+                    "reservation_id": None,
+                }
+            },
+            {
+                "budget": {
+                    "exploration_requested": True,
+                    "requested_water_seconds": 0.0,
+                    "reserved_water_seconds": 0.0,
+                    "remaining_water_seconds": 10.0,
+                    "reservation_id": "zero-exploration",
+                }
+            },
+            {
+                "decision": "deny",
+                "reason_codes": ["exploration_budget_exhausted"],
+                "warning_codes": [],
+                "budget": {
+                    "exploration_requested": True,
+                    "requested_water_seconds": 2.0,
+                    "reserved_water_seconds": 2.0,
+                    "remaining_water_seconds": 8.0,
+                    "reservation_id": "denied-reservation",
+                },
+            },
+        )
+        bridge_execution = {
+            "mode": "verification_only",
+            "phase3_called": False,
+            "physical_actions_performed": False,
+        }
+        accepted_bridge = {
+            "schema_version": "phase3_bridge_response.v1",
+            "accepted": True,
+            "checked_at": "2026-09-23T00:00:00Z",
+            "reason_codes": [],
+            "handoff": {
+                "request_id": "test-verified-handoff",
+                "execution": bridge_execution,
+            },
+            "execution": bridge_execution,
+        }
+        for updates in corruptions:
+            with self.subTest(updates=updates), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+                with mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                    return_value=self.health_snapshot(),
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                    side_effect=corrupt_gate(updates),
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.Phase3Bridge.verify",
+                    return_value=accepted_bridge,
+                ) as verify:
+                    record = run_pipeline(config)
+
+                self.assertEqual("skipped_due_to_invalid_gate_binding", record["runner_status"])
+                self.assertEqual("not_started_invalid_gate_binding", record["bridge_status"])
+                self.assertIsNone(record["runner_path"])
+                self.assertIsNone(record["bridge_path"])
+                self.assertFalse(config.runner_dir.exists())
+                self.assertFalse(config.bridge_dir.exists())
+                verify.assert_not_called()
+
+    def test_day5_bridge_rejection_is_persisted_and_fails_closed(self):
+        """A rejected verification leaves evidence but never reports success."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.trace.trace_v1 import TraceStore
+
+        rejected = {
+            "schema_version": "phase3_bridge_response.v1",
+            "accepted": False,
+            "checked_at": "2026-09-23T00:00:00Z",
+            "reason_codes": ["runner_strategy_hash_mismatch"],
+            "handoff": None,
+            "execution": {
+                "mode": "verification_only",
+                "phase3_called": False,
+                "physical_actions_performed": False,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=self.admitted_gate,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.Phase3Bridge.verify",
+                return_value=rejected,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "bridge verification"):
+                    run_pipeline(config)
+
+            run_files = list(config.runs_dir.glob("*.json"))
+            self.assertEqual(1, len(run_files))
+            record = json.loads(run_files[0].read_text(encoding="utf-8"))
+            self.assertEqual("rejected", record["bridge_status"])
+            self.assertEqual(
+                {"physical_actions_performed": False, "phase3_called": False},
+                record["execution"],
+            )
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            self.assertIsNotNone(trace["decision"]["bridge_ref"])
+            self.assertEqual(
+                {"phase3_called": False, "physical_actions_performed": False},
+                trace["execution"],
+            )
+
+    def test_day5_runtime_has_no_control_path_or_private_bridge_imports(self):
+        """The Shadow orchestrator uses only the Bridge public interface."""
+        source = (
+            ROOT / "services" / "soil3" / "agent_runtime" / "runtime_v1.py"
+        ).read_text(encoding="utf-8")
+        imported = []
+        private_bridge_imports = []
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+                if node.module.startswith("services.soil3.phase3_bridge"):
+                    private_bridge_imports.extend(
+                        alias.name for alias in node.names if alias.name.startswith("_")
+                    )
+        forbidden = ("services.soil3.phase3", "services.soil3.phase1", "paho.mqtt")
+        self.assertFalse(
+            [
+                name
+                for name in imported
+                if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
+            ],
+            imported,
+        )
+        self.assertEqual([], private_bridge_imports)
+
     def test_day3_runtime_episode_accepts_delayed_feedback_then_finalizes(self):
         """The real runtime lifecycle must stay writable through all four windows."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
         from services.soil3.episode.episode_v1 import EpisodeStore
         from services.soil3.feedback.feedback_v1 import FeedbackStore
 
-        allowed_gate = {
-            "schema_version": "gate.v1",
-            "decision": "allow",
-            "reason_codes": [],
-            "warning_codes": [],
-            "execution": {"mode": "admission_only", "actuator_commands_allowed": False},
-        }
         observed_at = {
             "30min": "2026-09-20T12:30:00Z",
             "2-3h": "2026-09-20T14:30:00Z",
@@ -570,8 +993,8 @@ class PipelineTests(StateProducerTests):
                 "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
                 return_value=self.health_snapshot(),
             ), mock.patch(
-                "services.soil3.agent_runtime.runtime_v1.evaluate_gate",
-                return_value=allowed_gate,
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=self.admitted_gate,
             ):
                 run = run_pipeline(config)
 

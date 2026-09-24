@@ -1,16 +1,34 @@
 # Soil3 proposal-only runtime
 
-This runtime reads existing soil3 health facts, writes a frozen `state.v1`
-snapshot, creates an explicitly labelled `offline_fixture` or
-`qwen_dashscope` `strategy.v1`, and records its Gate result in an open Episode
-that remains writable for delayed `feedback.v1`. Both modes are proposal-only: the runtime does not create an actuator
-command, call Phase3, or publish MQTT.
+This runtime reads existing soil3 health facts and runs one complete Shadow
+decision chain:
+
+```text
+State → explicit Vision/Experience availability → Strategy → Validator
+      → Gate v2 → dry-run Runner → verification-only Bridge → open Episode
+```
+
+Every produced artifact is associated through one Store-generated `trace.v1`
+identifier. Vision and Experience are currently `not_requested`; the runtime
+records that absence and never fabricates either input. Model token usage is
+recorded only when the provider supplied `total_tokens`; cost remains null
+because the current provider envelope does not supply it, and latency comes
+from the runtime monotonic clock.
+
+Runner and Bridge are reached only after a content-bound, non-deny `gate.v2`.
+Bridge verifies the exact State, Strategy, Gate and terminal dry-run Runner
+record, then writes a verification response. Even an accepted response does
+not call Phase3. The Episode remains open for delayed `feedback.v1` and
+Outcome. Both provider modes are Shadow-only: the runtime does not create an
+actuator command, call Phase3, or publish MQTT.
 
 The first deployment intentionally sets `exploration_requested` to `false`.
-Gate denial is an expected safety result: Runner is skipped, while the Episode
-stays open with absent executed actions until the feedback lifecycle finalizes it.
+Gate denial or an invalid Gate binding is an expected safety result: Runner
+and Bridge are skipped, while the Episode stays open with absent executed
+actions until the feedback lifecycle finalizes it.
 If Gate admits the fixture, Runner performs only its persisted dry-run logic;
-its record declares both physical actions and Phase3 calls false.
+Bridge performs verification only, and every Runner, Bridge, Trace and runtime
+record declares both physical actions and Phase3 calls false.
 
 Every successful pipeline record states `episode_status: open` and
 `feedback_status: pending`. Feedback windows may be attached incrementally;
@@ -54,8 +72,9 @@ bind does not make the unit fail open: the adapter query stays unavailable and
 soil humidity/freshness remain missing.  It does not use CSV fallback or write
 to openGauss.
 
-After inspecting the generated `state`, `strategy`, `gate`, `runs`, and
-`episodes` records below `/root/water/runtime/instances/soil3/agent_chain`,
+After inspecting the generated `state`, `strategy`, `gate`, `runner`, `bridge`,
+`traces`, `runs`, and `episodes` records below
+`/root/water/runtime/instances/soil3/agent_chain`,
 enable the independently reversible schedules:
 
 ```bash
