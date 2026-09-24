@@ -9,7 +9,7 @@ pump action.
 | Soil data older than the Gate deny limit | Gate deny; Runner and Bridge absent |
 | Soil sensor missing | Gate deny; no fabricated humidity |
 | Phase3 safety facts incomplete | Gate deny with missing-safety reasons |
-| Qwen provider failure | Real `run_chain()` rejection; Gate, Runner, Bridge, Episode absent |
+| Qwen timeout or provider failure | Real `run_chain()` rejection; Gate, Runner, Bridge, Episode absent |
 | Invalid model JSON | Strategy rejected; no fixture fallback |
 | StrategyValidator rejection | No Gate, Runner, Bridge, or successful Episode path |
 | Gate deny | Runner and Bridge absent |
@@ -20,8 +20,9 @@ pump action.
 | Restart during wait | Resume persisted dry-run state |
 | Duplicate request | Do not duplicate the dry-run water result |
 
-Every test asserts `phase3_called=false` and
-`physical_actions_performed=false` in the artifacts it reaches. The suite also
+Runtime fault records inspected by this suite retain `phase3_called=false` and
+`physical_actions_performed=false`; Runner and Bridge mutation cases also
+verify the same non-execution boundary on their returned artifacts. The suite
 uses an AST import check to prevent the Shadow runtime and tests from importing
 Phase3, Phase1 actuator code, or `paho.mqtt`.
 

@@ -125,6 +125,8 @@ class ProviderHttp:
 
     def post(self, *args, **kwargs):
         self.calls.append((args, kwargs))
+        if isinstance(self.response, BaseException):
+            raise self.response
         return self.response
 
 
@@ -250,6 +252,11 @@ class Day5FaultSafetyTests(unittest.TestCase):
         rejected_strategy = build_offline_fixture(state)
         rejected_strategy["actions"] = [{"action_id": "bad", "type": "launch"}]
         cases = {
+            "timeout": (
+                TimeoutError("provider timeout"),
+                ["model_timeout"],
+                "model_timeout",
+            ),
             "provider_failure": (
                 ProviderResponse(503),
                 ["model_http_error"],
