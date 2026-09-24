@@ -38,6 +38,28 @@ CONFIG_FIELDS = {
     "strategy_validator",
     "gate_policy",
 }
+GATE_V2_FIELDS = frozenset({
+    "schema_version",
+    "gate_id",
+    "decided_at",
+    "device_code",
+    "strategy_id",
+    "state_observed_at",
+    "state_sha256",
+    "strategy_sha256",
+    "decision",
+    "reason_codes",
+    "warning_codes",
+    "budget",
+    "execution",
+})
+GATE_BUDGET_FIELDS = frozenset({
+    "exploration_requested",
+    "requested_water_seconds",
+    "reserved_water_seconds",
+    "remaining_water_seconds",
+    "reservation_id",
+})
 
 QWEN_PROVIDER_FIELDS = {
     "base_url",
@@ -288,36 +310,97 @@ def _gate_contract_valid(
     state: dict[str, Any],
     strategy: dict[str, Any],
 ) -> bool:
-    """Check the minimal public gate.v2 contract before dry-run progress."""
+    """Check the public gate.v2 contract before dry-run progress."""
 
-    if not isinstance(gate, dict):
+    if (
+        not isinstance(gate, dict)
+        or not isinstance(state, dict)
+        or not isinstance(strategy, dict)
+        or set(gate) != GATE_V2_FIELDS
+    ):
         return False
+
+    try:
+        uuid.UUID(gate.get("gate_id"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
     decision = gate.get("decision")
+    state_observed_at = normalize_timestamp(state.get("observed_at"))
     if (
         gate.get("schema_version") != "gate.v2"
+        or normalize_timestamp(gate.get("decided_at")) is None
+        or gate.get("device_code") != state.get("device_code")
+        or gate.get("strategy_id") != strategy.get("strategy_id")
         or gate.get("strategy_sha256") != fingerprint(strategy)
+        or state_observed_at is None
+        or normalize_timestamp(gate.get("state_observed_at")) != state_observed_at
         or gate.get("state_sha256") != fingerprint(state)
         or decision not in {"allow", "allow_with_warning", "deny"}
         or gate.get("execution")
         != {"mode": "admission_only", "actuator_commands_allowed": False}
     ):
         return False
-    if decision == "deny":
-        return True
-
     reason_codes = gate.get("reason_codes")
     warning_codes = gate.get("warning_codes")
     if (
         not isinstance(reason_codes, list)
         or any(not isinstance(code, str) for code in reason_codes)
-        or reason_codes
         or not isinstance(warning_codes, list)
         or any(not isinstance(code, str) for code in warning_codes)
     ):
         return False
-    if decision == "allow":
-        return not warning_codes
-    return bool(warning_codes)
+
+    if decision == "deny":
+        if not reason_codes or warning_codes:
+            return False
+    elif reason_codes:
+        return False
+    elif decision == "allow" and warning_codes:
+        return False
+    elif decision == "allow_with_warning" and not warning_codes:
+        return False
+
+    budget = gate.get("budget")
+    if not isinstance(budget, dict) or set(budget) != GATE_BUDGET_FIELDS:
+        return False
+
+    def finite_nonnegative(value: Any) -> bool:
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and isfinite(float(value))
+            and float(value) >= 0.0
+        )
+
+    exploration_requested = budget.get("exploration_requested")
+    requested = budget.get("requested_water_seconds")
+    reserved = budget.get("reserved_water_seconds")
+    remaining = budget.get("remaining_water_seconds")
+    reservation_id = budget.get("reservation_id")
+    if (
+        not isinstance(exploration_requested, bool)
+        or not finite_nonnegative(requested)
+        or not finite_nonnegative(reserved)
+        or (remaining is not None and not finite_nonnegative(remaining))
+    ):
+        return False
+    if not exploration_requested:
+        return (
+            float(requested) == 0.0
+            and float(reserved) == 0.0
+            and remaining is None
+            and reservation_id is None
+        )
+    if decision == "deny":
+        return reservation_id is None and float(reserved) == 0.0
+    return (
+        float(requested) > 0.0
+        and float(reserved) == float(requested)
+        and remaining is not None
+        and isinstance(reservation_id, str)
+        and bool(reservation_id)
+    )
 
 
 def build_offline_fixture(state: dict[str, Any]) -> dict[str, Any]:

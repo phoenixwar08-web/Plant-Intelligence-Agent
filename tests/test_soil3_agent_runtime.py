@@ -676,6 +676,11 @@ class PipelineTests(StateProducerTests):
             return evaluate
 
         corruptions = (
+            {"gate_id": "not-a-uuid"},
+            {"decided_at": "not-a-timestamp"},
+            {"device_code": "soil2"},
+            {"strategy_id": "different-strategy-id"},
+            {"state_observed_at": "2999-01-01T00:00:00Z"},
             {"state_sha256": "0" * 64},
             {
                 "execution": {
@@ -686,6 +691,62 @@ class PipelineTests(StateProducerTests):
             {"reason_codes": ["unexpected_allow_reason"]},
             {"warning_codes": ["unexpected_allow_warning"]},
             {"decision": "allow_with_warning", "warning_codes": []},
+            {
+                "budget": {
+                    "exploration_requested": False,
+                    "requested_water_seconds": 0.0,
+                    "reserved_water_seconds": 0.0,
+                    "remaining_water_seconds": None,
+                }
+            },
+            {
+                "budget": {
+                    "exploration_requested": False,
+                    "requested_water_seconds": 0.0,
+                    "reserved_water_seconds": 1.0,
+                    "remaining_water_seconds": None,
+                    "reservation_id": "unexpected-reservation",
+                }
+            },
+            {
+                "budget": {
+                    "exploration_requested": True,
+                    "requested_water_seconds": 2.0,
+                    "reserved_water_seconds": 1.0,
+                    "remaining_water_seconds": 0.0,
+                    "reservation_id": "under-reserved",
+                }
+            },
+            {
+                "budget": {
+                    "exploration_requested": False,
+                    "requested_water_seconds": 1.0,
+                    "reserved_water_seconds": 0.0,
+                    "remaining_water_seconds": None,
+                    "reservation_id": None,
+                }
+            },
+            {
+                "budget": {
+                    "exploration_requested": True,
+                    "requested_water_seconds": 0.0,
+                    "reserved_water_seconds": 0.0,
+                    "remaining_water_seconds": 10.0,
+                    "reservation_id": "zero-exploration",
+                }
+            },
+            {
+                "decision": "deny",
+                "reason_codes": ["exploration_budget_exhausted"],
+                "warning_codes": [],
+                "budget": {
+                    "exploration_requested": True,
+                    "requested_water_seconds": 2.0,
+                    "reserved_water_seconds": 2.0,
+                    "remaining_water_seconds": 8.0,
+                    "reservation_id": "denied-reservation",
+                },
+            },
         )
         bridge_execution = {
             "mode": "verification_only",
