@@ -8,13 +8,18 @@
 
 - 登记日期：2026-09-23
 - Git 基线点：`main` @ `65ae5ce26002cb7dd6b59fff5ebeccdae5367c1d`
-  （2026-09-22 16:34 +0800，Merge PR #47，Day 5 收尾后的最新 `main`）
+  （2026-09-22 16:34 +0800，Merge PR #47；这是 Day 5 开始前、包含
+  Gate v2 / Experience Retrieval / Phase3 Bridge 的最新 `main`）
 - 基线含义：本登记把上述 commit 处的各 v1 协议契约登记为后续实验、
   数据积累与本地小模型训练所依赖的 **V1 基线冻结点**。基线点之后对
   implemented 协议的任何改动，仍须走 `PROTOCOLS_AND_BOUNDARIES.md`
   规定的显式协议变更提案流程（版本/兼容处理 + 生产者与消费者清点），
   并由 Owner 决定是否将其正式转为 frozen 状态。本 Issue 不改变任何
   协议的状态列。
+- Day 5 的 Trace、完整 Shadow 集成和故障安全测试尚未进入 `main`，因此
+  本文当前是 **Day 5 合并前的候选冻结登记**。只有 PR #50、#51、#53
+  按固定顺序合并并由 Owner 复核后，才能把合并后的 `main` commit 登记为
+  Day 1–5 的正式实验基线；不得把本 commit 描述为 Day 5 已冻结。
 
 ## 1. V1 协议登记
 
@@ -103,9 +108,11 @@ State（5 分钟 timer，只读构建 state.v1）
 
 **未合入项（不属于本基线）**
 
-- `origin/issue-21-shadow-runtime`（GitHub Issue #51，Day 5 完整 Shadow
+- `origin/issue-21-shadow-runtime`（GitHub PR #51，对应 Issue #21，Day 5 完整 Shadow
   链集成，含 trace.v1）与 `origin/issue-23-trace-experiment-data`
-  （GitHub Issue #50，Day 5 Trace 和实验数据）截至基线点未合入 `main`，
+  （GitHub PR #50，对应 Issue #23，Day 5 Trace 和实验数据），以及
+  `origin/issue-22-fault-safety-tests`（GitHub PR #53，对应 Issue #22，
+  Day 5 故障与安全测试）截至基线点未合入 `main`，
   不在本基线内；合入后由各自 Issue 补登记。
 - Day 6 的 Issue #24（受控真实植物接入）与 Issue #25（历史 Replay 全量
   回归验收）结果不是本登记的输入。
@@ -117,6 +124,6 @@ State（5 分钟 timer，只读构建 state.v1）
 | 视觉链云端模型 ID（板端 `QWEN_MODEL` 环境变量值） | 待补（禁止入库） |
 | `strategy.v1` 对 live provider 的实测结果 | 截至基线点未实测；依赖 Issue #24 |
 | Replay 全量回归验收结果 | 待补；依赖 Issue #25 |
-| trace.v1 与实验数据契约 | 待补；Issue #50 / #51 未合入 |
+| trace.v1、完整 Shadow 链与故障安全测试 | 待补；PR #50 / #51 / #53 未合入，合并后须刷新正式 `main` 基线 commit |
 | Qwen3.5-2B 训练集整理规范 | 待补；月底整理（计划书 V3 §十二） |
 | `tools/vision_v1_check/run_once.py` 纳入版本管理 | 待补；由后续独立 Issue 处理（runbook 已记录建议） |
