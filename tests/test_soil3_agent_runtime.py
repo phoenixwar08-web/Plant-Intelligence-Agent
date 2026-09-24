@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from services.soil3.cloud_gate.budget import BudgetLedger
 from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry import events
@@ -661,6 +662,116 @@ class PipelineTests(StateProducerTests):
             self.assertEqual("not_started_invalid_gate_binding", record["bridge_status"])
             self.assertIsNone(record["runner_path"])
             self.assertIsNone(record["bridge_path"])
+
+    def test_real_exhausted_budget_gate_is_a_normal_deny_before_runner(self):
+        """A real Gate budget denial is valid evidence, never a binding error."""
+        from services.soil3.agent_runtime.runtime_v1 import (
+            RuntimeConfig,
+            build_offline_fixture,
+            run_pipeline,
+        )
+
+        safe_flags = {
+            "pump_active": False,
+            "pending_soak": False,
+            "water_delivery_suspect": {"active": False},
+            "reservoir_empty_suspect": {"active": False},
+            "low_wet_recovery_suspect": {"active": False},
+            "sensor_fault": {"active": False},
+            "dynamic_cooldown": {"active": False},
+            "predictor_circuit": {"state": "CLOSED"},
+            "watering_trigger_guard": {"active": False},
+            "recent_response_guard": {"active": False},
+            "hard_safety_low_guard": {"active": False},
+            "cloud_protection": {"active": False},
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            state = StateBuilder("soil3").build(
+                {
+                    "observed_at": "2026-09-20T10:00:00Z",
+                    "generated_at": "2026-09-20T10:00:00Z",
+                    "sensor_readings": [
+                        {
+                            "timestamp": "2026-09-20T09:59:00Z",
+                            "humidity": 31.4,
+                            "temperature": 24.1,
+                        }
+                    ],
+                    "source_timestamps": {
+                        "phase3_state": "2026-09-20T09:59:00Z"
+                    },
+                    "system_state": safe_flags,
+                }
+            )
+            state["data_quality"]["soil_age_sec"] = 60
+            state["data_quality"]["phase3_state_age_sec"] = 60
+            config.state_output.parent.mkdir(parents=True, exist_ok=True)
+            config.state_output.write_text(json.dumps(state), encoding="utf-8")
+            ledger = BudgetLedger(root / "budget.json")
+            actual_gate = None
+
+            def water_fixture(current_state):
+                strategy = build_offline_fixture(current_state)
+                strategy["actions"] = [
+                    {
+                        "action_id": "budget-water",
+                        "type": "water",
+                        "pump_seconds": 1,
+                    }
+                ]
+                return strategy
+
+            def exhausted_gate(state, strategy, policy, exploration_requested):
+                nonlocal actual_gate
+                actual_gate = evaluate_gate_v2(
+                    state,
+                    strategy,
+                    policy,
+                    True,
+                    ledger,
+                )
+                return actual_gate
+
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.write_state_snapshot",
+                return_value=state,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_offline_fixture",
+                side_effect=water_fixture,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                side_effect=exhausted_gate,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.Phase3Bridge.verify"
+            ) as verify:
+                record = run_pipeline(config)
+
+            self.assertIsNotNone(actual_gate)
+            self.assertEqual("deny", actual_gate["decision"])
+            self.assertEqual(
+                ["exploration_budget_exhausted"], actual_gate["reason_codes"]
+            )
+            self.assertEqual(
+                {
+                    "exploration_requested": True,
+                    "requested_water_seconds": 1.0,
+                    "reserved_water_seconds": 0.0,
+                    "remaining_water_seconds": 0.0,
+                    "reservation_id": actual_gate["budget"]["reservation_id"],
+                },
+                actual_gate["budget"],
+            )
+            self.assertTrue(actual_gate["budget"]["reservation_id"])
+            self.assertEqual("skipped_due_to_gate_deny", record["runner_status"])
+            self.assertEqual("not_started_gate_deny", record["bridge_status"])
+            self.assertIsNone(record["runner_path"])
+            self.assertIsNone(record["bridge_path"])
+            self.assertFalse(config.runner_dir.exists())
+            self.assertFalse(config.bridge_dir.exists())
+            verify.assert_not_called()
 
     def test_day5_invalid_gate_admission_never_reaches_runner_or_bridge(self):
         """State and execution-boundary Gate changes must stop before dry-run."""

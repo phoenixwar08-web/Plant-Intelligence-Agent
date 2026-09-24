@@ -393,6 +393,14 @@ def _gate_contract_valid(
             and reservation_id is None
         )
     if decision == "deny":
+        if reason_codes == ["exploration_budget_exhausted"]:
+            return (
+                float(requested) > 0.0
+                and float(reserved) == 0.0
+                and remaining is not None
+                and isinstance(reservation_id, str)
+                and bool(reservation_id)
+            )
         return reservation_id is None and float(reserved) == 0.0
     return (
         float(requested) > 0.0
