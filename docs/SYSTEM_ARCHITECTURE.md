@@ -11,6 +11,7 @@
 | Gate | Apply the small set of cloud-side admission and exploration constraints. |
 | Runner | Persist and progress approved strategy steps; initially dry-run only. |
 | Phase3 Bridge | Revalidate Strategy, Gate, and Runner bindings and produce only a zero-argument handoff to Phase3's formal cycle interface. V1 is verification-only. |
+| Controlled Execution | Consume one short-lived Owner approval bound to an accepted Bridge request, call only the supplied zero-argument Phase3 cycle, and persist an at-most-once factual receipt. |
 | Phase3 | Final safety and irrigation decision authority. |
 | ActuatorLayer | Phase3-owned actuator interface. |
 | Feedback | Record subsequent factual observations at defined times. |
@@ -24,6 +25,11 @@
 ```text
 LLM → Strategy → Validator → Gate → Runner → Phase3 Bridge → Phase3 → ActuatorLayer → MQTT → ESP32
 ```
+
+The Bridge-to-Phase3 transition is disabled unless the controlled-execution
+adapter receives one unexpired Owner approval for the exact Bridge request.
+The approval is consumed before the zero-argument Phase3 cycle is invoked;
+duplicate or interrupted requests cannot invoke the same approval twice.
 
 The following paths are prohibited:
 
