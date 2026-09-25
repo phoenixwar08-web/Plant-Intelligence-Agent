@@ -85,6 +85,8 @@ class StateProducerTests(unittest.TestCase):
             "provider_mode": "offline_fixture",
             "provider": {},
             "exploration_requested": False,
+            "vision": {"enabled": False},
+            "experience": {"enabled": False, "limit_per_class": 3},
             "phase3_state_path": str(root / "phase3" / "system_state.json"),
             "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),
             "irrigation_trials_path": str(root / "phase3" / "irrigation_trials.json"),
@@ -168,6 +170,33 @@ class StateProducerTests(unittest.TestCase):
             exploration["exploration_requested"] = True
             with self.assertRaisesRegex(ValueError, "exploration_requested"):
                 RuntimeConfig.from_dict(exploration)
+
+    def test_runtime_config_requires_strict_optional_module_settings(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            self.assertFalse(config.vision_enabled)
+            self.assertFalse(config.experience_enabled)
+            self.assertEqual(3, config.experience_limit_per_class)
+
+            missing = self.runtime_config_value(root)
+            del missing["vision"]
+            with self.assertRaisesRegex(ValueError, "fields"):
+                RuntimeConfig.from_dict(missing)
+
+            invalid_vision = self.runtime_config_value(root)
+            invalid_vision["vision"]["enabled"] = "yes"
+            with self.assertRaisesRegex(ValueError, "vision"):
+                RuntimeConfig.from_dict(invalid_vision)
+
+            for invalid in (True, 0, 21):
+                with self.subTest(limit=invalid):
+                    value = self.runtime_config_value(root)
+                    value["experience"]["limit_per_class"] = invalid
+                    with self.assertRaisesRegex(ValueError, "experience"):
+                        RuntimeConfig.from_dict(value)
 
     def test_state_cli_requires_explicit_config_and_reports_written_snapshot(self):
         """Fails if the service silently chooses a production config or omits its output."""
