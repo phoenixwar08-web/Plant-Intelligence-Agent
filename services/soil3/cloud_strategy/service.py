@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -55,6 +56,28 @@ MODEL_INPUT_SAFETY_FLAGS = (
     "hard_safety_low_guard",
     "cloud_protection",
 )
+MODEL_INPUT_VISION_FIELDS = (
+    "plant_zone",
+    "captured_at",
+    "image_quality",
+    "target_detected",
+    "leaf_droop",
+    "yellowing",
+    "visible_damage",
+    "browning",
+    "leaf_curl",
+    "spots_or_lesions",
+    "leaf_loss",
+    "stem_posture",
+    "occlusion",
+    "target_ambiguity",
+    "leaf_spread",
+    "wilting",
+    "overall_visual_state",
+    "change_vs_previous",
+    "confidence",
+)
+OPTIONAL_CONTEXT_AVAILABILITY = frozenset({"available", "unavailable", "not_requested"})
 
 
 def utc_now() -> str:
@@ -93,6 +116,34 @@ def project_state_for_model(state: Dict[str, Any]) -> Dict[str, Any]:
         if picked:
             projected[section] = picked
     return projected
+
+
+def project_optional_context(value: Any, *, kind: str) -> Dict[str, Any]:
+    """Validate and copy one optional read-only context into the provider input."""
+    if kind not in {"vision", "experience"}:
+        raise ValueError(f"invalid_{kind}_context")
+    if value is None:
+        return {"availability": "not_requested", "facts": None}
+    if not isinstance(value, dict) or set(value) != {"availability", "facts"}:
+        raise ValueError(f"invalid_{kind}_context")
+    availability = value["availability"]
+    facts = value["facts"]
+    if availability not in OPTIONAL_CONTEXT_AVAILABILITY:
+        raise ValueError(f"invalid_{kind}_context")
+    if availability != "available":
+        if facts is not None:
+            raise ValueError(f"invalid_{kind}_context")
+        return {"availability": availability, "facts": None}
+    if facts is None:
+        raise ValueError(f"invalid_{kind}_context")
+    if kind == "vision":
+        if not isinstance(facts, list) or any(not isinstance(record, dict) for record in facts):
+            raise ValueError("invalid_vision_context")
+        facts = [
+            {key: copy.deepcopy(record[key]) for key in MODEL_INPUT_VISION_FIELDS if key in record}
+            for record in facts
+        ]
+    return {"availability": "available", "facts": copy.deepcopy(facts)}
 
 
 def bind_model_response(content: Optional[str]) -> Dict[str, Any]:
@@ -165,10 +216,14 @@ def run_chain(
     prompt: str,
     fixture_content: Optional[str] = None,
     session: Any = None,
+    vision_context: Optional[Dict[str, Any]] = None,
+    experience_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     run_id = str(uuid.uuid4())
     started_at = utc_now()
     model_input = project_state_for_model(state)
+    model_input["vision"] = project_optional_context(vision_context, kind="vision")
+    model_input["experience"] = project_optional_context(experience_context, kind="experience")
     raw_content = fixture_content
     cloud_meta: Dict[str, Any] = {
         "provider": "fixture" if fixture_content is not None else config.get("provider"),

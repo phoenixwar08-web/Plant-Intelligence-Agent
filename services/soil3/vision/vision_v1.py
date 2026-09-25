@@ -6,6 +6,7 @@ anything, and it reports one record per fixed plant zone.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import copy
 from dataclasses import dataclass
 from datetime import datetime
 import math
@@ -33,6 +34,25 @@ class ZoneConfigurationError(ValueError):
         super().__init__(self.code)
 
 
+class VisionRunValidationError(ValueError):
+    """Raised when a public Vision run manifest is malformed."""
+
+    code = "INVALID_VISION_RUN_MANIFEST"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+@dataclass(frozen=True)
+class VisionArtifactRef:
+    """A public, hash-verifiable reference to one persisted Vision artifact."""
+
+    schema_version: str
+    record_id: str
+    path: str
+    sha256: str
+
+
 @dataclass(frozen=True)
 class CaptureOutcome:
     """The result of observing one plant zone, whether or not a record exists."""
@@ -44,6 +64,7 @@ class CaptureOutcome:
     error_code: str | None
     http_status: int | None = None
     provider_error_code: str | None = None
+    artifact_ref: VisionArtifactRef | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +74,7 @@ class VisionRunResult:
     status: str
     frame_id: str | None
     outcomes: tuple[CaptureOutcome, ...]
+    manifest_ref: VisionArtifactRef | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +142,14 @@ _VISUAL_STATE = frozenset(
     {"normal", "mild_abnormality", "obvious_abnormality", "severe_abnormality", "unavailable"}
 )
 _CHANGE = frozenset({"improved", "stable", "worsened", "unknown"})
+_RUN_FIELDS = frozenset({
+    "schema_version", "run_id", "device_code", "created_at", "status", "frame_id", "outcomes"
+})
+_RUN_OUTCOME_FIELDS = frozenset({
+    "zone_id", "status", "artifact_ref", "error_code", "http_status", "provider_error_code"
+})
+_ARTIFACT_REF_FIELDS = frozenset({"schema_version", "record_id", "path", "sha256"})
+_RUN_OUTCOME_STATUSES = frozenset({"success", "image_unusable", "capture_failed", "analysis_failed"})
 
 
 def _valid_uuid(value: Any) -> bool:
@@ -207,6 +237,83 @@ def parse_zones(payload: Any) -> tuple[PlantZone, ...]:
         seen.add(zone_id)
         zones.append(PlantZone(zone_id=zone_id, rect=tuple(float(number) for number in entry["rect"]), label=label))
     return tuple(zones)
+
+
+def _valid_artifact_ref(value: Any) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == _ARTIFACT_REF_FIELDS
+        and value.get("schema_version") == "vision.v1"
+        and _valid_uuid(value.get("record_id"))
+        and isinstance(value.get("path"), str)
+        and bool(value["path"])
+        and isinstance(value.get("sha256"), str)
+        and bool(_SHA256.fullmatch(value["sha256"]))
+    )
+
+
+def validate_vision_run_manifest(value: Any) -> dict[str, Any]:
+    """Validate the public manifest that binds every zone outcome in one run."""
+    if not isinstance(value, Mapping) or set(value) != _RUN_FIELDS:
+        raise VisionRunValidationError()
+    if (
+        value.get("schema_version") != "vision_run.v1"
+        or not _valid_uuid(value.get("run_id"))
+        or not isinstance(value.get("device_code"), str)
+        or not value["device_code"]
+        or not _valid_timestamp(value.get("created_at"))
+        or not _valid_uuid(value.get("frame_id"))
+    ):
+        raise VisionRunValidationError()
+    outcomes = value.get("outcomes")
+    if (
+        not isinstance(outcomes, Sequence)
+        or isinstance(outcomes, (str, bytes))
+        or not 1 <= len(outcomes) <= 8
+    ):
+        raise VisionRunValidationError()
+    statuses: set[str] = set()
+    zones: set[str] = set()
+    has_artifact = False
+    for outcome in outcomes:
+        if not isinstance(outcome, Mapping) or set(outcome) != _RUN_OUTCOME_FIELDS:
+            raise VisionRunValidationError()
+        zone_id = outcome.get("zone_id")
+        status = outcome.get("status")
+        if (
+            not isinstance(zone_id, str)
+            or not _ZONE_ID.fullmatch(zone_id)
+            or zone_id in zones
+            or status not in _RUN_OUTCOME_STATUSES
+        ):
+            raise VisionRunValidationError()
+        zones.add(zone_id)
+        statuses.add(status)
+        artifact_ref = outcome.get("artifact_ref")
+        error_code = outcome.get("error_code")
+        http_status = outcome.get("http_status")
+        provider_error_code = outcome.get("provider_error_code")
+        if status in {"success", "image_unusable"}:
+            if (
+                not _valid_artifact_ref(artifact_ref)
+                or error_code is not None
+                or http_status is not None
+                or provider_error_code is not None
+            ):
+                raise VisionRunValidationError()
+            has_artifact = True
+        elif (
+            artifact_ref is not None
+            or not isinstance(error_code, str)
+            or not error_code
+            or (http_status is not None and (isinstance(http_status, bool) or not isinstance(http_status, int)))
+            or (provider_error_code is not None and not isinstance(provider_error_code, str))
+        ):
+            raise VisionRunValidationError()
+    expected_status = next(iter(statuses)) if len(statuses) == 1 else "partial"
+    if not has_artifact or value.get("status") != expected_status:
+        raise VisionRunValidationError()
+    return copy.deepcopy(dict(value))
 
 
 def _consistent_with_no_target(value: Mapping[str, Any]) -> bool:

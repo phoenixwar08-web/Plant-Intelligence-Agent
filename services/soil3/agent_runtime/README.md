@@ -9,11 +9,16 @@ State → explicit Vision/Experience availability → Strategy → Validator
 ```
 
 Every produced artifact is associated through one Store-generated `trace.v1`
-identifier. Vision and Experience are currently `not_requested`; the runtime
-records that absence and never fabricates either input. Model token usage is
-recorded only when the provider supplied `total_tokens`; cost remains null
-because the current provider envelope does not supply it, and latency comes
-from the runtime monotonic clock.
+identifier. Vision and Experience each have an explicit configuration switch.
+When disabled they remain `not_requested`; a requested call that cannot produce
+validated facts is `unavailable` with a null reference. Available Vision facts
+are linked through the public `vision_run.v1` manifest, while successful
+Experience Retrieval output is persisted beneath the agent runtime. The same
+available facts are passed to Cloud Strategy as read-only supporting context;
+no missing value is filled in. Model token usage is recorded only when the
+provider supplied `total_tokens`; cost remains null because the current
+provider envelope does not supply it, and latency comes from the runtime
+monotonic clock.
 
 Runner and Bridge are reached only after a content-bound, non-deny `gate.v2`.
 Bridge verifies the exact State, Strategy, Gate and terminal dry-run Runner
@@ -29,6 +34,8 @@ actions until the feedback lifecycle finalizes it.
 If Gate admits the fixture, Runner performs only its persisted dry-run logic;
 Bridge performs verification only, and every Runner, Bridge, Trace and runtime
 record declares both physical actions and Phase3 calls false.
+Trace execution remains `phase3_called=false` and
+`physical_actions_performed=false` for every optional-module state.
 
 Every successful pipeline record states `episode_status: open` and
 `feedback_status: pending`. Feedback windows may be attached incrementally;

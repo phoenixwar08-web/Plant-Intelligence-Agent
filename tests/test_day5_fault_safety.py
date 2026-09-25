@@ -76,6 +76,8 @@ def runtime_config(root, *, provider_mode="offline_fixture"):
         "provider_mode": provider_mode,
         "provider": provider,
         "exploration_requested": False,
+        "vision": {"enabled": False},
+        "experience": {"enabled": False, "limit_per_class": 3},
         "phase3_state_path": str(root / "phase3" / "system_state.json"),
         "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),
         "irrigation_trials_path": str(root / "phase3" / "irrigation_trials.json"),

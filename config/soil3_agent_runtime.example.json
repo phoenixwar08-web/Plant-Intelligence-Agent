@@ -3,6 +3,13 @@
   "provider_mode": "offline_fixture",
   "provider": {},
   "exploration_requested": false,
+  "vision": {
+    "enabled": false
+  },
+  "experience": {
+    "enabled": false,
+    "limit_per_class": 3
+  },
   "phase3_state_path": "/root/water/runtime/instances/soil3/phase3/system_state.json",
   "sensor_log_path": "/root/water/runtime/instances/soil3/phase3/sensor_log.csv",
   "irrigation_trials_path": "/root/water/runtime/instances/soil3/phase3/irrigation_trials.json",

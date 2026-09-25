@@ -268,7 +268,14 @@ class ClientAndChainTests(unittest.TestCase):
         )
         self.assertTrue(result["validation"]["accepted"])
         self.assertFalse(result["actuator_commands_allowed"])
-        self.assertEqual(project_state_for_model(state), result["model_input"])
+        expected = project_state_for_model(state)
+        expected.update(
+            {
+                "vision": {"availability": "not_requested", "facts": None},
+                "experience": {"availability": "not_requested", "facts": None},
+            }
+        )
+        self.assertEqual(expected, result["model_input"])
         self.assertEqual(fingerprint(state), result["state_sha256"])
         self.assertNotIn("state_snapshot", result)
         self.assertEqual(state["observed_at"], result["state_observed_at"])
@@ -283,6 +290,88 @@ class ClientAndChainTests(unittest.TestCase):
         result = run_chain(state=state, config=config, prompt="prompt")
         self.assertFalse(result["validation"]["accepted"])
         self.assertEqual(["provider_disabled"], result["validation"]["reason_codes"])
+
+    def test_available_optional_facts_reach_the_exact_provider_input(self):
+        state = sample_state()
+        content = json.dumps(valid_strategy(state))
+        session = FakeSession(
+            FakeResponse(
+                200,
+                {
+                    "id": "request-with-context",
+                    "model": "test-model",
+                    "choices": [{"message": {"content": content}}],
+                },
+            )
+        )
+        vision = {
+            "plant_zone": {"id": "plant_a", "rect": [0.0, 0.0, 0.5, 1.0], "label": "A"},
+            "captured_at": "2026-09-16T09:59:00Z",
+            "image_quality": "good",
+            "target_detected": True,
+            "leaf_droop": "mild",
+            "overall_visual_state": "mild_abnormality",
+            "confidence": 0.82,
+            "image_path": "images/private.jpg",
+            "image_sha256": "a" * 64,
+            "source_frame_path": "frames/private.jpg",
+            "model": {"provider": "qwen", "name": "qwen", "prompt_version": "vision.v1"},
+        }
+        experience = {
+            "schema_version": "experience_retrieval.v1",
+            "successful_cases": [],
+            "failed_cases": [],
+            "empty_reasons": ["no_usable_success_history", "no_usable_failure_history"],
+        }
+
+        with mock.patch.dict(os.environ, {"CLOUD_STRATEGY_API_KEY": "secret"}):
+            result = run_chain(
+                state=state,
+                config=self.config(),
+                prompt="prompt",
+                session=session,
+                vision_context={"availability": "available", "facts": [vision]},
+                experience_context={"availability": "available", "facts": experience},
+            )
+
+        sent = json.loads(session.calls[0][1]["json"]["messages"][1]["content"])
+        self.assertEqual(result["model_input"], sent)
+        self.assertEqual("mild", sent["vision"]["facts"][0]["leaf_droop"])
+        self.assertNotIn("image_path", sent["vision"]["facts"][0])
+        self.assertNotIn("image_sha256", sent["vision"]["facts"][0])
+        self.assertNotIn("source_frame_path", sent["vision"]["facts"][0])
+        self.assertNotIn("model", sent["vision"]["facts"][0])
+        self.assertEqual(experience, sent["experience"]["facts"])
+
+    def test_unavailable_optional_contexts_send_no_facts(self):
+        state = sample_state()
+        result = run_chain(
+            state=state,
+            config=self.config(),
+            prompt="prompt",
+            fixture_content=json.dumps(valid_strategy(state)),
+            vision_context={"availability": "unavailable", "facts": None},
+            experience_context={"availability": "unavailable", "facts": None},
+        )
+
+        self.assertEqual(
+            {"availability": "unavailable", "facts": None},
+            result["model_input"]["vision"],
+        )
+        self.assertEqual(
+            {"availability": "unavailable", "facts": None},
+            result["model_input"]["experience"],
+        )
+
+    def test_malformed_optional_context_fails_before_provider_call(self):
+        with self.assertRaisesRegex(ValueError, "invalid_vision_context"):
+            run_chain(
+                state=sample_state(),
+                config=self.config(),
+                prompt="prompt",
+                session=NoRequestSession(),
+                vision_context={"availability": "available", "facts": None},
+            )
 
 
 class BoundaryTests(unittest.TestCase):

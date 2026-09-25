@@ -28,6 +28,8 @@ CONFIG_FIELDS = {
     "provider_mode",
     "provider",
     "exploration_requested",
+    "vision",
+    "experience",
     "phase3_state_path",
     "sensor_log_path",
     "irrigation_trials_path",
@@ -93,6 +95,9 @@ class RuntimeConfig:
     device_code: str
     provider_mode: str
     provider: dict[str, Any]
+    vision_enabled: bool
+    experience_enabled: bool
+    experience_limit_per_class: int
     phase3_state_path: Path
     sensor_log_path: Path
     irrigation_trials_path: Path
@@ -143,6 +148,23 @@ class RuntimeConfig:
                 raise ValueError("qwen provider configuration is invalid")
         if value["exploration_requested"] is not False:
             raise ValueError("runtime config exploration_requested must be false")
+        vision = value["vision"]
+        if (
+            not isinstance(vision, dict)
+            or set(vision) != {"enabled"}
+            or not isinstance(vision["enabled"], bool)
+        ):
+            raise ValueError("runtime config vision settings are invalid")
+        experience = value["experience"]
+        if (
+            not isinstance(experience, dict)
+            or set(experience) != {"enabled", "limit_per_class"}
+            or not isinstance(experience["enabled"], bool)
+            or isinstance(experience["limit_per_class"], bool)
+            or not isinstance(experience["limit_per_class"], int)
+            or not 1 <= experience["limit_per_class"] <= 20
+        ):
+            raise ValueError("runtime config experience settings are invalid")
         if value["phase3_service_unit"] != "phase3_soil3.service":
             raise ValueError("runtime config phase3_service_unit must be phase3_soil3.service")
 
@@ -168,6 +190,9 @@ class RuntimeConfig:
             device_code="soil3",
             provider_mode=provider_mode,
             provider=dict(provider),
+            vision_enabled=vision["enabled"],
+            experience_enabled=experience["enabled"],
+            experience_limit_per_class=experience["limit_per_class"],
             phase3_state_path=phase3_state_path,
             sensor_log_path=Path(value["sensor_log_path"]),
             irrigation_trials_path=Path(value["irrigation_trials_path"]),
@@ -213,6 +238,10 @@ class RuntimeConfig:
     @property
     def feedback_dir(self) -> Path:
         return self.runtime_root / "feedback"
+
+    @property
+    def experience_dir(self) -> Path:
+        return self.runtime_root / "experience"
 
     @property
     def trace_dir(self) -> Path:
@@ -268,6 +297,150 @@ def _artifact_ref(
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "record_id": record_id,
     }
+
+
+def _unavailable_optional_context(availability: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    return (
+        {"availability": availability, "ref": None},
+        {"availability": availability, "facts": None},
+    )
+
+
+def _collect_vision(config: RuntimeConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Collect public Vision facts without knowing Vision's private storage layout."""
+    if not config.vision_enabled:
+        return _unavailable_optional_context("not_requested")
+    try:
+        from services.soil3.vision import (
+            VisionConfigurationError,
+            capture_and_analyze_once,
+            validate_vision_record,
+            validate_vision_run_manifest,
+        )
+
+        result = capture_and_analyze_once()
+    except (ImportError, VisionConfigurationError):
+        return _unavailable_optional_context("unavailable")
+
+    reference = getattr(result, "manifest_ref", None)
+    if reference is None:
+        return _unavailable_optional_context("unavailable")
+    try:
+        path_value = reference.path
+        expected_sha256 = reference.sha256
+        if (
+            not isinstance(path_value, str)
+            or not path_value
+            or not isinstance(reference.record_id, str)
+            or not reference.record_id
+        ):
+            return _unavailable_optional_context("unavailable")
+        path = Path(path_value)
+        trace_reference = {
+            "schema_version": reference.schema_version,
+            "path": path_value,
+            "sha256": expected_sha256,
+            "record_id": reference.record_id,
+        }
+    except (AttributeError, TypeError):
+        return _unavailable_optional_context("unavailable")
+    try:
+        manifest_bytes = path.read_bytes()
+        actual_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        manifest = validate_vision_run_manifest(json.loads(manifest_bytes))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return _unavailable_optional_context("unavailable")
+    if (
+        reference.schema_version != "vision_run.v1"
+        or actual_sha256 != expected_sha256
+        or reference.record_id != manifest["run_id"]
+        or manifest["device_code"] != config.device_code
+        or getattr(result, "frame_id", None) != manifest["frame_id"]
+        or getattr(result, "status", None) != manifest["status"]
+    ):
+        return _unavailable_optional_context("unavailable")
+
+    result_outcomes = getattr(result, "outcomes", ())
+    if not isinstance(result_outcomes, tuple) or len(result_outcomes) != len(manifest["outcomes"]):
+        return _unavailable_optional_context("unavailable")
+    result_by_zone = {getattr(outcome, "zone_id", None): outcome for outcome in result_outcomes}
+    if None in result_by_zone or len(result_by_zone) != len(result_outcomes):
+        return _unavailable_optional_context("unavailable")
+
+    facts = []
+    for manifest_outcome in manifest["outcomes"]:
+        outcome = result_by_zone.get(manifest_outcome["zone_id"])
+        if outcome is None or getattr(outcome, "status", None) != manifest_outcome["status"]:
+            return _unavailable_optional_context("unavailable")
+        artifact_ref = manifest_outcome["artifact_ref"]
+        if artifact_ref is None:
+            if getattr(outcome, "vision", None) is not None or getattr(outcome, "artifact_ref", None) is not None:
+                return _unavailable_optional_context("unavailable")
+            continue
+        public_ref = getattr(outcome, "artifact_ref", None)
+        try:
+            public_ref_value = {
+                "schema_version": public_ref.schema_version,
+                "record_id": public_ref.record_id,
+                "path": public_ref.path,
+                "sha256": public_ref.sha256,
+            }
+        except (AttributeError, TypeError):
+            return _unavailable_optional_context("unavailable")
+        if public_ref_value != artifact_ref:
+            return _unavailable_optional_context("unavailable")
+        try:
+            observation_bytes = Path(artifact_ref["path"]).read_bytes()
+            if hashlib.sha256(observation_bytes).hexdigest() != artifact_ref["sha256"]:
+                return _unavailable_optional_context("unavailable")
+            fact = validate_vision_record(json.loads(observation_bytes))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return _unavailable_optional_context("unavailable")
+        if (
+            fact != getattr(outcome, "vision", None)
+            or fact["image_id"] != artifact_ref["record_id"]
+            or fact["device_code"] != manifest["device_code"]
+            or fact["source_frame_id"] != manifest["frame_id"]
+            or fact["plant_zone"]["id"] != manifest_outcome["zone_id"]
+        ):
+            return _unavailable_optional_context("unavailable")
+        facts.append(fact)
+    if not facts:
+        return _unavailable_optional_context("unavailable")
+    return (
+        {"availability": "available", "ref": trace_reference},
+        {"availability": "available", "facts": facts},
+    )
+
+
+def _collect_experience(
+    config: RuntimeConfig,
+    state: dict[str, Any],
+    trace_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Retrieve and persist one public Experience result for this trace."""
+    if not config.experience_enabled:
+        return _unavailable_optional_context("not_requested")
+    from services.soil3.experience_retrieval import ExperienceRetriever, RetrievalError
+
+    try:
+        facts = ExperienceRetriever(config.episode_dir).retrieve(
+            state,
+            limit_per_class=config.experience_limit_per_class,
+        )
+    except RetrievalError:
+        return _unavailable_optional_context("unavailable")
+    if not isinstance(facts, dict) or facts.get("schema_version") != "experience_retrieval.v1":
+        return _unavailable_optional_context("unavailable")
+    artifact = config.experience_dir / f"{trace_id}.json"
+    atomic_write_json(artifact, facts)
+    return (
+        {
+            "availability": "available",
+            "ref": _artifact_ref("experience_retrieval.v1", artifact, record_id=trace_id),
+        },
+        {"availability": "available", "facts": facts},
+    )
 
 
 def _model_metrics(strategy_result: dict[str, Any], latency_ms: float) -> dict[str, Any]:
@@ -448,11 +621,17 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     trace_id = trace["trace_id"]
     trace_path = trace_store.trace_path(trace_id)
     state = write_state_snapshot(config)
+    vision_association, vision_context = _collect_vision(config)
+    experience_association, experience_context = _collect_experience(
+        config,
+        state,
+        trace_id,
+    )
     trace_store.set_decision(
         trace_id,
         state_ref=_artifact_ref("state.v1", config.state_output),
-        vision={"availability": "not_requested", "ref": None},
-        experience={"availability": "not_requested", "ref": None},
+        vision=vision_association,
+        experience=experience_association,
     )
     prompt = _resolve_prompt_path(config.prompt_path).read_text(encoding="utf-8")
     strategy_started = time.monotonic()
@@ -465,6 +644,8 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
             if config.provider_mode == "offline_fixture"
             else None
         ),
+        vision_context=vision_context,
+        experience_context=experience_context,
     )
     strategy_latency_ms = (time.monotonic() - strategy_started) * 1000.0
     trace_store.set_decision(
