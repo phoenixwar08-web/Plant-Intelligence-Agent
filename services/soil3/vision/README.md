@@ -5,8 +5,9 @@ care, call Phase3, publish MQTT, or control an actuator.
 
 A successful zone observation persists one validated `vision.v1` record. A
 capture cycle with at least one such record also persists one public
-`vision_run.v1` manifest whose `observation_refs` identify the records produced
-by that cycle. `VisionRunResult.manifest_ref` contains the manifest path and the
+`vision_run.v1` manifest whose `outcomes` preserve every zone status and include
+an artifact reference whenever that zone produced a record.
+`VisionRunResult.manifest_ref` contains the manifest path and the
 SHA-256 of the exact persisted bytes, so callers do not reconstruct Vision's
 private directory layout.
 

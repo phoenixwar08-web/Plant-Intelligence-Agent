@@ -1,8 +1,10 @@
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -131,20 +133,61 @@ def vision_record():
 
 
 def available_vision_result(root):
+    record = vision_record()
+    observation = root / "public" / "vision-record.json"
+    observation.parent.mkdir(parents=True)
+    observation.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    observation_ref = VisionArtifactRef(
+        schema_version="vision.v1",
+        record_id=record["image_id"],
+        path=str(observation),
+        sha256=hashlib.sha256(observation.read_bytes()).hexdigest(),
+    )
+    run_id = str(uuid.uuid4())
     manifest = root / "public" / "vision-run.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps({"schema_version": "vision_run.v1"}), encoding="utf-8")
+    manifest.write_text(
+        json.dumps({
+            "schema_version": "vision_run.v1",
+            "run_id": run_id,
+            "device_code": "soil3",
+            "created_at": utc_now(),
+            "status": "success",
+            "frame_id": record["source_frame_id"],
+            "outcomes": [{
+                "zone_id": "plant_a",
+                "status": "success",
+                "artifact_ref": {
+                    "schema_version": observation_ref.schema_version,
+                    "record_id": observation_ref.record_id,
+                    "path": observation_ref.path,
+                    "sha256": observation_ref.sha256,
+                },
+                "error_code": None,
+                "http_status": None,
+                "provider_error_code": None,
+            }],
+        }, sort_keys=True),
+        encoding="utf-8",
+    )
     reference = VisionArtifactRef(
         schema_version="vision_run.v1",
-        record_id=str(uuid.uuid4()),
+        record_id=run_id,
         path=str(manifest),
         sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
     )
-    record = vision_record()
     return VisionRunResult(
         "success",
         record["source_frame_id"],
-        (CaptureOutcome("success", "plant_a", record["image_id"], record, None),),
+        (
+            CaptureOutcome(
+                "success",
+                "plant_a",
+                record["image_id"],
+                record,
+                None,
+                artifact_ref=observation_ref,
+            ),
+        ),
         reference,
     )
 
@@ -247,6 +290,86 @@ class Day5VisionExperienceRuntimeTests(unittest.TestCase):
         self.assertEqual("available", audit["model_input"]["experience"]["availability"])
         self.assertEqual([], audit["model_input"]["experience"]["facts"]["successful_cases"])
         self.assertEqual(NO_EXECUTION, trace["execution"])
+
+    def test_invalid_vision_zones_are_unavailable_and_pipeline_continues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            zones_path = root / "invalid-zones.json"
+            zones_path.write_text(json.dumps({"zones": []}), encoding="utf-8")
+            config = runtime_config(root, vision=True, experience=False)
+            environment = {
+                "SOIL3_CAMERA_RTSP_URL": "rtsp://camera.invalid/stream",
+                "QWEN_API_KEY": "test-only",
+                "QWEN_BASE_URL": "https://provider.invalid/v1",
+                "SOIL3_VISION_DATA_DIR": str(root / "vision"),
+                "SOIL3_VISION_ZONES_PATH": str(zones_path),
+            }
+            with mock.patch.dict(os.environ, environment, clear=False):
+                record = self.run_case(config)
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            audit = read_audit(record)
+
+        self.assertEqual({"availability": "unavailable", "ref": None}, trace["decision"]["vision"])
+        self.assertEqual({"availability": "unavailable", "facts": None}, audit["model_input"]["vision"])
+        self.assertIsNotNone(record["strategy_path"])
+        self.assertEqual(NO_EXECUTION, record["execution"])
+
+    def test_hash_valid_manifest_metadata_or_structure_tampering_is_unavailable(self):
+        mutations = {
+            "missing outcomes": lambda value: value.pop("outcomes"),
+            "wrong run id": lambda value: value.update(run_id=str(uuid.uuid4())),
+            "wrong device": lambda value: value.update(device_code="soil2"),
+            "wrong frame": lambda value: value.update(frame_id=str(uuid.uuid4())),
+            "wrong status": lambda value: value.update(status="partial"),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = runtime_config(root, vision=True, experience=False)
+                result = available_vision_result(root)
+                manifest_path = Path(result.manifest_ref.path)
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                mutate(manifest)
+                manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+                result = replace(
+                    result,
+                    manifest_ref=replace(
+                        result.manifest_ref,
+                        sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                    ),
+                )
+                with mock.patch(
+                    "services.soil3.vision.capture_and_analyze_once",
+                    return_value=result,
+                ):
+                    record = self.run_case(config)
+                trace = TraceStore(config.trace_dir).read(record["trace_id"])
+                audit = read_audit(record)
+
+            self.assertEqual({"availability": "unavailable", "ref": None}, trace["decision"]["vision"])
+            self.assertEqual({"availability": "unavailable", "facts": None}, audit["model_input"]["vision"])
+
+    def test_strategy_facts_must_match_the_manifest_observation_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = runtime_config(root, vision=True, experience=False)
+            result = available_vision_result(root)
+            forged = dict(result.outcomes[0].vision)
+            forged["leaf_droop"] = "severe"
+            result = replace(
+                result,
+                outcomes=(replace(result.outcomes[0], vision=forged),),
+            )
+            with mock.patch(
+                "services.soil3.vision.capture_and_analyze_once",
+                return_value=result,
+            ):
+                record = self.run_case(config)
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            audit = read_audit(record)
+
+        self.assertEqual({"availability": "unavailable", "ref": None}, trace["decision"]["vision"])
+        self.assertEqual({"availability": "unavailable", "facts": None}, audit["model_input"]["vision"])
 
     def test_vision_failure_is_unavailable_without_facts_or_ref(self):
         with tempfile.TemporaryDirectory() as directory:

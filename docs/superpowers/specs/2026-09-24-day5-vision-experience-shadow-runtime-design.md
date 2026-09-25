@@ -117,20 +117,30 @@ data root. The manifest contains:
   "run_id": "UUID",
   "device_code": "soil3",
   "created_at": "RFC3339 UTC",
-  "status": "success or partial",
-  "frame_id": "UUID or null",
-  "observation_refs": [
+  "status": "success, image_unusable, or partial",
+  "frame_id": "UUID",
+  "outcomes": [
     {
-      "schema_version": "vision.v1",
-      "record_id": "image UUID",
-      "path": "absolute persisted JSON path",
-      "sha256": "64 lowercase hex characters"
+      "zone_id": "plant_zone_1",
+      "status": "success",
+      "artifact_ref": {
+        "schema_version": "vision.v1",
+        "record_id": "image UUID",
+        "path": "absolute persisted JSON path",
+        "sha256": "64 lowercase hex characters"
+      },
+      "error_code": null,
+      "http_status": null,
+      "provider_error_code": null
     }
   ]
 }
 ```
 
-The returned manifest reference has `schema_version=vision_run.v1` and is the
+Every configured zone appears in `outcomes`. Failed zones retain their status
+and diagnostics with a null artifact reference; zones that produced a validated
+observation retain its public artifact reference. The returned manifest
+reference has `schema_version=vision_run.v1` and is the
 single artifact recorded in Trace. A run with no valid observation returns no
 manifest reference. Existing per-zone failure records remain Vision-owned.
 

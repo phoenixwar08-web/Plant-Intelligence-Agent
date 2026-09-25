@@ -487,19 +487,54 @@ class VisionServiceTests(unittest.TestCase):
             result.manifest_ref.sha256,
         )
         self.assertEqual("vision_run.v1", manifest["schema_version"])
+        self.assertEqual(manifest, _contract.validate_vision_run_manifest(manifest))
         self.assertEqual("soil3", manifest["device_code"])
         self.assertEqual(result.status, manifest["status"])
         self.assertEqual(result.frame_id, manifest["frame_id"])
-        self.assertEqual(2, len(manifest["observation_refs"]))
+        self.assertEqual(2, len(manifest["outcomes"]))
         self.assertTrue(
             all(
-                reference["schema_version"] == "vision.v1"
-                and Path(reference["path"]).is_absolute()
-                and len(reference["sha256"]) == 64
-                for reference in manifest["observation_refs"]
+                outcome["artifact_ref"]["schema_version"] == "vision.v1"
+                and Path(outcome["artifact_ref"]["path"]).is_absolute()
+                and len(outcome["artifact_ref"]["sha256"]) == 64
+                for outcome in manifest["outcomes"]
             )
         )
         self.assertTrue(all(outcome.artifact_ref is not None for outcome in result.outcomes))
+
+    def test_partial_manifest_preserves_every_zone_outcome_and_available_ref(self):
+        import services.soil3.vision.qwen_vision as qwen_vision
+
+        calls = 0
+
+        def one_success_one_failure(evidence, previous_jpeg):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise qwen_vision.AnalysisError("MODEL_TIMEOUT")
+            return assessed()
+
+        with TemporaryDirectory() as temporary:
+            result = self._service(
+                Path(temporary),
+                self._frame(),
+                analyzer_result=one_success_one_failure,
+            ).capture_and_analyze_once()
+            manifest = json.loads(Path(result.manifest_ref.path).read_text(encoding="utf-8"))
+
+        self.assertEqual("partial", manifest["status"])
+        self.assertEqual(
+            ["plant_zone_1", "plant_zone_2"],
+            [outcome["zone_id"] for outcome in manifest["outcomes"]],
+        )
+        self.assertEqual(
+            ["success", "analysis_failed"],
+            [outcome["status"] for outcome in manifest["outcomes"]],
+        )
+        self.assertEqual("vision.v1", manifest["outcomes"][0]["artifact_ref"]["schema_version"])
+        self.assertIsNone(manifest["outcomes"][0]["error_code"])
+        self.assertIsNone(manifest["outcomes"][1]["artifact_ref"])
+        self.assertEqual("MODEL_TIMEOUT", manifest["outcomes"][1]["error_code"])
 
     def test_all_failed_zone_run_has_no_manifest(self):
         import services.soil3.vision.qwen_vision as qwen_vision

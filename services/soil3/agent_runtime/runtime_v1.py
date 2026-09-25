@@ -315,24 +315,15 @@ def _collect_vision(config: RuntimeConfig) -> tuple[dict[str, Any], dict[str, An
             VisionConfigurationError,
             capture_and_analyze_once,
             validate_vision_record,
+            validate_vision_run_manifest,
         )
 
         result = capture_and_analyze_once()
     except (ImportError, VisionConfigurationError):
         return _unavailable_optional_context("unavailable")
 
-    facts = []
-    for outcome in getattr(result, "outcomes", ()):
-        value = getattr(outcome, "vision", None)
-        if not isinstance(value, dict):
-            continue
-        try:
-            facts.append(validate_vision_record(value))
-        except ValueError:
-            return _unavailable_optional_context("unavailable")
-
     reference = getattr(result, "manifest_ref", None)
-    if not facts or reference is None:
+    if reference is None:
         return _unavailable_optional_context("unavailable")
     try:
         path_value = reference.path
@@ -354,10 +345,67 @@ def _collect_vision(config: RuntimeConfig) -> tuple[dict[str, Any], dict[str, An
     except (AttributeError, TypeError):
         return _unavailable_optional_context("unavailable")
     try:
-        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
+        manifest_bytes = path.read_bytes()
+        actual_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        manifest = validate_vision_run_manifest(json.loads(manifest_bytes))
+    except (OSError, ValueError, json.JSONDecodeError):
         return _unavailable_optional_context("unavailable")
-    if reference.schema_version != "vision_run.v1" or actual_sha256 != expected_sha256:
+    if (
+        reference.schema_version != "vision_run.v1"
+        or actual_sha256 != expected_sha256
+        or reference.record_id != manifest["run_id"]
+        or manifest["device_code"] != config.device_code
+        or getattr(result, "frame_id", None) != manifest["frame_id"]
+        or getattr(result, "status", None) != manifest["status"]
+    ):
+        return _unavailable_optional_context("unavailable")
+
+    result_outcomes = getattr(result, "outcomes", ())
+    if not isinstance(result_outcomes, tuple) or len(result_outcomes) != len(manifest["outcomes"]):
+        return _unavailable_optional_context("unavailable")
+    result_by_zone = {getattr(outcome, "zone_id", None): outcome for outcome in result_outcomes}
+    if None in result_by_zone or len(result_by_zone) != len(result_outcomes):
+        return _unavailable_optional_context("unavailable")
+
+    facts = []
+    for manifest_outcome in manifest["outcomes"]:
+        outcome = result_by_zone.get(manifest_outcome["zone_id"])
+        if outcome is None or getattr(outcome, "status", None) != manifest_outcome["status"]:
+            return _unavailable_optional_context("unavailable")
+        artifact_ref = manifest_outcome["artifact_ref"]
+        if artifact_ref is None:
+            if getattr(outcome, "vision", None) is not None or getattr(outcome, "artifact_ref", None) is not None:
+                return _unavailable_optional_context("unavailable")
+            continue
+        public_ref = getattr(outcome, "artifact_ref", None)
+        try:
+            public_ref_value = {
+                "schema_version": public_ref.schema_version,
+                "record_id": public_ref.record_id,
+                "path": public_ref.path,
+                "sha256": public_ref.sha256,
+            }
+        except (AttributeError, TypeError):
+            return _unavailable_optional_context("unavailable")
+        if public_ref_value != artifact_ref:
+            return _unavailable_optional_context("unavailable")
+        try:
+            observation_bytes = Path(artifact_ref["path"]).read_bytes()
+            if hashlib.sha256(observation_bytes).hexdigest() != artifact_ref["sha256"]:
+                return _unavailable_optional_context("unavailable")
+            fact = validate_vision_record(json.loads(observation_bytes))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return _unavailable_optional_context("unavailable")
+        if (
+            fact != getattr(outcome, "vision", None)
+            or fact["image_id"] != artifact_ref["record_id"]
+            or fact["device_code"] != manifest["device_code"]
+            or fact["source_frame_id"] != manifest["frame_id"]
+            or fact["plant_zone"]["id"] != manifest_outcome["zone_id"]
+        ):
+            return _unavailable_optional_context("unavailable")
+        facts.append(fact)
+    if not facts:
         return _unavailable_optional_context("unavailable")
     return (
         {"availability": "available", "ref": trace_reference},

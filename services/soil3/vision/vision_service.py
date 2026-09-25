@@ -28,6 +28,7 @@ from services.soil3.vision.vision_v1 import (
     VisionValidationError,
     parse_zones,
     validate_vision_record,
+    validate_vision_run_manifest,
 )
 
 
@@ -72,9 +73,9 @@ class VisionSettings:
     def load_zones(self) -> tuple[PlantZone, ...]:
         try:
             payload = json.loads(self.zones_path.read_text(encoding="utf-8"))
+            return parse_zones(payload)
         except (OSError, ValueError) as error:
             raise VisionConfigurationError() from error
-        return parse_zones(payload)
 
 
 def _utc_timestamp(value: datetime) -> str:
@@ -254,12 +255,23 @@ class VisionService:
             "created_at": _utc_timestamp(created_at),
             "status": status,
             "frame_id": frame_id,
-            "observation_refs": [
-                asdict(outcome.artifact_ref)
+            "outcomes": [
+                {
+                    "zone_id": outcome.zone_id,
+                    "status": outcome.status,
+                    "artifact_ref": (
+                        asdict(outcome.artifact_ref)
+                        if outcome.artifact_ref is not None
+                        else None
+                    ),
+                    "error_code": outcome.error_code,
+                    "http_status": outcome.http_status,
+                    "provider_error_code": outcome.provider_error_code,
+                }
                 for outcome in outcomes
-                if outcome.artifact_ref is not None
             ],
         }
+        value = validate_vision_run_manifest(value)
         path = self._data_root / "runs" / created_at.date().isoformat() / f"{run_id}.json"
         self._write_json(path, value)
         return self._artifact_ref("vision_run.v1", run_id, path)

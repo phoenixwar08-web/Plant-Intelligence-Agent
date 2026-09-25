@@ -16,8 +16,10 @@ from services.soil3.vision.vision_v1 import (
     PlantZone,
     VisionArtifactRef,
     VisionRunResult,
+    VisionRunValidationError,
     parse_zones,
     validate_vision_record,
+    validate_vision_run_manifest,
 )
 
 __all__ = [
@@ -27,10 +29,12 @@ __all__ = [
     "PlantZone",
     "VisionArtifactRef",
     "VisionRunResult",
+    "VisionRunValidationError",
     "VisionConfigurationError",
     "VisionService",
     "capture_and_analyze_once",
     "crop_to_zone",
     "parse_zones",
     "validate_vision_record",
+    "validate_vision_run_manifest",
 ]

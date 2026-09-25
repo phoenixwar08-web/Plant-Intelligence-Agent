@@ -68,8 +68,8 @@ def test_successful_run_returns_hash_verified_public_manifest(self):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     self.assertEqual("vision_run.v1", manifest["schema_version"])
     self.assertEqual("soil3", manifest["device_code"])
-    self.assertTrue(manifest["observation_refs"])
-    self.assertTrue(all(item["schema_version"] == "vision.v1" for item in manifest["observation_refs"]))
+    self.assertTrue(manifest["outcomes"])
+    self.assertTrue(all("status" in item for item in manifest["outcomes"]))
 
 def test_all_failed_run_has_no_manifest_ref(self):
     result = build_failing_vision_service(data_root).capture_and_analyze_once()
@@ -132,7 +132,17 @@ The manifest writer must emit exactly:
     "created_at": _utc_timestamp(now),
     "status": status,
     "frame_id": frame_id,
-    "observation_refs": [asdict(outcome.artifact_ref) for outcome in outcomes if outcome.artifact_ref],
+    "outcomes": [
+        {
+            "zone_id": outcome.zone_id,
+            "status": outcome.status,
+            "artifact_ref": asdict(outcome.artifact_ref) if outcome.artifact_ref else None,
+            "error_code": outcome.error_code,
+            "http_status": outcome.http_status,
+            "provider_error_code": outcome.provider_error_code,
+        }
+        for outcome in outcomes
+    ],
 }
 ```
 
