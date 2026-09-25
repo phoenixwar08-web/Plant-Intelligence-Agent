@@ -1,8 +1,9 @@
 """One-shot, non-control orchestration for Vision V1 across plant zones."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ from services.soil3.vision.vision_v1 import (
     OBSERVATION_FIELDS,
     CaptureOutcome,
     PlantZone,
+    VisionArtifactRef,
     VisionRunResult,
     VisionValidationError,
     parse_zones,
@@ -182,7 +184,11 @@ class VisionService:
         )
         outcomes = tuple(self._observe_zone(zone, frame) for zone in self._zones)
         distinct = {outcome.status for outcome in outcomes}
-        return VisionRunResult(distinct.pop() if len(distinct) == 1 else "partial", evidence.image_id, outcomes)
+        status = distinct.pop() if len(distinct) == 1 else "partial"
+        manifest_ref = None
+        if any(outcome.artifact_ref is not None for outcome in outcomes):
+            manifest_ref = self._persist_manifest(status, evidence.image_id, outcomes)
+        return VisionRunResult(status, evidence.image_id, outcomes, manifest_ref)
 
     def _observe_zone(self, zone: PlantZone, frame: CapturedFrame) -> CaptureOutcome:
         """Observe one zone, writing every failure record about this zone alone."""
@@ -223,14 +229,49 @@ class VisionService:
         except (AnalysisError, VisionValidationError) as error:
             return _fail("analysis_failed", error, evidence.image_id, evidence.image_sha256)
 
-        self._persist_record(record)
+        artifact_ref = self._persist_record(record)
         status = "image_unusable" if record["image_quality"] == "unusable" else "success"
-        return CaptureOutcome(status, zone.zone_id, evidence.image_id, record, None)
+        return CaptureOutcome(status, zone.zone_id, evidence.image_id, record, None, artifact_ref=artifact_ref)
 
-    def _persist_record(self, record: Mapping[str, object]) -> None:
+    def _persist_record(self, record: Mapping[str, object]) -> VisionArtifactRef:
         timestamp = datetime.fromisoformat(str(record["captured_at"]).replace("Z", "+00:00"))
         path = self._data_root / "records" / timestamp.date().isoformat() / f"{record['image_id']}.json"
         self._write_json(path, record)
+        return self._artifact_ref("vision.v1", str(record["image_id"]), path)
+
+    def _persist_manifest(
+        self,
+        status: str,
+        frame_id: str,
+        outcomes: Sequence[CaptureOutcome],
+    ) -> VisionArtifactRef:
+        created_at = datetime.now(timezone.utc)
+        run_id = str(uuid4())
+        value = {
+            "schema_version": "vision_run.v1",
+            "run_id": run_id,
+            "device_code": self._device_code,
+            "created_at": _utc_timestamp(created_at),
+            "status": status,
+            "frame_id": frame_id,
+            "observation_refs": [
+                asdict(outcome.artifact_ref)
+                for outcome in outcomes
+                if outcome.artifact_ref is not None
+            ],
+        }
+        path = self._data_root / "runs" / created_at.date().isoformat() / f"{run_id}.json"
+        self._write_json(path, value)
+        return self._artifact_ref("vision_run.v1", run_id, path)
+
+    @staticmethod
+    def _artifact_ref(schema_version: str, record_id: str, path: Path) -> VisionArtifactRef:
+        return VisionArtifactRef(
+            schema_version=schema_version,
+            record_id=record_id,
+            path=str(path.resolve()),
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
 
     def _persist_failure(
         self,

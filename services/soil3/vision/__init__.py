@@ -5,11 +5,16 @@ schedules, commands, or controls a device.
 """
 
 from services.soil3.vision.vision_capture import EvidenceStore, crop_to_zone
-from services.soil3.vision.vision_service import VisionService, capture_and_analyze_once
+from services.soil3.vision.vision_service import (
+    VisionConfigurationError,
+    VisionService,
+    capture_and_analyze_once,
+)
 from services.soil3.vision.vision_v1 import (
     OBSERVATION_FIELDS,
     CaptureOutcome,
     PlantZone,
+    VisionArtifactRef,
     VisionRunResult,
     parse_zones,
     validate_vision_record,
@@ -20,7 +25,9 @@ __all__ = [
     "OBSERVATION_FIELDS",
     "CaptureOutcome",
     "PlantZone",
+    "VisionArtifactRef",
     "VisionRunResult",
+    "VisionConfigurationError",
     "VisionService",
     "capture_and_analyze_once",
     "crop_to_zone",

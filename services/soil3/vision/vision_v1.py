@@ -34,6 +34,16 @@ class ZoneConfigurationError(ValueError):
 
 
 @dataclass(frozen=True)
+class VisionArtifactRef:
+    """A public, hash-verifiable reference to one persisted Vision artifact."""
+
+    schema_version: str
+    record_id: str
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class CaptureOutcome:
     """The result of observing one plant zone, whether or not a record exists."""
 
@@ -44,6 +54,7 @@ class CaptureOutcome:
     error_code: str | None
     http_status: int | None = None
     provider_error_code: str | None = None
+    artifact_ref: VisionArtifactRef | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,7 @@ class VisionRunResult:
     status: str
     frame_id: str | None
     outcomes: tuple[CaptureOutcome, ...]
+    manifest_ref: VisionArtifactRef | None = None
 
 
 @dataclass(frozen=True)

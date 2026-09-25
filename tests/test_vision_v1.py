@@ -123,6 +123,11 @@ class VisionV1ContractTests(unittest.TestCase):
         self.assertIsNone(record["wilting"])
         self.assertEqual(record["overall_visual_state"], "unavailable")
 
+    def test_existing_run_result_callers_default_to_no_manifest(self):
+        result = _contract.VisionRunResult("capture_failed", None, ())
+
+        self.assertIsNone(result.manifest_ref)
+
     def test_assessed_record_reports_every_field(self):
         record = _contract.validate_vision_record(vision_record(**assessed()))
         self.assertEqual(record["overall_visual_state"], "mild_abnormality")
@@ -462,6 +467,54 @@ class VisionServiceTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertEqual(failures[0]["error_code"], "RTSP_OPEN_FAILED")
         self.assertNotIn("plant_zone", failures[0], "no zone was reached")
+
+    def test_successful_run_returns_a_hash_verified_public_manifest(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = self._service(
+                root, self._frame(), assessed()
+            ).capture_and_analyze_once()
+
+            self.assertIsNotNone(result.manifest_ref)
+            manifest_path = Path(result.manifest_ref.path)
+            manifest_bytes = manifest_path.read_bytes()
+            manifest = json.loads(manifest_bytes)
+
+        self.assertEqual("vision_run.v1", result.manifest_ref.schema_version)
+        self.assertEqual(result.manifest_ref.record_id, manifest["run_id"])
+        self.assertEqual(
+            hashlib.sha256(manifest_bytes).hexdigest(),
+            result.manifest_ref.sha256,
+        )
+        self.assertEqual("vision_run.v1", manifest["schema_version"])
+        self.assertEqual("soil3", manifest["device_code"])
+        self.assertEqual(result.status, manifest["status"])
+        self.assertEqual(result.frame_id, manifest["frame_id"])
+        self.assertEqual(2, len(manifest["observation_refs"]))
+        self.assertTrue(
+            all(
+                reference["schema_version"] == "vision.v1"
+                and Path(reference["path"]).is_absolute()
+                and len(reference["sha256"]) == 64
+                for reference in manifest["observation_refs"]
+            )
+        )
+        self.assertTrue(all(outcome.artifact_ref is not None for outcome in result.outcomes))
+
+    def test_all_failed_zone_run_has_no_manifest(self):
+        import services.soil3.vision.qwen_vision as qwen_vision
+
+        with TemporaryDirectory() as temporary:
+            result = self._service(
+                Path(temporary),
+                self._frame(),
+                qwen_vision.AnalysisError("MODEL_TIMEOUT"),
+            ).capture_and_analyze_once()
+
+        self.assertEqual("analysis_failed", result.status)
+        self.assertTrue(result.outcomes)
+        self.assertTrue(all(outcome.vision is None for outcome in result.outcomes))
+        self.assertIsNone(result.manifest_ref)
 
     def test_unusable_analysis_persists_one_record_per_zone(self):
         with TemporaryDirectory() as temporary:
