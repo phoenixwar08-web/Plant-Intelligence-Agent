@@ -33,9 +33,15 @@ LLM → manual_water
 LLM → ESP32
 ```
 
-The soil3 Shadow runtime associates State, explicit Vision/Experience
-availability, Strategy, Gate v2, dry-run Runner, verification-only Bridge, and
-an open Episode through one `trace.v1`. Missing facts stay explicit. This
-integration never calls Phase3 and never performs a physical action.
+The soil3 Shadow runtime can explicitly request Vision and Experience after
+State and before Strategy. Available validated Vision facts and the public
+`vision_run.v1` manifest reference, plus the read-only Experience Retrieval
+result and its runtime artifact reference, are associated through one
+`trace.v1` and supplied to Cloud Strategy as supporting facts. Disabled inputs
+are `not_requested`; requested inputs without facts are `unavailable`. Missing
+facts stay null and are never inferred. Strategy, Gate v2, dry-run Runner,
+verification-only Bridge, and an open Episode then continue on the same trace.
+This integration always records `phase3_called=false` and
+`physical_actions_performed=false`.
 
 State, Vision, Strategy, Episode, Feedback, Trace, and Replay may read facts and create records within their authorized Issue boundaries. They do not bypass Phase3 or become an actuator path.
