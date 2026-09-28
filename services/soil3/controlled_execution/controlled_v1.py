@@ -262,6 +262,27 @@ def _load_artifact(
     return value, []
 
 
+def _code_objects_match(actual: Any, expected: Any) -> bool:
+    """Compare code identity using the line table exposed by this Python."""
+
+    fields = [
+        "co_argcount", "co_posonlyargcount", "co_kwonlyargcount",
+        "co_nlocals", "co_stacksize", "co_flags", "co_code", "co_consts",
+        "co_names", "co_varnames", "co_freevars", "co_cellvars",
+        "co_firstlineno",
+    ]
+    if hasattr(actual, "co_linetable") and hasattr(expected, "co_linetable"):
+        fields.append("co_linetable")
+    else:
+        fields.append("co_lnotab")
+    if hasattr(actual, "co_exceptiontable") and hasattr(expected, "co_exceptiontable"):
+        fields.append("co_exceptiontable")
+    try:
+        return all(getattr(actual, field) == getattr(expected, field) for field in fields)
+    except AttributeError:
+        return False
+
+
 def _formal_phase3_instance(value: Any) -> bool:
     """Recognize the already-created formal Phase3 facade without importing it.
 
@@ -305,15 +326,7 @@ def _formal_phase3_instance(value: Any) -> bool:
     except (OSError, SyntaxError, StopIteration):
         return False
     actual_code = method.__code__
-    code_matches = all(
-        getattr(actual_code, field) == getattr(expected_method_code, field)
-        for field in (
-            "co_argcount", "co_posonlyargcount", "co_kwonlyargcount",
-            "co_nlocals", "co_stacksize", "co_flags", "co_code", "co_consts",
-            "co_names", "co_varnames", "co_freevars", "co_cellvars",
-            "co_firstlineno", "co_linetable", "co_exceptiontable",
-        )
-    )
+    code_matches = _code_objects_match(actual_code, expected_method_code)
     return (
         cls.__name__ == "DecisionBrain"
         and cls.__module__ in {

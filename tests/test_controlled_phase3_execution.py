@@ -14,6 +14,7 @@ from unittest import mock
 
 from services.soil3.cloud_gate.gate_v2 import GatePolicy, evaluate_gate_v2
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
+from services.soil3.controlled_execution import controlled_v1
 from services.soil3.controlled_execution import ControlledExecutionError, ControlledPhase3Executor
 from services.soil3.episode.episode_v1 import EpisodeStore
 from services.soil3.phase3_bridge import Phase3Bridge
@@ -204,6 +205,29 @@ class ControlledPhase3ExecutionTests(unittest.TestCase):
 
     def brain(self):
         return object.__new__(self.DecisionBrain)
+
+    def test_code_identity_comparison_uses_lnotab_without_linetable(self):
+        fields = {
+            "co_argcount": 1,
+            "co_posonlyargcount": 0,
+            "co_kwonlyargcount": 0,
+            "co_nlocals": 1,
+            "co_stacksize": 1,
+            "co_flags": 3,
+            "co_code": b"official",
+            "co_consts": (None,),
+            "co_names": (),
+            "co_varnames": ("self",),
+            "co_freevars": (),
+            "co_cellvars": (),
+            "co_firstlineno": 10,
+            "co_lnotab": b"\x00\x01",
+        }
+        actual = SimpleNamespace(**fields)
+        expected = SimpleNamespace(**fields)
+        compare = getattr(controlled_v1, "_code_objects_match", lambda *_: False)
+
+        self.assertTrue(compare(actual, expected))
 
     def test_persisted_chain_is_reverified_before_formal_phase3_cycle(self):
         with tempfile.TemporaryDirectory() as directory:
