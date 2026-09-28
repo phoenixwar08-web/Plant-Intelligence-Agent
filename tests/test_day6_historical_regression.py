@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 from services.soil3.cloud_gate.gate_v1 import GatePolicy
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION
@@ -24,6 +25,11 @@ try:
 except ImportError:
     run_batch = None
 
+try:
+    from services.soil3.historical_regression.service import main as regression_main
+except ImportError:
+    regression_main = None
+
 
 SAFE_PHASE3_FLAGS = {
     "pump_active": False,
@@ -39,6 +45,25 @@ SAFE_PHASE3_FLAGS = {
     "hard_safety_low_guard": {"active": False},
     "cloud_protection": {"active": False},
 }
+
+
+class FakeResponse:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class FakeSession:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def post(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return self.response
 
 
 class _HistoricalRegressionFixture:
@@ -443,6 +468,113 @@ class HistoricalRegressionBatchTests(_HistoricalRegressionFixture, unittest.Test
         self.assertEqual(first["risky_cases"], second["risky_cases"])
         self.assertEqual(first["summary_sha256"], second["summary_sha256"])
         self.assertEqual(64, len(first["summary_sha256"]))
+
+
+class HistoricalRegressionServiceTests(_HistoricalRegressionFixture, unittest.TestCase):
+    def write_service_inputs(self, *, include_fixture=True):
+        manifest = self.valid_manifest()
+        if not include_fixture:
+            manifest["cases"][0].pop("fixture_response")
+        manifest_path = self.write_manifest(manifest)
+        config_path = self.root / "strategy-config.json"
+        config_path.write_text(json.dumps(self.strategy_config()), encoding="utf-8")
+        policy_path = self.root / "gate-policy.json"
+        policy_path.write_text(
+            json.dumps(
+                {
+                    "warning_age_seconds": 900,
+                    "deny_age_seconds": 18000,
+                    "window_seconds": 86400,
+                    "max_exploration_water_seconds": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        prompt_path = self.root / "prompt.txt"
+        prompt_path.write_text("Return strategy.v1 JSON", encoding="utf-8")
+        return manifest_path, config_path, policy_path, prompt_path
+
+    def test_fixture_cli_writes_atomic_json_and_markdown_without_mutating_inputs(self):
+        self.assertIsNotNone(regression_main)
+        (self.root / "response.txt").write_text(
+            json.dumps(self.strategy_response()), encoding="utf-8"
+        )
+        inputs = self.write_service_inputs()
+        source_paths = [*inputs, self.root / "sample.json", self.root / "response.txt"]
+        before = {path: path.read_bytes() for path in source_paths}
+        json_output = self.root / "report.json"
+        markdown_output = self.root / "report.md"
+
+        report = regression_main(
+            [
+                "--manifest",
+                str(inputs[0]),
+                "--strategy-config",
+                str(inputs[1]),
+                "--prompt",
+                str(inputs[3]),
+                "--gate-policy",
+                str(inputs[2]),
+                "--json-output",
+                str(json_output),
+                "--markdown-output",
+                str(markdown_output),
+            ]
+        )
+
+        persisted = json.loads(json_output.read_text(encoding="utf-8"))
+        self.assertEqual(report["summary_sha256"], persisted["summary_sha256"])
+        self.assertTrue(persisted["deterministic"])
+        markdown = markdown_output.read_text(encoding="utf-8")
+        self.assertIn("# soil3 Historical Regression Report", markdown)
+        self.assertIn("Gate decisions", markdown)
+        self.assertEqual(before, {path: path.read_bytes() for path in source_paths})
+        self.assertFalse(json_output.with_name("report.json.tmp").exists())
+        self.assertFalse(markdown_output.with_name("report.md.tmp").exists())
+
+    def test_live_provider_mode_is_explicit_and_marked_nondeterministic(self):
+        inputs = self.write_service_inputs(include_fixture=False)
+        json_output = self.root / "live-report.json"
+        markdown_output = self.root / "live-report.md"
+        content = json.dumps(self.strategy_response())
+        session = FakeSession(
+            FakeResponse(
+                200,
+                {
+                    "id": "request-1",
+                    "model": "test-model",
+                    "choices": [{"message": {"content": content}}],
+                    "usage": {"total_tokens": 42},
+                },
+            )
+        )
+
+        with mock.patch.dict("os.environ", {"CLOUD_STRATEGY_API_KEY": "secret"}):
+            report = regression_main(
+                [
+                    "--manifest",
+                    str(inputs[0]),
+                    "--strategy-config",
+                    str(inputs[1]),
+                    "--prompt",
+                    str(inputs[3]),
+                    "--gate-policy",
+                    str(inputs[2]),
+                    "--json-output",
+                    str(json_output),
+                    "--markdown-output",
+                    str(markdown_output),
+                    "--mode",
+                    "live-provider",
+                ],
+                session=session,
+            )
+
+        self.assertEqual("live-provider", report["mode"])
+        self.assertFalse(report["deterministic"])
+        self.assertEqual("completed", report["cases"][0]["status"])
+        self.assertEqual(1, len(session.calls))
+        self.assertIn("non-deterministic", markdown_output.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
