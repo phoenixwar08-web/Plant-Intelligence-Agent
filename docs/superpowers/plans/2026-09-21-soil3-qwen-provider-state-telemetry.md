@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - state.v1, Strategy validator, and Gate safety rules are frozen; do not modify their protocol or relax their checks.
-- Qwen model is qwen3.8-Flash, accessed only through the approved runtime workspace endpoint.
+- Qwen model is qwen3.8-flash, accessed only through the approved runtime workspace endpoint.
 - offline_fixture and qwen_dashscope are explicit modes; Qwen failure never silently selects the fixture.
 - The Qwen key exists only in an openEuler root-owned mode-0600 environment file and must never appear in source, test fixtures, runtime JSON, audit, Episode, command lines, or journal output.
 - The telemetry adapter is read-only. Empty, error, null, non-finite, or out-of-Phase3-range readings remain missing.
@@ -154,7 +154,7 @@ def test_qwen_mode_requires_complete_nonsecret_provider_config(self):
     value = self.runtime_config_value(root)
     value.update(provider_mode="qwen_dashscope", provider={
         "base_url": "https://workspace.example/api/v1",
-        "model": "qwen3.8-Flash",
+        "model": "qwen3.8-flash",
         "api_key_env": "QWEN_DASHSCOPE_API_KEY",
         "timeout_seconds": 30,
         "max_retries": 1,
@@ -169,7 +169,7 @@ def test_qwen_mode_requires_complete_nonsecret_provider_config(self):
 def test_qwen_failure_is_recorded_without_fixture_fallback(self):
     failed_chain = {
         "validation": {"accepted": False, "reason_codes": ["model_auth_failed"], "strategy": None},
-        "cloud": {"provider": "qwen_dashscope", "model": "qwen3.8-Flash"},
+        "cloud": {"provider": "qwen_dashscope", "model": "qwen3.8-flash"},
     }
     with mock.patch("services.soil3.agent_runtime.runtime_v1.run_chain",
                     return_value=failed_chain):
@@ -178,7 +178,7 @@ def test_qwen_failure_is_recorded_without_fixture_fallback(self):
     self.assertFalse((qwen_config.episode_dir).exists())
 ~~~
 
-Add a FakeSession client test asserting the post URL is base_url plus /chat/completions, the in-memory header uses Bearer secret, payload model is qwen3.8-Flash, response_format is JSON-object, and accepted strategy provenance is qwen_dashscope.
+Add a FakeSession client test asserting the post URL is base_url plus /chat/completions, the in-memory header uses Bearer secret, payload model is qwen3.8-flash, response_format is JSON-object, and accepted strategy provenance is qwen_dashscope.
 
 - [ ] **Step 2: Run focused tests and verify failure**
 
@@ -206,7 +206,7 @@ def strategy_config(self):
     }
 ~~~
 
-Add provider to the strict top-level runtime config field set. Require provider == {} for offline_fixture. For qwen_dashscope require exactly PROVIDER_FIELDS, a non-empty HTTPS base URL, model exactly qwen3.8-Flash, identifier-only api_key_env, finite positive timeout/max_tokens, non-negative retries, finite temperature, and boolean json_response_format. Reject any supplied secret-value field; api_key_env is a name, not a key.
+Add provider to the strict top-level runtime config field set. Require provider == {} for offline_fixture. For qwen_dashscope require exactly PROVIDER_FIELDS, a non-empty HTTPS base URL, model exactly qwen3.8-flash, identifier-only api_key_env, finite positive timeout/max_tokens, non-negative retries, finite temperature, and boolean json_response_format. Reject any supplied secret-value field; api_key_env is a name, not a key.
 
 Pass fixture_content only for offline_fixture. For Qwen rejection, append the existing audit, write a run record with selected provider mode, cloud provider/model, runner_status equal to not_started_provider_or_validation_failure, and execution flags false; then raise a stable RuntimeError. Do not evaluate Gate, create an Episode, or call Runner without accepted strategy.v1. On success, keep the validator and all execution fields unchanged, then evaluate Gate normally.
 
@@ -272,7 +272,7 @@ Add provider {} to the example fixture config. Add exactly this optional Environ
 EnvironmentFile=-/root/water/runtime/instances/soil3/agent_chain/secrets/qwen.env
 ~~~
 
-In the runtime README, show the Qwen runtime JSON field shape with provider_mode qwen_dashscope, approved workspace base_url, model qwen3.8-Flash, and an api_key_env name only. Specify these smoke safety commands:
+In the runtime README, show the Qwen runtime JSON field shape with provider_mode qwen_dashscope, approved workspace base_url, model qwen3.8-flash, and an api_key_env name only. Specify these smoke safety commands:
 
 ~~~bash
 install -d -m 700 /root/water/runtime/instances/soil3/agent_chain/secrets
@@ -329,7 +329,7 @@ Expected: only Tasks 1-3 files plus design/plan docs; no protocol, Gate, Phase3,
 
 Install the merged main release, stop only plant-agent-soil3-pipeline.timer, verify Phase3 and MQTT services stay active, install the secret outside the repository, set explicit qwen_dashscope runtime config, run one pipeline, and inspect state, strategy, Gate, run, audit, and Episode records.
 
-Expected: strategy/audit/run identify Qwen and qwen3.8-Flash; real humidity and soil_age_sec exist only if database returned a valid row; Gate records its actual decision; Gate deny skips Runner; every execution record says physical actions and Phase3 calls are false.
+Expected: strategy/audit/run identify Qwen and qwen3.8-flash; real humidity and soil_age_sec exist only if database returned a valid row; Gate records its actual decision; Gate deny skips Runner; every execution record says physical actions and Phase3 calls are false.
 
 - [ ] **Step 5: Enable a scheduled shadow cycle or explicitly roll back**
 

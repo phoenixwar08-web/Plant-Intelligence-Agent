@@ -382,7 +382,7 @@ class PipelineTests(StateProducerTests):
         value["provider_mode"] = "qwen_dashscope"
         value["provider"] = {
             "base_url": "https://workspace.example/api/v1",
-            "model": "qwen3.8-Flash",
+            "model": "qwen3.8-flash",
             "api_key_env": "QWEN_DASHSCOPE_API_KEY",
             "timeout_seconds": 30,
             "max_retries": 1,
@@ -408,6 +408,24 @@ class PipelineTests(StateProducerTests):
         self.assertEqual("qwen_dashscope", config.strategy_config()["provider"])
         self.assertNotIn("api_key", config.strategy_config())
 
+    def test_qwen_mode_requires_canonical_lowercase_model_identifier(self):
+        """Runtime config must preserve the provider's accepted Qwen model ID."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            canonical = self.qwen_runtime_config_value(root)
+            canonical["provider"]["model"] = "qwen3.8-flash"
+            config = RuntimeConfig.from_dict(canonical)
+            self.assertEqual("qwen3.8-flash", config.provider["model"])
+
+            legacy = self.qwen_runtime_config_value(root)
+            legacy["provider"]["model"] = "qwen3.8-Flash"
+            with self.assertRaisesRegex(
+                ValueError, "qwen provider configuration is invalid"
+            ):
+                RuntimeConfig.from_dict(legacy)
+
     def test_qwen_failure_is_persisted_without_fixture_fallback(self):
         """A Qwen failure is traceable and cannot become an offline proposal."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
@@ -415,7 +433,7 @@ class PipelineTests(StateProducerTests):
 
         failed_chain = {
             "chain_version": "cloud-strategy-chain.v1",
-            "cloud": {"provider": "qwen_dashscope", "model": "qwen3.8-Flash"},
+            "cloud": {"provider": "qwen_dashscope", "model": "qwen3.8-flash"},
             "failure": {
                 "code": "model_auth_failed",
                 "message": "model returned HTTP 401",
@@ -447,7 +465,7 @@ class PipelineTests(StateProducerTests):
             record = json.loads(records[0].read_text(encoding="utf-8"))
             self.assertEqual("qwen_dashscope", record["provider_mode"])
             self.assertEqual("qwen_dashscope", record["provider"])
-            self.assertEqual("qwen3.8-Flash", record["model"])
+            self.assertEqual("qwen3.8-flash", record["model"])
             self.assertEqual(
                 "not_started_provider_or_validation_failure",
                 record["runner_status"],
@@ -485,7 +503,7 @@ class PipelineTests(StateProducerTests):
             accepted_chain = {
                 "cloud": {
                     "provider": "qwen_dashscope",
-                    "model": "qwen3.8-Flash",
+                    "model": "qwen3.8-flash",
                 },
                 "validation": {
                     "accepted": True,
@@ -504,9 +522,9 @@ class PipelineTests(StateProducerTests):
 
             stored = json.loads(config.strategy_output.read_text(encoding="utf-8"))
             self.assertEqual("qwen_dashscope", stored["model"]["provider"])
-            self.assertEqual("qwen3.8-Flash", stored["model"]["name"])
+            self.assertEqual("qwen3.8-flash", stored["model"]["name"])
             self.assertEqual("qwen_dashscope", record.get("provider"))
-            self.assertEqual("qwen3.8-Flash", record.get("model"))
+            self.assertEqual("qwen3.8-flash", record.get("model"))
             self.assertEqual("deny", record["gate_decision"])
             self.assertEqual("skipped_due_to_gate_deny", record["runner_status"])
 

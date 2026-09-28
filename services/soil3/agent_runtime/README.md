@@ -114,8 +114,8 @@ JSON value.
 {
   "provider_mode": "qwen_dashscope",
   "provider": {
-    "base_url": "https://ws-d5yw23tz0yzwob1l.cn-beijing.maas.aliyuncs.com/api/v1",
-    "model": "qwen3.8-Flash",
+    "base_url": "https://ws-d5yw23tz0yzwob1l.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen3.8-flash",
     "api_key_env": "QWEN_DASHSCOPE_API_KEY",
     "timeout_seconds": 30,
     "max_retries": 1,
@@ -135,7 +135,7 @@ systemctl status --no-pager plant-agent-soil3-pipeline.service
 ~~~
 
 Acceptance requires a `strategy.v1` and audit that identify
-`qwen_dashscope` and `qwen3.8-Flash`, a `state.v1` that contains soil humidity
+`qwen_dashscope` and `qwen3.8-flash`, a `state.v1` that contains soil humidity
 and receive-time freshness only when the read-only openGauss query returned a
 valid row, Gate's actual decision, and a traceable Episode when validation
 succeeds. Gate `deny` must skip Runner. If Gate admits, Runner remains
