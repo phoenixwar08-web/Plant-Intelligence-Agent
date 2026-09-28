@@ -1,5 +1,7 @@
 import copy
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -9,6 +11,9 @@ from unittest import mock
 from services.soil3.cloud_gate.gate_v1 import GatePolicy
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION
 from services.soil3.state.state_v1 import StateBuilder
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 try:
@@ -575,6 +580,33 @@ class HistoricalRegressionServiceTests(_HistoricalRegressionFixture, unittest.Te
         self.assertEqual("completed", report["cases"][0]["status"])
         self.assertEqual(1, len(session.calls))
         self.assertIn("non-deterministic", markdown_output.read_text(encoding="utf-8"))
+
+
+class HistoricalRegressionBoundaryTests(unittest.TestCase):
+    def test_importing_regression_service_does_not_load_execution_modules(self):
+        script = """
+import json
+import sys
+import services.soil3.historical_regression.service
+forbidden = (
+    'services.soil3.runner',
+    'services.soil3.phase3_bridge',
+    'services.soil3.phase3',
+    'services.soil3.episode',
+    'services.soil3.trace',
+)
+print(json.dumps(sorted(name for name in sys.modules if name.startswith(forbidden))))
+"""
+
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual([], json.loads(completed.stdout))
 
 
 if __name__ == "__main__":
