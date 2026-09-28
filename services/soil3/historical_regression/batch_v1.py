@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from services.soil3.cloud_gate.gate_v1 import GatePolicy
+from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
+from services.soil3.cloud_strategy.service import run_chain
+
 
 MANIFEST_FIELDS = {"schema_version", "cases"}
 CASE_FIELDS = {"case_id", "replay_sample", "fixture_response", "labels"}
@@ -26,6 +30,7 @@ class BatchCase:
 class BatchManifest:
     schema_version: str
     path: Path
+    mode: str
     cases: tuple[BatchCase, ...]
 
 
@@ -110,7 +115,7 @@ def load_batch_manifest(path: Path, *, mode: str = "fixture") -> BatchManifest:
                 labels=tuple(labels),
             )
         )
-    return BatchManifest(value["schema_version"], path, tuple(cases))
+    return BatchManifest(value["schema_version"], path, mode, tuple(cases))
 
 
 def load_case_input(case: BatchCase) -> LoadedCaseInput:
@@ -135,3 +140,129 @@ def load_case_input(case: BatchCase) -> LoadedCaseInput:
         sample_sha256=hashlib.sha256(payload).hexdigest(),
         state=state,
     )
+
+
+def _case_error(case: BatchCase, code: str) -> dict[str, Any]:
+    return {
+        "case_id": case.case_id,
+        "labels": list(case.labels),
+        "status": "system_error",
+        "error_code": code,
+        "sample": None,
+        "strategy": None,
+        "gate": None,
+    }
+
+
+def _strategy_summary(chain: dict[str, Any]) -> dict[str, Any]:
+    validation = chain.get("validation")
+    if not isinstance(validation, dict):
+        validation = {}
+    strategy = validation.get("strategy")
+    actions = strategy.get("actions") if isinstance(strategy, dict) else None
+    failure = chain.get("failure")
+    parse_error = chain.get("parse_error")
+    return {
+        "accepted": validation.get("accepted") is True,
+        "reason_codes": list(validation.get("reason_codes") or []),
+        "failure_code": (
+            failure.get("code")
+            if isinstance(failure, dict)
+            else parse_error.get("code")
+            if isinstance(parse_error, dict)
+            else None
+        ),
+        "raw_response_sha256": chain.get("raw_model_response_sha256"),
+        "actions": actions if isinstance(actions, list) else [],
+        "strategy": strategy if isinstance(strategy, dict) else None,
+    }
+
+
+def _gate_summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": record.get("schema_version"),
+        "decision": record.get("decision"),
+        "reason_codes": list(record.get("reason_codes") or []),
+        "warning_codes": list(record.get("warning_codes") or []),
+        "strategy_sha256": record.get("strategy_sha256"),
+        "state_sha256": record.get("state_sha256"),
+        "budget": record.get("budget"),
+        "execution": record.get("execution"),
+    }
+
+
+def run_batch(
+    manifest: BatchManifest,
+    *,
+    strategy_config: dict[str, Any],
+    prompt: str,
+    gate_policy: GatePolicy,
+    session: Any = None,
+) -> dict[str, Any]:
+    """Run ordered cases through public Strategy and Gate v2 boundaries."""
+    results: list[dict[str, Any]] = []
+    for case in manifest.cases:
+        try:
+            loaded = load_case_input(case)
+        except (OSError, ValueError):
+            results.append(_case_error(case, "case_input_unavailable"))
+            continue
+
+        fixture_content = None
+        if manifest.mode == "fixture":
+            try:
+                if case.fixture_response_path is None:
+                    raise ValueError("fixture response is required")
+                fixture_content = case.fixture_response_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError, ValueError):
+                results.append(_case_error(case, "fixture_response_unavailable"))
+                continue
+
+        try:
+            chain = run_chain(
+                state=loaded.state,
+                config=strategy_config,
+                prompt=prompt,
+                fixture_content=fixture_content,
+                session=session,
+            )
+        except Exception:
+            results.append(_case_error(case, "strategy_chain_error"))
+            continue
+
+        strategy_summary = _strategy_summary(chain)
+        gate_summary = None
+        if strategy_summary["accepted"]:
+            try:
+                gate = evaluate_gate_v2(
+                    loaded.state,
+                    strategy_summary["strategy"],
+                    gate_policy,
+                    False,
+                    None,
+                )
+            except Exception:
+                results.append(_case_error(case, "gate_evaluation_error"))
+                continue
+            gate_summary = _gate_summary(gate)
+        results.append(
+            {
+                "case_id": case.case_id,
+                "labels": list(case.labels),
+                "status": "completed",
+                "error_code": None,
+                "sample": {
+                    "sample_id": loaded.sample_id,
+                    "sha256": loaded.sample_sha256,
+                    "path": str(case.replay_sample_path),
+                },
+                "strategy": strategy_summary,
+                "gate": gate_summary,
+            }
+        )
+    return {
+        "report_version": "historical_regression_report.v1",
+        "mode": manifest.mode,
+        "deterministic": manifest.mode == "fixture",
+        "cases": results,
+    }
