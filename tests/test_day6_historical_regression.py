@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import ast
 import json
 import subprocess
 import sys
@@ -33,9 +34,13 @@ except ImportError:
     run_batch = None
 
 try:
-    from services.soil3.historical_regression.service import main as regression_main
+    from services.soil3.historical_regression.service import (
+        main as regression_main,
+        render_markdown,
+    )
 except ImportError:
     regression_main = None
+    render_markdown = None
 
 
 SAFE_PHASE3_FLAGS = {
@@ -512,6 +517,13 @@ class HistoricalRegressionBatchTests(_HistoricalRegressionFixture, unittest.Test
         self.assertEqual(first["risky_cases"], second["risky_cases"])
         self.assertEqual(first["summary_sha256"], second["summary_sha256"])
         self.assertEqual(64, len(first["summary_sha256"]))
+        markdown = render_markdown(first)
+        denied_risk = next(
+            case for case in first["risky_cases"] if case["case_id"] == "deny-water"
+        )
+        self.assertIn(denied_risk["sample_sha256"], markdown)
+        self.assertIn(denied_risk["source"], markdown)
+        self.assertIn("water:7.0s", markdown)
 
     def test_gate_failure_retains_sample_and_strategy_evidence_and_continues(self):
         (self.root / "response.txt").write_text(
@@ -621,6 +633,61 @@ class HistoricalRegressionBatchTests(_HistoricalRegressionFixture, unittest.Test
             all(item["summary_sha256"] != baseline["summary_sha256"] for item in changed)
         )
 
+    def test_readable_invalid_inputs_keep_source_digests_in_error_evidence(self):
+        manifest = load_batch_manifest(self.write_manifest(self.valid_manifest()))
+        first_replay_bytes = b'{"schema_version":"broken-a"}'
+        (self.root / "sample.json").write_bytes(first_replay_bytes)
+
+        first = run_batch(
+            manifest,
+            strategy_config=self.strategy_config(),
+            prompt="prompt",
+            gate_policy=self.gate_policy(),
+        )
+
+        first_case = first["cases"][0]
+        self.assertEqual("case_input_unavailable", first_case["error_code"])
+        self.assertEqual(
+            hashlib.sha256(first_replay_bytes).hexdigest(),
+            first_case["sample"]["sha256"],
+        )
+        self.assertEqual(str(self.root / "sample.json"), first_case["sample"]["path"])
+
+        second_replay_bytes = b'{"schema_version":"broken-b"}'
+        (self.root / "sample.json").write_bytes(second_replay_bytes)
+        second = run_batch(
+            manifest,
+            strategy_config=self.strategy_config(),
+            prompt="prompt",
+            gate_policy=self.gate_policy(),
+        )
+        self.assertNotEqual(first["summary_sha256"], second["summary_sha256"])
+
+        (self.root / "sample.json").write_text(json.dumps(self.sample), encoding="utf-8")
+        first_fixture_bytes = b"\xffbroken-a"
+        (self.root / "response.txt").write_bytes(first_fixture_bytes)
+        invalid_fixture = run_batch(
+            manifest,
+            strategy_config=self.strategy_config(),
+            prompt="prompt",
+            gate_policy=self.gate_policy(),
+        )
+        self.assertEqual(
+            hashlib.sha256(first_fixture_bytes).hexdigest(),
+            invalid_fixture["cases"][0]["fixture_response_sha256"],
+        )
+
+        (self.root / "response.txt").write_bytes(b"\xffbroken-b")
+        changed_fixture = run_batch(
+            manifest,
+            strategy_config=self.strategy_config(),
+            prompt="prompt",
+            gate_policy=self.gate_policy(),
+        )
+        self.assertNotEqual(
+            invalid_fixture["summary_sha256"], changed_fixture["summary_sha256"]
+        )
+
 
 class HistoricalRegressionServiceTests(_HistoricalRegressionFixture, unittest.TestCase):
     def write_service_inputs(self, *, include_fixture=True):
@@ -691,6 +758,13 @@ class HistoricalRegressionServiceTests(_HistoricalRegressionFixture, unittest.Te
         self.assertIn("baseline-1", markdown)
         self.assertIn("replay-" + "a" * 24, markdown)
         self.assertIn(persisted["cases"][0]["sample"]["sha256"], markdown)
+        self.assertIn(persisted["cases"][0]["strategy"]["raw_response_sha256"], markdown)
+        self.assertIn("observe", markdown)
+        escaped_report = copy.deepcopy(persisted)
+        escaped_report["cases"][0]["case_id"] = "case|one\nrow"
+        escaped = render_markdown(escaped_report)
+        self.assertIn("case\\|one row", escaped)
+        self.assertNotIn("case|one\nrow", escaped)
         self.assertEqual(before, {path: path.read_bytes() for path in source_paths})
         self.assertFalse(json_output.with_name("report.json.tmp").exists())
         self.assertFalse(markdown_output.with_name("report.md.tmp").exists())
@@ -841,6 +915,33 @@ print(json.dumps(sorted(
         )
 
         self.assertEqual([], json.loads(completed.stdout))
+
+    def test_regression_modules_have_no_static_execution_chain_imports(self):
+        forbidden = (
+            "runner",
+            "phase3_bridge",
+            "phase3",
+            "episode",
+            "trace",
+            "mqtt",
+            "actuator",
+            "manual_water",
+        )
+        imported = []
+        for path in (
+            ROOT / "services" / "soil3" / "historical_regression" / "batch_v1.py",
+            ROOT / "services" / "soil3" / "historical_regression" / "service.py",
+        ):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported.extend(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported.append(node.module)
+        violations = [
+            name for name in imported if any(token in name.lower() for token in forbidden)
+        ]
+        self.assertEqual([], violations)
 
 
 if __name__ == "__main__":

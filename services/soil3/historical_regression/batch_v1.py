@@ -144,6 +144,10 @@ def load_batch_manifest(path: Path, *, mode: str = "fixture") -> BatchManifest:
 def load_case_input(case: BatchCase) -> LoadedCaseInput:
     """Load and validate one case so malformed samples remain case-local."""
     payload = case.replay_sample_path.read_bytes()
+    return _load_case_payload(case, payload)
+
+
+def _load_case_payload(case: BatchCase, payload: bytes) -> LoadedCaseInput:
     sample = _object_from_bytes(payload, name="replay sample")
     _validate_replay_sample(sample)
     sample_id = sample.get("sample_id")
@@ -225,21 +229,21 @@ def _case_error(
     strategy: dict[str, Any] | None = None,
     gate: dict[str, Any] | None = None,
     fixture_response_sha256: str | None = None,
+    sample_sha256: str | None = None,
+    sample_id: str | None = None,
 ) -> dict[str, Any]:
+    known_sample_sha256 = loaded.sample_sha256 if loaded is not None else sample_sha256
+    known_sample_id = loaded.sample_id if loaded is not None else sample_id
     return {
         "case_id": case.case_id,
         "labels": list(case.labels),
         "status": "system_error",
         "error_code": code,
-        "sample": (
-            {
-                "sample_id": loaded.sample_id,
-                "sha256": loaded.sample_sha256,
-                "path": str(case.replay_sample_path),
-            }
-            if loaded is not None
-            else None
-        ),
+        "sample": {
+            "sample_id": known_sample_id,
+            "sha256": known_sample_sha256,
+            "path": str(case.replay_sample_path),
+        },
         "strategy": strategy,
         "gate": gate,
         "fixture_response_sha256": fixture_response_sha256,
@@ -515,9 +519,21 @@ def run_batch(
     results: list[dict[str, Any]] = []
     for case in manifest.cases:
         try:
-            loaded = load_case_input(case)
-        except (OSError, ValueError):
+            sample_payload = case.replay_sample_path.read_bytes()
+        except OSError:
             results.append(_case_error(case, "case_input_unavailable"))
+            continue
+        sample_sha256 = hashlib.sha256(sample_payload).hexdigest()
+        try:
+            loaded = _load_case_payload(case, sample_payload)
+        except ValueError:
+            results.append(
+                _case_error(
+                    case,
+                    "case_input_unavailable",
+                    sample_sha256=sample_sha256,
+                )
+            )
             continue
 
         fixture_content = None
@@ -531,7 +547,12 @@ def run_batch(
                 fixture_content = fixture_payload.decode("utf-8")
             except (OSError, UnicodeError, ValueError):
                 results.append(
-                    _case_error(case, "fixture_response_unavailable", loaded=loaded)
+                    _case_error(
+                        case,
+                        "fixture_response_unavailable",
+                        loaded=loaded,
+                        fixture_response_sha256=fixture_response_sha256,
+                    )
                 )
                 continue
 

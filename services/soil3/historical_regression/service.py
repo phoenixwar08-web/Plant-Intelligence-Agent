@@ -65,6 +65,36 @@ def _append_counter(
         lines.append(f"{indent}- `{key}`: {count}")
 
 
+def _cell(value: Any) -> str:
+    return (
+        str(value)
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .replace("|", "\\|")
+        .replace("`", "\\`")
+    )
+
+
+def _action_summary(actions: list[Any]) -> str:
+    rendered = []
+    for action in actions:
+        if not isinstance(action, dict):
+            rendered.append("invalid")
+            continue
+        action_type = str(action.get("type") or "unknown")
+        if action_type == "water":
+            seconds = action.get("pump_seconds")
+            value = float(seconds) if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else seconds
+            rendered.append(f"water:{value}s")
+        elif action_type == "wait":
+            seconds = action.get("seconds")
+            value = float(seconds) if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else seconds
+            rendered.append(f"wait:{value}s")
+        else:
+            rendered.append(action_type)
+    return ", ".join(rendered) or "none"
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     statistics = report["statistics"]
     cases = statistics["cases"]
@@ -118,8 +148,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Case results",
             "",
-            "| Case | Status | Sample evidence | Fixture/response digest | Strategy | Gate | Evidence |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| Case | Status | Sample evidence | Fixture digest | Raw response digest | Strategy | Actions | Gate | Evidence |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for case in report["cases"]:
@@ -144,20 +174,23 @@ def render_markdown(report: dict[str, Any]) -> str:
             evidence.append(case["error_code"])
         sample_evidence = "unavailable"
         if sample:
-            sample_evidence = "{sample_id}; `{sha}`; `{path}`".format(
-                sample_id=sample.get("sample_id"),
-                sha=sample.get("sha256"),
-                path=sample.get("path"),
+            sample_evidence = "{sample_id}; {sha}; {path}".format(
+                sample_id=sample.get("sample_id") or "unavailable",
+                sha=sample.get("sha256") or "unavailable",
+                path=sample.get("path") or "unavailable",
             )
+        actions = strategy_result.get("actions") or strategy_result.get("proposed_actions") or []
         lines.append(
-            "| {case_id} | {status} | {sample} | `{fixture}` | {strategy} | {gate} | {evidence} |".format(
-                case_id=case["case_id"],
-                status=case["status"],
-                sample=sample_evidence,
-                fixture=case.get("fixture_response_sha256") or "unavailable",
-                strategy=strategy_label,
-                gate=gate.get("decision") or "not_run",
-                evidence=", ".join(evidence) or "none",
+            "| {case_id} | {status} | {sample} | {fixture} | {raw} | {strategy} | {actions} | {gate} | {evidence} |".format(
+                case_id=_cell(case["case_id"]),
+                status=_cell(case["status"]),
+                sample=_cell(sample_evidence),
+                fixture=_cell(case.get("fixture_response_sha256") or "unavailable"),
+                raw=_cell(strategy_result.get("raw_response_sha256") or "unavailable"),
+                strategy=_cell(strategy_label),
+                actions=_cell(_action_summary(actions)),
+                gate=_cell(gate.get("decision") or "not_run"),
+                evidence=_cell(", ".join(evidence) or "none"),
             )
         )
 
@@ -168,8 +201,8 @@ def render_markdown(report: dict[str, Any]) -> str:
     else:
         lines.extend(
             [
-                "| Case | Sample | Risk codes | Validator / Gate evidence |",
-                "| --- | --- | --- | --- |",
+                "| Case | Sample | Sample SHA-256 | Source | Risk codes | Validator / Gate evidence |",
+                "| --- | --- | --- | --- | --- | --- |",
             ]
         )
         for case in risky_cases:
@@ -181,11 +214,13 @@ def render_markdown(report: dict[str, Any]) -> str:
             if case.get("error_code"):
                 evidence.append(case["error_code"])
             lines.append(
-                "| {case} | {sample} | {risks} | {evidence} |".format(
-                    case=case["case_id"],
-                    sample=case.get("sample_id") or "unavailable",
-                    risks=", ".join(case["risk_codes"]),
-                    evidence=", ".join(evidence) or "none",
+                "| {case} | {sample} | {sha} | {source} | {risks} | {evidence} |".format(
+                    case=_cell(case["case_id"]),
+                    sample=_cell(case.get("sample_id") or "unavailable"),
+                    sha=_cell(case.get("sample_sha256") or "unavailable"),
+                    source=_cell(case.get("source") or "unavailable"),
+                    risks=_cell(", ".join(case["risk_codes"])),
+                    evidence=_cell(", ".join(evidence) or "none"),
                 )
             )
     if not report["deterministic"]:
