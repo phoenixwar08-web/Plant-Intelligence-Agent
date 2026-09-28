@@ -33,7 +33,7 @@ def reference(schema_version, path, record_id=None):
 def model_metrics(**overrides):
     value = {
         "provider": "qwen_dashscope",
-        "model": "qwen3.8-Flash",
+        "model": "qwen3.8-flash",
         "token_usage": {"source": "provider_response.usage", "value": 123, "unit": "tokens"},
         "cost": {"source": "provider_response.billing", "value": 0.0125, "unit": "CNY"},
         "latency": {"source": "runtime_monotonic_clock", "value": 842, "unit": "ms"},

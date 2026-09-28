@@ -63,7 +63,7 @@ def runtime_config(root, *, provider_mode="offline_fixture"):
     if provider_mode == "qwen_dashscope":
         provider = {
             "base_url": "https://provider.example/v1",
-            "model": "qwen3.8-Flash",
+            "model": "qwen3.8-flash",
             "api_key_env": "QWEN_DASHSCOPE_API_KEY",
             "timeout_seconds": 30,
             "max_retries": 0,
@@ -111,7 +111,7 @@ class ProviderResponse:
             return {"error": {"message": "provider failure"}}
         return {
             "id": "day5-fault-request",
-            "model": "qwen3.8-Flash",
+            "model": "qwen3.8-flash",
             "choices": [{"message": {"content": self.content}}],
             "usage": {"total_tokens": 12},
         }

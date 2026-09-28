@@ -129,7 +129,7 @@ class RuntimeConfig:
                 or not provider["base_url"].startswith("https://")
                 or not isinstance(provider["api_key_env"], str)
                 or not provider["api_key_env"].isidentifier()
-                or provider["model"] != "qwen3.8-Flash"
+                or provider["model"] != "qwen3.8-flash"
                 or isinstance(provider["timeout_seconds"], bool)
                 or not isinstance(provider["timeout_seconds"], (int, float))
                 or not isfinite(float(provider["timeout_seconds"]))

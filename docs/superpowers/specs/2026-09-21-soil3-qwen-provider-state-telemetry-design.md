@@ -31,7 +31,7 @@ strategy and pipeline record carries the selected provider mode, provider name,
 and model so the source is independently traceable.
 
 The configured endpoint is an explicit workspace endpoint, supplied at runtime
-only.  The model identifier is `qwen3.8-Flash`.  The normal strategy prompt,
+only.  The model identifier is `qwen3.8-flash`.  The normal strategy prompt,
 `strategy.v1` builder, and validator remain the only proposal construction and
 validation path.  Qwen output has no execution permission.
 
