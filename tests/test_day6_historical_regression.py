@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -295,6 +296,153 @@ class HistoricalRegressionBatchTests(_HistoricalRegressionFixture, unittest.Test
         self.assertEqual("system_error", report["cases"][0]["status"])
         self.assertEqual("case_input_unavailable", report["cases"][0]["error_code"])
         self.assertEqual("completed", report["cases"][1]["status"])
+
+    def test_statistics_risky_cases_and_digest_are_reproducible(self):
+        manifest_cases = []
+
+        def add_case(case_id, state, response):
+            sample_path = self.root / f"{case_id}-sample.json"
+            response_path = self.root / f"{case_id}-response.txt"
+            sample = dict(self.sample, sample_id=f"replay-{case_id}", state=state)
+            sample_path.write_text(json.dumps(sample), encoding="utf-8")
+            response_path.write_text(
+                response if isinstance(response, str) else json.dumps(response),
+                encoding="utf-8",
+            )
+            manifest_cases.append(
+                {
+                    "case_id": case_id,
+                    "replay_sample": sample_path.name,
+                    "fixture_response": response_path.name,
+                }
+            )
+
+        allow_state = copy.deepcopy(self.state)
+        add_case(
+            "allow-water",
+            allow_state,
+            self.strategy_response(
+                [{"action_id": "water", "type": "water", "pump_seconds": 5}]
+            ),
+        )
+
+        warning_state = copy.deepcopy(self.state)
+        warning_state["data_quality"]["soil_age_sec"] = 900
+        add_case(
+            "warning-water",
+            warning_state,
+            self.strategy_response(
+                [{"action_id": "water", "type": "water", "pump_seconds": 6}]
+            ),
+        )
+
+        deny_state = copy.deepcopy(self.state)
+        deny_state["safety"]["flags"]["sensor_fault"] = {"active": True}
+        add_case(
+            "deny-water",
+            deny_state,
+            self.strategy_response(
+                [{"action_id": "water", "type": "water", "pump_seconds": 7}]
+            ),
+        )
+
+        add_case(
+            "rejected-water",
+            copy.deepcopy(self.state),
+            self.strategy_response(
+                [{"action_id": "water", "type": "water", "pump_seconds": 121}]
+            ),
+        )
+        add_case("invalid-json", copy.deepcopy(self.state), "not-json")
+        manifest_cases.append(
+            {
+                "case_id": "missing-input",
+                "replay_sample": "does-not-exist.json",
+                "fixture_response": "allow-water-response.txt",
+            }
+        )
+        manifest = load_batch_manifest(
+            self.write_manifest(
+                {
+                    "schema_version": "historical_regression_manifest.v1",
+                    "cases": manifest_cases,
+                }
+            )
+        )
+
+        first = run_batch(
+            manifest,
+            strategy_config=self.strategy_config(),
+            prompt="Return strategy.v1 JSON",
+            gate_policy=self.gate_policy(),
+        )
+        second = run_batch(
+            manifest,
+            strategy_config=self.strategy_config(),
+            prompt="Return strategy.v1 JSON",
+            gate_policy=self.gate_policy(),
+        )
+
+        self.assertEqual(
+            {"total": 6, "completed": 5, "system_error": 1},
+            first["statistics"]["cases"],
+        )
+        self.assertEqual(
+            {"accepted": 3, "rejected": 2}, first["statistics"]["strategy"]
+        )
+        self.assertEqual(
+            {"action[0]:pump_seconds_extreme": 1, "invalid_model_json": 1},
+            first["statistics"]["validator_reason_codes"],
+        )
+        self.assertEqual(
+            {
+                "type_counts": {"water": 3},
+                "count_distribution": {"1": 3},
+                "proposed_water_seconds": 18.0,
+            },
+            first["statistics"]["actions"],
+        )
+        self.assertEqual(
+            {"allow": 1, "allow_with_warning": 1, "deny": 1},
+            first["statistics"]["gate_decisions"],
+        )
+        self.assertEqual(
+            {"safety_flag_active:sensor_fault": 1},
+            first["statistics"]["gate_reason_codes"],
+        )
+        self.assertEqual(
+            {"soil_data_age_warning": 1},
+            first["statistics"]["gate_warning_codes"],
+        )
+        self.assertEqual(
+            {"invalid_model_json": 1}, first["statistics"]["model_failures"]
+        )
+        self.assertEqual(
+            {"case_input_unavailable": 1}, first["statistics"]["system_errors"]
+        )
+        self.assertEqual(
+            [
+                "warning-water",
+                "deny-water",
+                "rejected-water",
+                "invalid-json",
+                "missing-input",
+            ],
+            [case["case_id"] for case in first["risky_cases"]],
+        )
+        risk_codes = {case["case_id"]: case["risk_codes"] for case in first["risky_cases"]}
+        self.assertEqual(["water_strategy_gate_warning"], risk_codes["warning-water"])
+        self.assertEqual(
+            ["gate_safety_denied", "water_strategy_gate_denied"],
+            risk_codes["deny-water"],
+        )
+        self.assertEqual(["water_strategy_rejected"], risk_codes["rejected-water"])
+        self.assertEqual(["model_error"], risk_codes["invalid-json"])
+        self.assertEqual(["system_error"], risk_codes["missing-input"])
+        self.assertEqual(first["statistics"], second["statistics"])
+        self.assertEqual(first["risky_cases"], second["risky_cases"])
+        self.assertEqual(first["summary_sha256"], second["summary_sha256"])
+        self.assertEqual(64, len(first["summary_sha256"]))
 
 
 if __name__ == "__main__":
