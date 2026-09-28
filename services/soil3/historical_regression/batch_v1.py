@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections import Counter
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,17 @@ from services.soil3.cloud_strategy.service import parse_model_json, run_chain
 MANIFEST_FIELDS = {"schema_version", "cases"}
 CASE_FIELDS = {"case_id", "replay_sample", "fixture_response", "labels"}
 SUPPORTED_MODES = {"fixture", "live-provider"}
+REPLAY_SAMPLE_FIELDS = {
+    "schema_version",
+    "sample_id",
+    "device_code",
+    "replay_at",
+    "state",
+    "source_summary",
+    "fact_digest",
+    "fact_window",
+    "source_policy",
+}
 
 
 @dataclass(frozen=True)
@@ -32,6 +45,7 @@ class BatchCase:
 class BatchManifest:
     schema_version: str
     path: Path
+    sha256: str
     mode: str
     cases: tuple[BatchCase, ...]
 
@@ -68,7 +82,8 @@ def load_batch_manifest(path: Path, *, mode: str = "fixture") -> BatchManifest:
     if mode not in SUPPORTED_MODES:
         raise ValueError("mode must be fixture or live-provider")
     path = Path(path).resolve()
-    value = _object_from_bytes(path.read_bytes(), name="manifest")
+    payload = path.read_bytes()
+    value = _object_from_bytes(payload, name="manifest")
     if set(value) != MANIFEST_FIELDS:
         raise ValueError("manifest fields are invalid")
     if value.get("schema_version") != "historical_regression_manifest.v1":
@@ -117,18 +132,21 @@ def load_batch_manifest(path: Path, *, mode: str = "fixture") -> BatchManifest:
                 labels=tuple(labels),
             )
         )
-    return BatchManifest(value["schema_version"], path, mode, tuple(cases))
+    return BatchManifest(
+        value["schema_version"],
+        path,
+        hashlib.sha256(payload).hexdigest(),
+        mode,
+        tuple(cases),
+    )
 
 
 def load_case_input(case: BatchCase) -> LoadedCaseInput:
     """Load and validate one case so malformed samples remain case-local."""
     payload = case.replay_sample_path.read_bytes()
     sample = _object_from_bytes(payload, name="replay sample")
-    if sample.get("schema_version") != "replay_sample.v1":
-        raise ValueError("case input must be replay_sample.v1")
+    _validate_replay_sample(sample)
     sample_id = sample.get("sample_id")
-    if not isinstance(sample_id, str) or not sample_id.strip():
-        raise ValueError("replay sample_id must be a non-empty string")
     state = sample.get("state")
     if (
         not isinstance(state, dict)
@@ -144,15 +162,87 @@ def load_case_input(case: BatchCase) -> LoadedCaseInput:
     )
 
 
-def _case_error(case: BatchCase, code: str) -> dict[str, Any]:
+def _valid_datetime(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _validate_replay_sample(sample: dict[str, Any]) -> None:
+    valid = set(sample) == REPLAY_SAMPLE_FIELDS
+    valid = valid and sample.get("schema_version") == "replay_sample.v1"
+    valid = valid and sample.get("device_code") == "soil3"
+    valid = valid and isinstance(sample.get("sample_id"), str)
+    valid = valid and re.fullmatch(
+        r"replay-[0-9a-f]{24}", sample.get("sample_id", "")
+    ) is not None
+    valid = valid and _valid_datetime(sample.get("replay_at"))
+    valid = valid and isinstance(sample.get("source_summary"), dict)
+    valid = valid and isinstance(sample.get("fact_digest"), str)
+    valid = valid and re.fullmatch(
+        r"[0-9a-f]{64}", sample.get("fact_digest", "")
+    ) is not None
+
+    state = sample.get("state")
+    valid = valid and isinstance(state, dict)
+    valid = valid and {"schema_version", "device_code", "generated_at"} <= set(state or {})
+    valid = valid and (state or {}).get("schema_version") == "state.v1"
+    valid = valid and (state or {}).get("device_code") == "soil3"
+
+    fact_window = sample.get("fact_window")
+    valid = valid and isinstance(fact_window, dict)
+    valid = valid and {
+        "first_sensor_at",
+        "last_sensor_at",
+        "sensor_count",
+        "watering_count",
+    } <= set(fact_window or {})
+
+    policy = sample.get("source_policy")
+    valid = valid and isinstance(policy, dict)
+    valid = valid and {
+        "cutoff_inclusive",
+        "future_data_excluded",
+        "source_timezone",
+    } <= set(policy or {})
+    valid = valid and (policy or {}).get("cutoff_inclusive") is True
+    valid = valid and (policy or {}).get("future_data_excluded") is True
+    valid = valid and isinstance((policy or {}).get("source_timezone"), str)
+    valid = valid and bool((policy or {}).get("source_timezone", "").strip())
+    if not valid:
+        raise ValueError("case input must satisfy replay_sample.v1")
+
+
+def _case_error(
+    case: BatchCase,
+    code: str,
+    *,
+    loaded: LoadedCaseInput | None = None,
+    strategy: dict[str, Any] | None = None,
+    gate: dict[str, Any] | None = None,
+    fixture_response_sha256: str | None = None,
+) -> dict[str, Any]:
     return {
         "case_id": case.case_id,
         "labels": list(case.labels),
         "status": "system_error",
         "error_code": code,
-        "sample": None,
-        "strategy": None,
-        "gate": None,
+        "sample": (
+            {
+                "sample_id": loaded.sample_id,
+                "sha256": loaded.sample_sha256,
+                "path": str(case.replay_sample_path),
+            }
+            if loaded is not None
+            else None
+        ),
+        "strategy": strategy,
+        "gate": gate,
+        "fixture_response_sha256": fixture_response_sha256,
     }
 
 
@@ -303,10 +393,20 @@ def _risk_entry(result: dict[str, Any]) -> dict[str, Any] | None:
 def _statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
     completed = [result for result in results if result.get("status") == "completed"]
     errors = [result for result in results if result.get("status") == "system_error"]
-    strategies = [result["strategy"] for result in completed if isinstance(result.get("strategy"), dict)]
+    strategies = [result["strategy"] for result in results if isinstance(result.get("strategy"), dict)]
     accepted = [strategy for strategy in strategies if strategy.get("accepted") is True]
-    gates = [result["gate"] for result in completed if isinstance(result.get("gate"), dict)]
+    gates = [result["gate"] for result in results if isinstance(result.get("gate"), dict)]
     actions = [action for strategy in accepted for action in strategy.get("actions", [])]
+    gate_decisions = {"allow": 0, "allow_with_warning": 0, "deny": 0}
+    gate_decisions.update(
+        _counter(
+            [
+                gate.get("decision")
+                for gate in gates
+                if isinstance(gate.get("decision"), str)
+            ]
+        )
+    )
     return {
         "cases": {
             "total": len(results),
@@ -327,9 +427,7 @@ def _statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
             "count_distribution": _counter([str(len(strategy.get("actions", []))) for strategy in accepted]),
             "proposed_water_seconds": _water_seconds(actions),
         },
-        "gate_decisions": _counter(
-            [gate.get("decision") for gate in gates if isinstance(gate.get("decision"), str)]
-        ),
+        "gate_decisions": gate_decisions,
         "gate_reason_codes": _counter(
             [code for gate in gates for code in gate.get("reason_codes", [])]
         ),
@@ -347,6 +445,7 @@ def _statistics(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _stable_projection(
     mode: str,
+    input_digests: dict[str, str],
     results: list[dict[str, Any]],
     statistics: dict[str, Any],
     risky_cases: list[dict[str, Any]],
@@ -363,9 +462,11 @@ def _stable_projection(
                 "error_code": result.get("error_code"),
                 "sample_id": sample.get("sample_id"),
                 "sample_sha256": sample.get("sha256"),
+                "fixture_response_sha256": result.get("fixture_response_sha256"),
                 "strategy_accepted": strategy.get("accepted"),
                 "validator_reason_codes": strategy.get("reason_codes", []),
                 "failure_code": strategy.get("failure_code"),
+                "raw_response_sha256": strategy.get("raw_response_sha256"),
                 "actions": strategy.get("actions", []),
                 "gate_decision": gate.get("decision"),
                 "gate_reason_codes": gate.get("reason_codes", []),
@@ -375,6 +476,7 @@ def _stable_projection(
     stable_risks = [{key: value for key, value in risk.items() if key != "source"} for risk in risky_cases]
     return {
         "mode": mode,
+        "input_digests": input_digests,
         "cases": stable_cases,
         "statistics": statistics,
         "risky_cases": stable_risks,
@@ -390,6 +492,26 @@ def run_batch(
     session: Any = None,
 ) -> dict[str, Any]:
     """Run ordered cases through public Strategy and Gate v2 boundaries."""
+    canonical_config = json.dumps(
+        strategy_config, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    canonical_policy = json.dumps(
+        {
+            "warning_age_seconds": gate_policy.warning_age_seconds,
+            "deny_age_seconds": gate_policy.deny_age_seconds,
+            "window_seconds": gate_policy.window_seconds,
+            "max_exploration_water_seconds": gate_policy.max_exploration_water_seconds,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    input_digests = {
+        "manifest": manifest.sha256,
+        "strategy_config": hashlib.sha256(canonical_config).hexdigest(),
+        "prompt": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "gate_policy": hashlib.sha256(canonical_policy).hexdigest(),
+    }
     results: list[dict[str, Any]] = []
     for case in manifest.cases:
         try:
@@ -399,13 +521,18 @@ def run_batch(
             continue
 
         fixture_content = None
+        fixture_response_sha256 = None
         if manifest.mode == "fixture":
             try:
                 if case.fixture_response_path is None:
                     raise ValueError("fixture response is required")
-                fixture_content = case.fixture_response_path.read_text(encoding="utf-8")
+                fixture_payload = case.fixture_response_path.read_bytes()
+                fixture_response_sha256 = hashlib.sha256(fixture_payload).hexdigest()
+                fixture_content = fixture_payload.decode("utf-8")
             except (OSError, UnicodeError, ValueError):
-                results.append(_case_error(case, "fixture_response_unavailable"))
+                results.append(
+                    _case_error(case, "fixture_response_unavailable", loaded=loaded)
+                )
                 continue
 
         try:
@@ -416,11 +543,18 @@ def run_batch(
                 fixture_content=fixture_content,
                 session=session,
             )
+            strategy_summary = _strategy_summary(chain)
         except Exception:
-            results.append(_case_error(case, "strategy_chain_error"))
+            results.append(
+                _case_error(
+                    case,
+                    "strategy_chain_error",
+                    loaded=loaded,
+                    fixture_response_sha256=fixture_response_sha256,
+                )
+            )
             continue
 
-        strategy_summary = _strategy_summary(chain)
         validated_strategy = strategy_summary.pop("strategy")
         gate_summary = None
         if strategy_summary["accepted"]:
@@ -432,10 +566,18 @@ def run_batch(
                     False,
                     None,
                 )
+                gate_summary = _gate_summary(gate)
             except Exception:
-                results.append(_case_error(case, "gate_evaluation_error"))
+                results.append(
+                    _case_error(
+                        case,
+                        "gate_evaluation_error",
+                        loaded=loaded,
+                        strategy=strategy_summary,
+                        fixture_response_sha256=fixture_response_sha256,
+                    )
+                )
                 continue
-            gate_summary = _gate_summary(gate)
         results.append(
             {
                 "case_id": case.case_id,
@@ -449,11 +591,14 @@ def run_batch(
                 },
                 "strategy": strategy_summary,
                 "gate": gate_summary,
+                "fixture_response_sha256": fixture_response_sha256,
             }
         )
     statistics = _statistics(results)
     risky_cases = [risk for result in results if (risk := _risk_entry(result)) is not None]
-    stable = _stable_projection(manifest.mode, results, statistics, risky_cases)
+    stable = _stable_projection(
+        manifest.mode, input_digests, results, statistics, risky_cases
+    )
     summary_sha256 = hashlib.sha256(
         json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -461,6 +606,7 @@ def run_batch(
         "report_version": "historical_regression_report.v1",
         "mode": manifest.mode,
         "deterministic": manifest.mode == "fixture",
+        "input_digests": input_digests,
         "cases": results,
         "statistics": statistics,
         "risky_cases": risky_cases,

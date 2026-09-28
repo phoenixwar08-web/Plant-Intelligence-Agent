@@ -30,8 +30,10 @@ resolved from the manifest file:
 ```
 
 `case_id` values must be unique. Each Replay file must contain a soil3
-`state.v1`. Fixture mode requires one captured model response per case. Labels
-are descriptive metadata only and do not affect Strategy or Gate decisions.
+`state.v1` and satisfy the complete frozen `replay_sample.v1` schema boundary,
+including its sample ID, source summary, fact digest/window, and no-future-data
+policy. Fixture mode requires one captured model response per case. Labels are
+descriptive metadata only and do not affect Strategy or Gate decisions.
 
 ## Reproducible fixture run
 
@@ -50,6 +52,11 @@ upstream timestamps and random run/Gate identifiers while retaining sample
 digests, validation results, action summaries, Gate decisions, reason codes,
 and error codes. Re-running unchanged inputs therefore produces the same
 statistics, risky-case list, and `summary_sha256`.
+
+The stable identity binds SHA-256 digests of the manifest, canonical Strategy
+configuration, prompt, canonical Gate policy, every Replay sample, and each
+fixture response. A change to any deterministic input therefore changes the
+summary digest even when the reduced Gate decision happens to stay the same.
 
 ## Optional live-provider run
 
@@ -81,5 +88,8 @@ model/system errors that prevent a safe admission conclusion.
 
 Malformed case inputs are recorded and the next case continues. Invalid
 batch-level manifest, Strategy config, prompt, or Gate policy inputs stop the
-run before case processing. Input files are opened read-only; only the two
-explicitly named output paths are atomically replaced.
+run before case processing. Input files are opened read-only. The two output
+paths must be distinct and may not resolve to the manifest, configuration,
+prompt, policy, Replay, or fixture files. Outputs use exclusive random temporary
+files in their destination directories and atomically replace only the two
+explicitly named report paths.
