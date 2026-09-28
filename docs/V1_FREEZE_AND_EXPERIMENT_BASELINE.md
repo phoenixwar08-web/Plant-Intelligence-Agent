@@ -6,20 +6,20 @@
 （Issue #25）结果。协议状态与边界的权威来源始终是
 `docs/PROTOCOLS_AND_BOUNDARIES.md`；本文与它冲突时以它为准。
 
-- 登记日期：2026-09-23
-- Git 基线点：`main` @ `65ae5ce26002cb7dd6b59fff5ebeccdae5367c1d`
-  （2026-09-22 16:34 +0800，Merge PR #47；这是 Day 5 开始前、包含
-  Gate v2 / Experience Retrieval / Phase3 Bridge 的最新 `main`）
+- 登记日期：2026-09-28
+- Git 基线点：`main` @ `6e00198f38e0f4df176d8e0b09b0ec1a34dd2d30`
+  （2026-09-28 14:28 +0800，Merge PR #56；这是包含 Day 5 Trace、
+  完整 Shadow 集成、故障安全测试及 Qwen 规范模型标识的最新 `main`）
 - 基线含义：本登记把上述 commit 处的各 v1 协议契约登记为后续实验、
   数据积累与本地小模型训练所依赖的 **V1 基线冻结点**。基线点之后对
   implemented 协议的任何改动，仍须走 `PROTOCOLS_AND_BOUNDARIES.md`
   规定的显式协议变更提案流程（版本/兼容处理 + 生产者与消费者清点），
   并由 Owner 决定是否将其正式转为 frozen 状态。本 Issue 不改变任何
   协议的状态列。
-- Day 5 的 Trace、完整 Shadow 集成和故障安全测试尚未进入 `main`，因此
-  本文当前是 **Day 5 合并前的候选冻结登记**。只有 PR #50、#51、#53
-  按固定顺序合并并由 Owner 复核后，才能把合并后的 `main` commit 登记为
-  Day 1–5 的正式实验基线；不得把本 commit 描述为 Day 5 已冻结。
+- Day 5 的 PR #50（Trace）、#51（完整 Shadow 集成）、#53（故障安全测试）
+  已按固定顺序合入 `main`（merge commits `e218200`、`f2135b4`、
+  `dc39352`）。本文据此登记 Day 1–5 的正式实验基线；这只是基线登记，
+  不会把权威协议表中仍为 implemented 的协议改称 frozen。
 
 ## 1. V1 协议登记
 
@@ -52,9 +52,9 @@ Issue #26 要求登记的六个协议，截至基线点的实际状态：
 
 | 项 | 登记值 | 来源 / 追溯 |
 | --- | --- | --- |
-| Git 基线（仓库） | `main` = `65ae5ce26002cb7dd6b59fff5ebeccdae5367c1d`（2026-09-22） | `git log origin/main`。 |
+| Git 基线（仓库） | `main` = `6e00198f38e0f4df176d8e0b09b0ec1a34dd2d30`（2026-09-28） | `git log origin/main`。 |
 | Git 基线（板端部署） | release revision `f8fcd5f9d37c0575a420d0beaa404627529f7f7a`（2026-09-21 部署核验） | `docs/OPEN_EULER_RUNTIME_RUNBOOK.md`；部署点早于基线点，后续发布前须核对 `REVISION` 文件。 |
-| Cloud model（策略 shadow 链） | provider_mode `qwen_dashscope`；model `qwen3.8-Flash`；base_url `https://ws-d5yw23tz0yzwob1l.cn-beijing.maas.aliyuncs.com/api/v1`；temperature 0、max_tokens 1200、json_response_format true、timeout 30s、max_retries 1 | `services/soil3/agent_runtime/README.md`（`c94dc2a`，PR #43）。API key 只在板端 `secrets/qwen.env`（0600），不入 Git。发布默认 `provider_mode=offline_fixture`（`config/soil3_agent_runtime.example.json`）；`config/cloud_strategy.example.json` 为 `enabled=false` + `MODEL_ID` 占位。 |
+| Cloud model（策略 shadow 链） | provider_mode `qwen_dashscope`；model `qwen3.8-flash`；base_url `https://ws-d5yw23tz0yzwob1l.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`；temperature 0、max_tokens 1200、json_response_format true、timeout 30s、max_retries 1 | `services/soil3/agent_runtime/README.md`（规范模型标识修订 `54ec70e`，PR #56）。API key 只在板端 `secrets/qwen.env`（0600），不入 Git。发布默认 `provider_mode=offline_fixture`（`config/soil3_agent_runtime.example.json`）；`config/cloud_strategy.example.json` 为 `enabled=false` + `MODEL_ID` 占位。 |
 | Cloud model（视觉链） | 由板端环境变量 `QWEN_MODEL` 指定；仓库内无值 → **待补**（密钥/模型配置禁止入库） | `config/soil3.example.json` vision.required_environment。 |
 | Prompt version | 无语义版本号；按文件 + 内容哈希登记：`services/soil3/cloud_strategy/prompts/strategy_v1.txt`，blob `9de1d0625f5a11c2b097a3e6fb87d0e38dc85eb3`，末次内容变更 `e0335c5`（PR #32）。链路版本 `chain_version = cloud-strategy-chain.v1` | `services/soil3/cloud_strategy/service.py`；板端 runtime 以 `prompt_path` 指向 release 内同一文件。 |
 | Phase3 version | 无版本号常量。源码自 `da3af21`（2026-09-15，rebuild repository from soil3 production baseline）后未再修改；内部标记 `schema_version=1`（auditor、decision_brain）、`trial_reconciliation_version=1`。生产唯一执行权威为板端 `phase3_soil3.service`（`/root/water`） | `git log -- services/soil3/phase3/`。截至基线点，Agent 链未调用 Phase3（Bridge 为 verification-only）。 |
@@ -106,14 +106,10 @@ State（5 分钟 timer，只读构建 state.v1）
   `/root/water/wyc/brain_weights_v3.pth`）仅按
   `services/soil3/phase2_predictor/config.py` 如实登记。
 
-**未合入项（不属于本基线）**
+**Day 5 已合入项与 Day 6 未合入项**
 
-- `origin/issue-21-shadow-runtime`（GitHub PR #51，对应 Issue #21，Day 5 完整 Shadow
-  链集成，含 trace.v1）与 `origin/issue-23-trace-experiment-data`
-  （GitHub PR #50，对应 Issue #23，Day 5 Trace 和实验数据），以及
-  `origin/issue-22-fault-safety-tests`（GitHub PR #53，对应 Issue #22，
-  Day 5 故障与安全测试）截至基线点未合入 `main`，
-  不在本基线内；合入后由各自 Issue 补登记。
+- PR #50（Issue #23，Trace 和实验数据）、PR #51（Issue #21，完整
+  Shadow 链集成）与 PR #53（Issue #22，故障与安全测试）均已进入本基线。
 - Day 6 的 Issue #24（受控真实植物接入）与 Issue #25（历史 Replay 全量
   回归验收）结果不是本登记的输入。
 
@@ -124,6 +120,6 @@ State（5 分钟 timer，只读构建 state.v1）
 | 视觉链云端模型 ID（板端 `QWEN_MODEL` 环境变量值） | 待补（禁止入库） |
 | `strategy.v1` 对 live provider 的实测结果 | 截至基线点未实测；依赖 Issue #24 |
 | Replay 全量回归验收结果 | 待补；依赖 Issue #25 |
-| trace.v1、完整 Shadow 链与故障安全测试 | 待补；PR #50 / #51 / #53 未合入，合并后须刷新正式 `main` 基线 commit |
+| trace.v1、完整 Shadow 链与故障安全测试 | 已合入；PR #50 / #51 / #53 已纳入 `main` @ `6e00198` 基线 |
 | Qwen3.5-2B 训练集整理规范 | 待补；月底整理（计划书 V3 §十二） |
 | `tools/vision_v1_check/run_once.py` 纳入版本管理 | 待补；由后续独立 Issue 处理（runbook 已记录建议） |
