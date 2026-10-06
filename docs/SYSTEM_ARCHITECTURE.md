@@ -18,6 +18,7 @@
 | Trace | Correlate existing Shadow records and sourced experiment metrics; never decide or execute. |
 | Experience Retrieval | Read closed Episodes and return separately ranked, explainable successful and failed analogues; never generate a strategy. |
 | Replay | Read historical facts into reproducible samples. |
+| Historical Regression | Batch existing Replay samples through public Strategy, Validator, and Gate v2 interfaces and summarize read-only experiment evidence. |
 
 ## Formal control chain
 
@@ -45,3 +46,12 @@ This integration always records `phase3_called=false` and
 `physical_actions_performed=false`.
 
 State, Vision, Strategy, Episode, Feedback, Trace, and Replay may read facts and create records within their authorized Issue boundaries. They do not bypass Phase3 or become an actuator path.
+
+The Day 6 historical regression service starts from existing
+`replay_sample.v1` artifacts and ends at Gate v2. Its deterministic fixture
+mode records Strategy distributions, Validator and Gate reason codes, Gate
+three-state counts, model/system errors, and reproducible risky-case evidence.
+An explicitly selected live-provider mode uses the same Cloud Strategy public
+interface but is marked non-deterministic. Both modes use
+`exploration_requested=false`, create no budget ledger, and never enter Runner,
+Bridge, Episode, Trace, Phase3, MQTT, or ActuatorLayer.
