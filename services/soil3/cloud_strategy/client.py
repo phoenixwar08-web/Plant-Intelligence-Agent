@@ -63,6 +63,7 @@ class OpenAICompatibleClient:
                 ],
                 "temperature": float(self.config.get("temperature", 0)),
                 "max_tokens": int(self.config.get("max_tokens", 1200)),
+                "enable_thinking": False,
             }
             timeout = float(self.config.get("timeout_seconds", 30))
             retries = max(0, int(self.config.get("max_retries", 1)))
@@ -106,9 +107,6 @@ class OpenAICompatibleClient:
                     timeout=timeout,
                 )
             except requests.Timeout as error:
-                if attempt < retries:
-                    time.sleep(0.2 * (attempt + 1))
-                    continue
                 raise CloudStrategyError("model_timeout", str(error), retryable=True) from error
             except requests.RequestException as error:
                 raise CloudStrategyError("model_transport_error", str(error), retryable=True) from error
