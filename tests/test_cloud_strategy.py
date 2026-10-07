@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from services.soil3.cloud_strategy.client import CloudStrategyError, OpenAICompatibleClient
+from services.soil3.cloud_strategy import client as client_module
 from services.soil3.cloud_strategy.service import (
     AUDIT_RAW_RESPONSE_MAX_CHARS,
     MODEL_INPUT_SAFETY_FLAGS,
@@ -246,6 +247,56 @@ class ClientAndChainTests(unittest.TestCase):
         response = OpenAICompatibleClient(self.config(), "secret", session=session).complete("prompt", state)
         self.assertEqual(content, response.content)
         self.assertEqual(1, len(session.calls))
+
+    def test_qwen_client_disables_thinking_in_request(self):
+        state = sample_state()
+        content = json.dumps(valid_strategy(state))
+        session = FakeSession(
+            FakeResponse(
+                200,
+                {
+                    "id": "request-thinking-off",
+                    "model": "test-model",
+                    "choices": [{"message": {"content": content}}],
+                },
+            )
+        )
+
+        OpenAICompatibleClient(self.config(), "secret", session=session).complete("prompt", state)
+
+        payload = session.calls[0][1]["json"]
+        self.assertFalse(payload["enable_thinking"])
+
+    def test_timeout_is_not_retried(self):
+        class TimeoutError(Exception):
+            pass
+
+        class RequestException(Exception):
+            pass
+
+        class TimeoutSession:
+            def __init__(self):
+                self.calls = 0
+
+            def post(self, *args, **kwargs):
+                self.calls += 1
+                raise TimeoutError("read timed out")
+
+        session = TimeoutSession()
+        config = self.config()
+        config["max_retries"] = 1
+
+        request_module = type(
+            "Requests",
+            (),
+            {"Timeout": TimeoutError, "RequestException": RequestException},
+        )
+        with mock.patch.object(client_module, "requests", request_module):
+            with self.assertRaises(CloudStrategyError) as context:
+                OpenAICompatibleClient(config, "secret", session=session).complete("prompt", sample_state())
+
+        self.assertEqual("model_timeout", context.exception.code)
+        self.assertEqual(1, session.calls)
 
     def test_client_maps_quota_error(self):
         session = FakeSession(FakeResponse(403, {"error": {"message": "quota"}}))
