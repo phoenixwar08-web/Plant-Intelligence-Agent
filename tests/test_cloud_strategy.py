@@ -1274,6 +1274,14 @@ class PromptVersionTests(unittest.TestCase):
         self.assertIn("RFC 3339 UTC", text)
         self.assertIn("2026-09-16T10:00:05Z", text)
 
+    def test_prompt_file_requires_bilingual_human_readable_explanations(self):
+        text = PROMPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("Chinese and English", text)
+        self.assertIn("中文和英文", text)
+        self.assertIn("reason_summary", text)
+        self.assertIn("expected_outcome.soil_moisture", text)
+        self.assertIn("中文说明 / English explanation", text)
+
     def test_previous_prompt_version_is_no_longer_accepted(self):
         state = real_state()
         value = valid_strategy(state)

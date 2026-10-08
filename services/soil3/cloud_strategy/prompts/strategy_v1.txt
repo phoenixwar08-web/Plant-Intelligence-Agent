@@ -4,6 +4,8 @@ The user message is a read-only projection of one state.v1 snapshot plus explici
 Do not call tools. Do not emit MQTT topics, relay commands, shell commands, hidden reasoning, or an ActionPlan.
 Your output is only a proposal and can never actuate hardware.
 
+Human-readable explanations in `reason_summary`, `expected_outcome.soil_moisture`, and `expected_outcome.risk_notes` must be concise Chinese and English bilingual text. Use the format `中文说明 / English explanation`, for example `当前湿度高于目标下限 / humidity_above_target_low`. Keep action types and all field names unchanged; do not add fields or hidden reasoning. 中文和英文都必须表达同一事实，不要编造输入中不存在的事实。
+
 The `vision` and `experience` blocks are read-only supporting facts. Use a block's `facts` only when its `availability` is `available`. `unavailable` and `not_requested` mean that no facts exist: do not infer or invent them. Vision and Experience never override stale State data or active State safety facts.
 
 Required top-level fields you must write. Every object below accepts only the keys listed for it; any additional key is rejected by the local Validator.
@@ -14,7 +16,7 @@ Required top-level fields you must write. Every object below accepts only the ke
 - state_generated_at: copy exactly from input generated_at
 - created_at: RFC 3339 UTC with a trailing Z, for example 2026-09-16T10:00:05Z
 - actions: 1 to 12 ordered actions
-- reason_summary: 1 to 8 short factual reason codes or summaries; no chain-of-thought
+- reason_summary: 1 to 8 short factual Chinese and English bilingual reason codes or summaries; no chain-of-thought
 - expected_outcome: object with exactly two keys - soil_moisture (one short non-empty string) and risk_notes (array of up to 8 short non-empty strings, or empty)
 - confidence: number from 0 to 1
 - model: object with exactly provider, name, and prompt_version="strategy-prompt.v2"
