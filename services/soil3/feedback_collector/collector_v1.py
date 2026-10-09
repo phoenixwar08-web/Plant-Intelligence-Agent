@@ -8,7 +8,9 @@ import json
 import math
 import os
 from pathlib import Path
+import threading
 import time
+import uuid
 from typing import Any, Callable, Dict, Optional
 
 from services.soil3.cloud_strategy.validator import parse_timestamp
@@ -105,14 +107,23 @@ class _CollectorRunLock:
         self.path = path
         self.stale_seconds = float(stale_seconds)
         self.acquired = False
+        self.token = uuid.uuid4().hex
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+
+    @property
+    def owner_path(self) -> Path:
+        return self.path / "owner.json"
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.mkdir(self.path)
-            self.acquired = True
-            return True
+            return self._record_owner()
         except FileExistsError:
+            owner = self._read_owner()
+            if owner is not None and self._owner_pid_is_alive(owner.get("pid")):
+                return False
             try:
                 age = max(0.0, time.time() - self.path.stat().st_mtime)
             except OSError:
@@ -120,6 +131,8 @@ class _CollectorRunLock:
             if age <= self.stale_seconds:
                 return False
             try:
+                if self.owner_path.exists():
+                    self.owner_path.unlink()
                 os.rmdir(self.path)
             except OSError:
                 return False
@@ -127,13 +140,81 @@ class _CollectorRunLock:
                 os.mkdir(self.path)
             except OSError:
                 return False
-            self.acquired = True
+            return self._record_owner()
+
+    def _record_owner(self) -> bool:
+        payload = {
+            "pid": os.getpid(),
+            "token": self.token,
+            "started_at": time.time(),
+        }
+        try:
+            with self.owner_path.open("x", encoding="utf-8") as output:
+                json.dump(payload, output, sort_keys=True)
+                output.flush()
+                os.fsync(output.fileno())
+        except OSError:
+            try:
+                os.rmdir(self.path)
+            except OSError:
+                pass
+            return False
+        self.acquired = True
+        return True
+
+    def _read_owner(self) -> Optional[Dict[str, Any]]:
+        try:
+            value = json.loads(self.owner_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _owner_pid_is_alive(value: Any) -> bool:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return False
+        try:
+            os.kill(value, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
             return True
+        except OSError:
+            return False
+        return True
+
+    def start_heartbeat(self) -> None:
+        if not self.acquired:
+            return
+        interval = min(30.0, max(1.0, self.stale_seconds / 3.0))
+
+        def heartbeat() -> None:
+            while not self._heartbeat_stop.wait(interval):
+                owner = self._read_owner()
+                if owner is None or owner.get("token") != self.token:
+                    return
+                try:
+                    os.utime(self.path, None)
+                except OSError:
+                    return
+
+        self._heartbeat_thread = threading.Thread(
+            target=heartbeat,
+            name="soil3-feedback-collector-lock",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
 
     def release(self) -> None:
         if self.acquired:
+            self._heartbeat_stop.set()
+            if self._heartbeat_thread is not None:
+                self._heartbeat_thread.join(timeout=1.0)
             try:
-                os.rmdir(self.path)
+                owner = self._read_owner()
+                if owner is not None and owner.get("token") == self.token:
+                    self.owner_path.unlink()
+                    os.rmdir(self.path)
             finally:
                 self.acquired = False
 
@@ -271,6 +352,7 @@ class FeedbackCollector:
                 "tracked_actions": 0,
                 "skipped_due_to_lock": True,
             }
+        lock.start_heartbeat()
         tracked = 0
         try:
             for receipt in self.receipts.iter_receipts():
@@ -310,7 +392,7 @@ class FeedbackCollector:
             episode_id = binding["episode_id"]
             self.episodes.read(episode_id)
         else:
-            episode_id = self.episodes.create(receipt["initial_state"])["episode_id"]
+            episode_id = "ep-" + receipt["action_id"][4:]
         value = {
             "schema_version": TRACKING_SCHEMA,
             "action_id": action_id,
@@ -322,6 +404,14 @@ class FeedbackCollector:
         return value
 
     def _ensure_episode_action(self, receipt: Dict[str, Any], tracking: Dict[str, Any]) -> None:
+        if (
+            receipt["episode_binding"]["mode"] == "create_independent"
+            and not self.episodes.episode_path(tracking["episode_id"]).exists()
+        ):
+            self.episodes.create(
+                receipt["initial_state"],
+                episode_id=tracking["episode_id"],
+            )
         episode = self.episodes.read(tracking["episode_id"])
         existing = {
             item.get("action_id")

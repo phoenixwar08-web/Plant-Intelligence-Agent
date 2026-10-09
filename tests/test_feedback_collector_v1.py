@@ -16,6 +16,7 @@ from services.soil3.telemetry.common import load_json
 
 ACTION_ID = "act-0123456789abcdef01234567"
 ACTION_AT = "2026-10-09T10:00:08Z"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def state_snapshot(observed_at="2026-10-09T10:00:00Z", humidity=31.0):
@@ -366,3 +367,76 @@ class FeedbackCollectorTests(unittest.TestCase):
         self.assertTrue(skipped["skipped_due_to_lock"])
         self.assertFalse(recovered["skipped_due_to_lock"])
         self.assertEqual(1, len(list(self.episode_dir.glob("ep-*.json"))))
+
+    def test_tracking_create_failure_never_orphans_a_second_episode_after_restart(self):
+        """Persisting an action-to-Episode binding after Episode creation would orphan the first Episode on a crash."""
+        self.store.prepare_native(ACTION_ID, state_snapshot(), 8.0, "2026-10-09T10:00:00Z")
+        self.store.complete_command(
+            ACTION_ID,
+            reference_action_at=ACTION_AT,
+            on_published_at="2026-10-09T10:00:00Z",
+            off_published_at=ACTION_AT,
+            pump_seconds=8.0,
+        )
+        collector = FeedbackCollector(
+            self.config,
+            clock=lambda: datetime(2026, 10, 9, 10, 1, tzinfo=timezone.utc),
+            state_supplier=lambda: state_snapshot("2026-10-09T10:01:00Z"),
+        )
+        with patch(
+            "services.soil3.feedback_collector.collector_v1.atomic_write_json",
+            side_effect=OSError("disk full"),
+        ):
+            with self.assertRaises(OSError):
+                collector.run_once()
+        self.assertEqual([], list(self.episode_dir.glob("ep-*.json")))
+
+        FeedbackCollector(
+            self.config,
+            clock=lambda: datetime(2026, 10, 9, 10, 1, tzinfo=timezone.utc),
+            state_supplier=lambda: state_snapshot("2026-10-09T10:01:00Z"),
+        ).run_once()
+        self.assertEqual(1, len(list(self.episode_dir.glob("ep-*.json"))))
+
+    def test_stale_lock_with_a_live_owner_is_never_taken_over(self):
+        """mtime alone cannot prove a slow Vision or telemetry call has stopped running."""
+        lock_path = self.config.tracking_dir / ".feedback_collector.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.mkdir()
+        (lock_path / "owner.json").write_text(
+            '{"pid": %d, "token": "live-owner"}' % os.getpid(),
+            encoding="utf-8",
+        )
+        os.utime(lock_path, (time.time() - 1900, time.time() - 1900))
+
+        summary = FeedbackCollector(self.config).run_once()
+
+        self.assertTrue(summary["skipped_due_to_lock"])
+        self.assertTrue(lock_path.exists())
+
+    def test_acquired_lock_records_live_owner_before_any_long_operation(self):
+        """A lock created by the Collector itself must remain non-stealable while its owner PID is alive."""
+        from services.soil3.feedback_collector.collector_v1 import _CollectorRunLock
+
+        path = self.config.tracking_dir / ".feedback_collector.lock"
+        first = _CollectorRunLock(path, stale_seconds=1.0)
+        self.assertTrue(first.acquire())
+        os.utime(path, (time.time() - 10, time.time() - 10))
+        second = _CollectorRunLock(path, stale_seconds=1.0)
+        try:
+            self.assertFalse(second.acquire())
+        finally:
+            first.release()
+
+    def test_runtime_assets_use_canonical_state_and_opengauss_socket(self):
+        """A private /tmp without the database socket would turn real feedback soil facts into missing values."""
+        unit = (
+            ROOT / "deploy" / "systemd" / "plant-agent-soil3-feedback-collector.service"
+        ).read_text(encoding="utf-8")
+        readme = (
+            ROOT / "services" / "soil3" / "feedback_collector" / "README.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("BindReadOnlyPaths=-/tmp/.s.PGSQL.7654", unit)
+        self.assertIn("agent_chain/state/latest.json", readme)
+        self.assertNotIn("phase3/system_state.json", readme)

@@ -11,7 +11,7 @@ This sidecar records factual plant-response observations after an explicit real-
   ```bash
   python3 -m services.soil3.feedback_collector.service manual-record \
     --receipt-dir /root/water/runtime/instances/soil3/agent_chain/feedback_actions \
-    --state-file /root/water/runtime/instances/soil3/phase3/system_state.json \
+    --state-file /root/water/runtime/instances/soil3/agent_chain/state/latest.json \
     --action-id act-<24-lowercase-hex> \
     --confirmed-by <owner> \
     --reference-action-at 2026-10-09T10:00:00Z \
