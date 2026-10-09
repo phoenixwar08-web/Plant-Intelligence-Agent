@@ -81,3 +81,42 @@ class NativePhase3ReceiptTests(unittest.TestCase):
             self.assertEqual("phase3_native", receipt["action_source"])
             self.assertEqual("command_completed", receipt["command_status"])
             self.assertFalse(receipt["execution_evidence"]["physical_action_confirmed"])
+
+    def test_bound_controlled_receipt_replaces_native_receipt_for_one_action(self):
+        """A controlled run must not create a second independent feedback action for its same pump command."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            actuator = object.__new__(self.decision_brain.ActuatorLayer)
+            native_store = ActionReceiptStore(root / "native")
+            controlled_store = ActionReceiptStore(root / "controlled")
+            action_id = "act-0123456789abcdef01234567"
+            controlled_store.prepare_controlled(
+                action_id,
+                action_state(),
+                "tr-0123456789abcdef01234567",
+                "ep-0123456789abcdef01234567",
+                "approval-1",
+                "2026-10-09T10:00:00Z",
+            )
+            actuator._receipt_store = native_store
+            actuator._capture_action_state = action_state
+            actuator.cfg = SimpleNamespace(
+                LARGE_WATER_THRESHOLD=30.0,
+                get_constant=lambda _name: 1800,
+            )
+            actuator._activate_pump = lambda _seconds: {
+                "mqtt_on_published_at": "2026-10-09T10:00:00Z",
+                "mqtt_off_published_at": "2026-10-09T10:00:08Z",
+            }
+            actuator.bind_feedback_receipt(controlled_store, action_id)
+            with mock.patch.object(
+                self.decision_brain,
+                "_update_system_state",
+                side_effect=lambda mutator: mutator({}) or {},
+            ):
+                actuator.execute_pump(8.0, 31.0)
+
+            self.assertEqual([], list(native_store.iter_receipts()))
+            receipt = controlled_store.read(action_id)
+            self.assertEqual("controlled_execution", receipt["action_source"])
+            self.assertEqual("command_completed", receipt["command_status"])

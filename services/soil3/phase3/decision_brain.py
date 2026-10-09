@@ -134,6 +134,7 @@ from runtime_io import (
 )
 from adaptive_evidence import HARD_INVALID, classify_trial
 from services.soil3.feedback_collector.action_receipt_v1 import (
+    ActionReceiptError,
     ActionReceiptStore,
     new_action_id,
 )
@@ -2369,6 +2370,7 @@ class ActuatorLayer:
         self._receipt_store = ActionReceiptStore(_FEEDBACK_ACTION_RECEIPT_DIR)
         self._mqtt_broker: str     = MQTT_BROKER_DEFAULT
         self._mqtt_topic_pump: str = MQTT_TOPIC_PUMP_CMD_DEFAULT
+        self._bound_feedback_receipt = None
 
         if mqtt is None:
             raise RuntimeError("paho-mqtt 未安装，无法初始化水泵执行器。")
@@ -2400,6 +2402,28 @@ class ActuatorLayer:
             snapshot, parameters=parameters
         )
 
+    def bind_feedback_receipt(self, receipt_store: ActionReceiptStore, action_id: str) -> None:
+        """Use one verified controlled receipt for the next real pump command only.
+
+        This changes feedback provenance only.  It does not alter Phase3's
+        decision, duration, MQTT payload, or actuator sequencing.
+        """
+        if getattr(self, "_bound_feedback_receipt", None) is not None:
+            raise RuntimeError("a feedback receipt is already bound")
+        receipt = receipt_store.read(action_id)
+        if (
+            receipt.get("action_source") != "controlled_execution"
+            or receipt.get("command_status") != "prepared"
+        ):
+            raise ActionReceiptError("invalid_transition")
+        self._bound_feedback_receipt = (receipt_store, action_id)
+
+    def clear_feedback_receipt(self, action_id: str) -> None:
+        """Drop an unused controlled receipt binding after its one formal cycle."""
+        bound = getattr(self, "_bound_feedback_receipt", None)
+        if bound is not None and bound[1] == action_id:
+            self._bound_feedback_receipt = None
+
     # ------------------------------------------------------------------
     # Fix-A：拆分为两步——execute_pump（立即返回）+ settle（渗透完成后调用）
     # ------------------------------------------------------------------
@@ -2430,24 +2454,36 @@ class ActuatorLayer:
           PendingSoak  : 挂载到 DecisionBrain._pending_soak 的哨兵对象
         """
         receipt = None
+        receipt_store = self._receipt_store
         command_evidence = None
         if float(water_sec) > 0:
-            receipt = self._receipt_store.prepare_native(
-                new_action_id(),
-                self._capture_action_state(),
-                water_sec,
-                _utc_timestamp(),
-            )
+            bound = getattr(self, "_bound_feedback_receipt", None)
+            self._bound_feedback_receipt = None
+            if bound is not None:
+                receipt_store, action_id = bound
+                receipt = receipt_store.read(action_id)
+                if (
+                    receipt.get("action_source") != "controlled_execution"
+                    or receipt.get("command_status") != "prepared"
+                ):
+                    raise ActionReceiptError("invalid_transition")
+            else:
+                receipt = receipt_store.prepare_native(
+                    new_action_id(),
+                    self._capture_action_state(),
+                    water_sec,
+                    _utc_timestamp(),
+                )
         try:
             command_evidence = self._activate_pump(water_sec)
         except Exception as error:
             if receipt is not None:
-                self._receipt_store.mark_incomplete(receipt["action_id"], type(error).__name__)
+                receipt_store.mark_incomplete(receipt["action_id"], type(error).__name__)
             raise
         if receipt is not None:
             evidence = command_evidence if isinstance(command_evidence, dict) else {}
             completed_at = _utc_timestamp()
-            self._receipt_store.complete_command(
+            receipt_store.complete_command(
                 receipt["action_id"],
                 reference_action_at=completed_at,
                 on_published_at=evidence.get("mqtt_on_published_at", receipt["created_at"]),

@@ -358,6 +358,26 @@ def _invoke_formal_phase3_cycle(decision_brain: Any) -> Any:
     return type(decision_brain).run_cycle(decision_brain)
 
 
+def _bind_controlled_feedback_receipt(
+    decision_brain: Any,
+    receipt_store: ActionReceiptStore,
+    action_id: str,
+) -> None:
+    """Bind the one pre-verified controlled receipt through Phase3's public adapter."""
+    actuator = getattr(decision_brain, "actuator", None)
+    bind = getattr(type(actuator), "bind_feedback_receipt", None)
+    if not callable(bind):
+        raise ControlledExecutionError("formal_feedback_binding_unavailable")
+    bind(actuator, receipt_store, action_id)
+
+
+def _clear_controlled_feedback_receipt(decision_brain: Any, action_id: str) -> None:
+    actuator = getattr(decision_brain, "actuator", None)
+    clear = getattr(type(actuator), "clear_feedback_receipt", None)
+    if callable(clear):
+        clear(actuator, action_id)
+
+
 def _trace_reference_shape_valid(value: Any) -> bool:
     return (
         isinstance(value, dict)
@@ -715,6 +735,11 @@ class ControlledPhase3Executor:
             approval_id,
             iso_utc(now),
         )
+        _bind_controlled_feedback_receipt(
+            decision_brain,
+            self.action_receipts,
+            action_id,
+        )
         try:
             result = _invoke_formal_phase3_cycle(decision_brain)
         except Exception as error:
@@ -727,6 +752,8 @@ class ControlledPhase3Executor:
             })
             atomic_write_json(receipt_path, attempted)
             raise ControlledExecutionError("phase3_cycle_failed", [type(error).__name__]) from error
+        finally:
+            _clear_controlled_feedback_receipt(decision_brain, action_id)
 
         decision, physical = _phase3_projection(result)
         attempted.update({
@@ -740,14 +767,21 @@ class ControlledPhase3Executor:
             self.action_receipts.mark_incomplete(action_id, "phase3_result_invalid")
             raise ControlledExecutionError("phase3_result_invalid")
         if physical:
-            finished_at = attempted["finished_at"]
-            self.action_receipts.complete_command(
-                action_id,
-                reference_action_at=finished_at,
-                on_published_at=started["started_at"],
-                off_published_at=finished_at,
-                pump_seconds=decision["action_sec"],
-            )
+            action_receipt = self.action_receipts.read(action_id)
+            if action_receipt["command_status"] == "prepared":
+                finished_at = attempted["finished_at"]
+                self.action_receipts.complete_command(
+                    action_id,
+                    reference_action_at=finished_at,
+                    on_published_at=started["started_at"],
+                    off_published_at=finished_at,
+                    pump_seconds=decision["action_sec"],
+                )
+            elif (
+                action_receipt["command_status"] != "command_completed"
+                or action_receipt["command"].get("pump_seconds") != decision["action_sec"]
+            ):
+                raise ControlledExecutionError("feedback_receipt_mismatch")
         else:
             self.action_receipts.mark_incomplete(action_id, "phase3_no_physical_action")
         return attempted
