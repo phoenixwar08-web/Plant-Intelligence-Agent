@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import time
 from typing import Any, Callable, Dict, Optional
 
 from services.soil3.cloud_strategy.validator import parse_timestamp
@@ -39,6 +41,7 @@ class CollectorConfig:
     service_unit: Optional[str] = None
     parameters: Dict[str, Any] = field(default_factory=dict)
     vision_enabled: bool = False
+    lock_stale_seconds: float = 1800.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -52,6 +55,13 @@ class CollectorConfig:
             raise ValueError("collector parameters must be an object")
         if not isinstance(self.vision_enabled, bool):
             raise ValueError("collector vision_enabled must be boolean")
+        if (
+            isinstance(self.lock_stale_seconds, bool)
+            or not isinstance(self.lock_stale_seconds, (int, float))
+            or not math.isfinite(float(self.lock_stale_seconds))
+            or float(self.lock_stale_seconds) <= 0
+        ):
+            raise ValueError("collector lock_stale_seconds must be positive")
 
     @classmethod
     def from_dict(cls, value: Any) -> "CollectorConfig":
@@ -60,7 +70,7 @@ class CollectorConfig:
         allowed = {
             "receipt_dir", "tracking_dir", "episode_dir", "feedback_dir",
             "phase3_state_path", "sensor_log_path", "irrigation_trials_path",
-            "service_unit", "parameters", "vision_enabled",
+            "service_unit", "parameters", "vision_enabled", "lock_stale_seconds",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -84,7 +94,48 @@ class CollectorConfig:
             service_unit=value.get("service_unit"),
             parameters=value.get("parameters", {}),
             vision_enabled=value.get("vision_enabled", False),
+            lock_stale_seconds=value.get("lock_stale_seconds", 1800.0),
         )
+
+
+class _CollectorRunLock:
+    """Crash-recoverable, cross-platform single-instance lock for one collector root."""
+
+    def __init__(self, path: Path, stale_seconds: float):
+        self.path = path
+        self.stale_seconds = float(stale_seconds)
+        self.acquired = False
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.mkdir(self.path)
+            self.acquired = True
+            return True
+        except FileExistsError:
+            try:
+                age = max(0.0, time.time() - self.path.stat().st_mtime)
+            except OSError:
+                return False
+            if age <= self.stale_seconds:
+                return False
+            try:
+                os.rmdir(self.path)
+            except OSError:
+                return False
+            try:
+                os.mkdir(self.path)
+            except OSError:
+                return False
+            self.acquired = True
+            return True
+
+    def release(self) -> None:
+        if self.acquired:
+            try:
+                os.rmdir(self.path)
+            finally:
+                self.acquired = False
 
 
 def capture_current_state(config: CollectorConfig) -> Dict[str, Any]:
@@ -210,16 +261,33 @@ class FeedbackCollector:
         self.state_supplier = state_supplier or (lambda: capture_current_state(config))
 
     def run_once(self) -> Dict[str, Any]:
+        lock = _CollectorRunLock(
+            self.config.tracking_dir / ".feedback_collector.lock",
+            self.config.lock_stale_seconds,
+        )
+        if not lock.acquire():
+            return {
+                "schema_version": "feedback_collector_run.v1",
+                "tracked_actions": 0,
+                "skipped_due_to_lock": True,
+            }
         tracked = 0
-        for receipt in self.receipts.iter_receipts():
-            evidence = receipt["execution_evidence"].get("level")
-            if evidence not in COLLECTABLE_EVIDENCE:
-                continue
-            tracking = self._load_or_create_tracking(receipt)
-            self._ensure_episode_action(receipt, tracking)
-            self._collect_due_windows(receipt, tracking)
-            tracked += 1
-        return {"schema_version": "feedback_collector_run.v1", "tracked_actions": tracked}
+        try:
+            for receipt in self.receipts.iter_receipts():
+                evidence = receipt["execution_evidence"].get("level")
+                if evidence not in COLLECTABLE_EVIDENCE:
+                    continue
+                tracking = self._load_or_create_tracking(receipt)
+                self._ensure_episode_action(receipt, tracking)
+                self._collect_due_windows(receipt, tracking)
+                tracked += 1
+            return {
+                "schema_version": "feedback_collector_run.v1",
+                "tracked_actions": tracked,
+                "skipped_due_to_lock": False,
+            }
+        finally:
+            lock.release()
 
     def tracking_path(self, action_id: str) -> Path:
         return self.config.tracking_dir / f"{action_id}.json"
@@ -292,6 +360,19 @@ class FeedbackCollector:
                 continue
             if offset_minutes < lower:
                 continue
+            existing = self._existing_window_feedback(
+                tracking["episode_id"],
+                window,
+                receipt["reference_action_at"],
+            )
+            if existing is not None:
+                self.feedback.attach_to_episode(
+                    tracking["episode_id"], self.episodes, finalize=False
+                )
+                tracking["windows"][window] = "recorded"
+                tracking.setdefault("feedback_ids", {})[window] = existing["feedback_id"]
+                changed = True
+                break
             if self.state_supplier is None:
                 raise ValueError("collector state supplier is unavailable")
             state = self.state_supplier()
@@ -322,6 +403,24 @@ class FeedbackCollector:
             changed = True
         if changed:
             atomic_write_json(self.tracking_path(receipt["action_id"]), tracking)
+
+    def _existing_window_feedback(
+        self,
+        episode_id: str,
+        window: str,
+        reference_action_at: Any,
+    ) -> Optional[Dict[str, Any]]:
+        matches = [
+            record
+            for record in self.feedback.list_for_episode(episode_id)
+            if (
+                record.get("window") == window
+                and record.get("reference_action_at") == reference_action_at
+            )
+        ]
+        if len(matches) > 1:
+            raise ValueError("collector found duplicate feedback for one action window")
+        return matches[0] if matches else None
 
     @staticmethod
     def _feedback_payload(

@@ -43,6 +43,7 @@ RECEIPT_FIELDS = {
 }
 SOURCES = {"phase3_native", "controlled_execution", "manual_confirmed"}
 COMMAND_STATUS = {"prepared", "command_completed", "command_incomplete", "manual_confirmed"}
+DEFAULT_RECEIPT_DIR = "/root/water/runtime/instances/soil3/agent_chain/feedback_actions"
 
 
 class ActionReceiptError(ValueError):
@@ -58,6 +59,11 @@ class ActionReceiptError(ValueError):
 def new_action_id() -> str:
     """Return one opaque 96-bit action identifier suitable for a receipt path."""
     return "act-" + uuid.uuid4().hex[:24]
+
+
+def default_feedback_action_receipt_dir() -> Path:
+    """One runtime root shared by native, controlled, manual, and collector paths."""
+    return Path(os.environ.get("SOIL3_FEEDBACK_ACTION_RECEIPT_DIR", DEFAULT_RECEIPT_DIR))
 
 
 def _canonical_timestamp(value: Any, field: str) -> str:

@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from services.soil3.cloud_strategy.validator import fingerprint, normalize_timestamp, parse_timestamp
 from services.soil3.feedback_collector.action_receipt_v1 import ActionReceiptStore
+from services.soil3.feedback_collector.action_receipt_v1 import default_feedback_action_receipt_dir
 from services.soil3.phase3_bridge import Phase3Bridge
 from services.soil3.phase3_bridge.bridge_v1 import FORMAL_PHASE3_ENTRYPOINT
 from services.soil3.telemetry.common import atomic_write_json, load_json
@@ -660,9 +661,17 @@ def _claim_once(path: Path, record: dict[str, Any]) -> None:
 class ControlledPhase3Executor:
     """Reverify one persisted Shadow chain before one formal Phase3 cycle."""
 
-    def __init__(self, receipt_dir: str | Path, *, clock: Callable[[], datetime] = utc_now):
+    def __init__(
+        self,
+        receipt_dir: str | Path,
+        *,
+        clock: Callable[[], datetime] = utc_now,
+        feedback_receipt_dir: Optional[str | Path] = None,
+    ):
         self.receipt_dir = Path(receipt_dir)
-        self.action_receipts = ActionReceiptStore(self.receipt_dir / "feedback_actions")
+        self.action_receipts = ActionReceiptStore(
+            feedback_receipt_dir or default_feedback_action_receipt_dir()
+        )
         self.clock = clock
 
     def receipt_path(self, approval_id: str) -> Path:

@@ -10,7 +10,7 @@ This sidecar records factual plant-response observations after an explicit real-
 
   ```bash
   python3 -m services.soil3.feedback_collector.service manual-record \
-    --receipt-dir /root/water/runtime/instances/soil3/agent_chain/feedback-actions \
+    --receipt-dir /root/water/runtime/instances/soil3/agent_chain/feedback_actions \
     --state-file /root/water/runtime/instances/soil3/phase3/system_state.json \
     --action-id act-<24-lowercase-hex> \
     --confirmed-by <owner> \
@@ -39,4 +39,4 @@ python3 -m services.soil3.feedback_collector.service collect \
   --config /root/water/runtime/instances/soil3/agent_chain/config/feedback-collector.json
 ```
 
-The JSON config must explicitly name `receipt_dir`, `tracking_dir`, `episode_dir`, `feedback_dir`, and `phase3_state_path`. It may name `sensor_log_path`, `irrigation_trials_path`, `service_unit`, `parameters`, and `vision_enabled`; do not enable Experience as part of this feature. The systemd units are templates only in this repository: this Issue does not deploy them, contact the board, or perform a real watering action.
+The JSON config must explicitly name `receipt_dir`, `tracking_dir`, `episode_dir`, `feedback_dir`, and `phase3_state_path`. Set `receipt_dir` to `/root/water/runtime/instances/soil3/agent_chain/feedback_actions`, the shared default for native Phase3, controlled execution, manual confirmation, and the Collector (or set the same `SOIL3_FEEDBACK_ACTION_RECEIPT_DIR` override for every producer and the Collector configuration). It may name `sensor_log_path`, `irrigation_trials_path`, `service_unit`, `parameters`, and `vision_enabled`; do not enable Experience as part of this feature. The systemd units are templates only in this repository: this Issue does not deploy them, contact the board, or perform a real watering action.

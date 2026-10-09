@@ -204,7 +204,12 @@ class ControlledPhase3ExecutionTests(unittest.TestCase):
             sys.modules["fcntl"] = cls.previous_fcntl
 
     def executor(self, root):
-        return ControlledPhase3Executor(Path(root) / "receipts", clock=lambda: NOW)
+        receipts = Path(root) / "receipts"
+        return ControlledPhase3Executor(
+            receipts,
+            clock=lambda: NOW,
+            feedback_receipt_dir=receipts / "feedback_actions",
+        )
 
     def brain(self):
         brain = object.__new__(self.DecisionBrain)

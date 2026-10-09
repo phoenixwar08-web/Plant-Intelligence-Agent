@@ -120,3 +120,32 @@ class NativePhase3ReceiptTests(unittest.TestCase):
             receipt = controlled_store.read(action_id)
             self.assertEqual("controlled_execution", receipt["action_source"])
             self.assertEqual("command_completed", receipt["command_status"])
+
+    def test_completion_write_failure_does_not_skip_phase3_safety_follow_up(self):
+        """A post-command receipt disk error must not erase the real watering's PendingSoak and state update."""
+        with tempfile.TemporaryDirectory() as directory:
+            actuator = object.__new__(self.decision_brain.ActuatorLayer)
+            store = ActionReceiptStore(Path(directory) / "receipts")
+            actuator._receipt_store = store
+            actuator._capture_action_state = action_state
+            actuator.cfg = SimpleNamespace(
+                LARGE_WATER_THRESHOLD=30.0,
+                get_constant=lambda _name: 1800,
+            )
+            actuator._activate_pump = lambda _seconds: {
+                "mqtt_on_published_at": "2026-10-09T10:00:00Z",
+                "mqtt_off_published_at": "2026-10-09T10:00:08Z",
+            }
+            updates = []
+            with mock.patch.object(store, "complete_command", side_effect=OSError("disk full")):
+                with mock.patch.object(
+                    self.decision_brain,
+                    "_update_system_state",
+                    side_effect=lambda mutator: updates.append(mutator({})) or {},
+                ):
+                    soak = actuator.execute_pump(8.0, 31.0)
+
+            self.assertGreaterEqual(len(updates), 1)
+            self.assertEqual(8.0, soak.water_sec)
+            receipt = next(store.iter_receipts())
+            self.assertEqual("prepared", receipt["command_status"])

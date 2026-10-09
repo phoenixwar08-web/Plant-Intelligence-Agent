@@ -1,5 +1,6 @@
 import json
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -9,6 +10,7 @@ from unittest.mock import Mock, patch
 from services.soil3.feedback_collector.action_receipt_v1 import (
     ActionReceiptError,
     ActionReceiptStore,
+    default_feedback_action_receipt_dir,
 )
 from services.soil3.state.state_v1 import StateBuilder
 
@@ -155,3 +157,11 @@ class ActionReceiptStoreTests(unittest.TestCase):
         self.assertEqual(self.store.root, config.receipt_dir)
         self.assertFalse(config.vision_enabled)
         collector.run_once.assert_called_once_with()
+
+    def test_shared_receipt_root_has_one_override_for_all_producers(self):
+        """Separate producer defaults would make one collector configuration silently miss real actions."""
+        with patch.dict(os.environ, {"SOIL3_FEEDBACK_ACTION_RECEIPT_DIR": "/runtime/feedback-actions"}):
+            self.assertEqual(
+                Path("/runtime/feedback-actions"),
+                default_feedback_action_receipt_dir(),
+            )

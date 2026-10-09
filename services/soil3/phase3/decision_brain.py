@@ -136,20 +136,13 @@ from adaptive_evidence import HARD_INVALID, classify_trial
 from services.soil3.feedback_collector.action_receipt_v1 import (
     ActionReceiptError,
     ActionReceiptStore,
+    default_feedback_action_receipt_dir,
     new_action_id,
 )
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry.events import build_health_snapshot
 
 logger = logging.getLogger("decision_brain")
-
-_FEEDBACK_ACTION_RECEIPT_DIR = Path(
-    os.environ.get(
-        "SOIL3_FEEDBACK_ACTION_RECEIPT_DIR",
-        "/root/water/runtime/instances/soil3/phase3/feedback_action_receipts",
-    )
-)
-
 
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2367,7 +2360,7 @@ class ActuatorLayer:
     def __init__(self, cfg: ConfigManager, sensor: SensorLayer):
         self.cfg    = cfg
         self.sensor = sensor
-        self._receipt_store = ActionReceiptStore(_FEEDBACK_ACTION_RECEIPT_DIR)
+        self._receipt_store = ActionReceiptStore(default_feedback_action_receipt_dir())
         self._mqtt_broker: str     = MQTT_BROKER_DEFAULT
         self._mqtt_topic_pump: str = MQTT_TOPIC_PUMP_CMD_DEFAULT
         self._bound_feedback_receipt = None
@@ -2483,13 +2476,20 @@ class ActuatorLayer:
         if receipt is not None:
             evidence = command_evidence if isinstance(command_evidence, dict) else {}
             completed_at = _utc_timestamp()
-            receipt_store.complete_command(
-                receipt["action_id"],
-                reference_action_at=completed_at,
-                on_published_at=evidence.get("mqtt_on_published_at", receipt["created_at"]),
-                off_published_at=evidence.get("mqtt_off_published_at", completed_at),
-                pump_seconds=water_sec,
-            )
+            try:
+                receipt_store.complete_command(
+                    receipt["action_id"],
+                    reference_action_at=completed_at,
+                    on_published_at=evidence.get("mqtt_on_published_at", receipt["created_at"]),
+                    off_published_at=evidence.get("mqtt_off_published_at", completed_at),
+                    pump_seconds=water_sec,
+                )
+            except Exception as error:
+                # MQTT on/off has already completed.  Preserve Phase3's
+                # original state and PendingSoak safety path; the prepared
+                # receipt deliberately remains uncertain and is not treated
+                # as feedback-collectable after a later restart.
+                logger.error("[Layer6] feedback receipt completion failed: %s", error)
 
         # 更新系统状态（水泵启停计数）
         large_thr = self.cfg.LARGE_WATER_THRESHOLD

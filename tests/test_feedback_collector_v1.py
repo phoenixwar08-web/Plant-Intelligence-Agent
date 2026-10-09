@@ -1,4 +1,6 @@
 import tempfile
+import os
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -293,3 +295,74 @@ class FeedbackCollectorTests(unittest.TestCase):
             vision_enabled=True,
         )
         self.assertIsNone(capture_current_vision(config))
+
+    def test_restart_after_feedback_write_recovers_the_same_window_without_duplicate(self):
+        """A crash after feedback persistence must recover the factual record, not write a second 30-minute observation."""
+        self.store.prepare_native(ACTION_ID, state_snapshot(), 8.0, "2026-10-09T10:00:00Z")
+        self.store.complete_command(
+            ACTION_ID,
+            reference_action_at=ACTION_AT,
+            on_published_at="2026-10-09T10:00:00Z",
+            off_published_at=ACTION_AT,
+            pump_seconds=8.0,
+        )
+        collector = FeedbackCollector(
+            self.config,
+            clock=lambda: datetime(2026, 10, 9, 10, 30, tzinfo=timezone.utc),
+            state_supplier=lambda: state_snapshot("2026-10-09T10:30:00Z", humidity=37.0),
+        )
+        original_write = __import__(
+            "services.soil3.feedback_collector.collector_v1",
+            fromlist=["atomic_write_json"],
+        ).atomic_write_json
+        writes = [0]
+
+        def crash_after_feedback(path, value):
+            writes[0] += 1
+            if Path(path) == collector.tracking_path(ACTION_ID) and writes[0] == 2:
+                raise RuntimeError("simulated_crash_after_feedback")
+            return original_write(path, value)
+
+        with patch(
+            "services.soil3.feedback_collector.collector_v1.atomic_write_json",
+            side_effect=crash_after_feedback,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated_crash_after_feedback"):
+                collector.run_once()
+
+        restarted = FeedbackCollector(
+            self.config,
+            clock=lambda: datetime(2026, 10, 9, 10, 30, tzinfo=timezone.utc),
+            state_supplier=lambda: state_snapshot("2026-10-09T10:30:00Z", humidity=37.0),
+        )
+        restarted.run_once()
+
+        episode_id = next(self.episode_dir.glob("ep-*.json")).stem
+        records = FeedbackStore(self.config.feedback_dir).list_for_episode(episode_id)
+        self.assertEqual(["30min"], [record["window"] for record in records])
+
+    def test_active_collector_lock_skips_a_concurrent_scan_and_stale_lock_recovers(self):
+        """Allowing two live scans to create tracking independently would duplicate an action Episode."""
+        self.store.prepare_native(ACTION_ID, state_snapshot(), 8.0, "2026-10-09T10:00:00Z")
+        self.store.complete_command(
+            ACTION_ID,
+            reference_action_at=ACTION_AT,
+            on_published_at="2026-10-09T10:00:00Z",
+            off_published_at=ACTION_AT,
+            pump_seconds=8.0,
+        )
+        collector = FeedbackCollector(
+            self.config,
+            state_supplier=lambda: state_snapshot("2026-10-09T10:30:00Z", humidity=37.0),
+        )
+        lock_path = self.config.tracking_dir / ".feedback_collector.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.mkdir()
+
+        skipped = collector.run_once()
+        os.utime(lock_path, (time.time() - 1900, time.time() - 1900))
+        recovered = collector.run_once()
+
+        self.assertTrue(skipped["skipped_due_to_lock"])
+        self.assertFalse(recovered["skipped_due_to_lock"])
+        self.assertEqual(1, len(list(self.episode_dir.glob("ep-*.json"))))
