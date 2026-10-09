@@ -5,12 +5,13 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 from services.soil3.feedback_collector.action_receipt_v1 import (
     ActionReceiptError,
     ActionReceiptStore,
 )
+from services.soil3.feedback_collector.collector_v1 import CollectorConfig, FeedbackCollector
 from services.soil3.telemetry.common import load_json
 
 
@@ -25,6 +26,11 @@ def _manual_record(args: argparse.Namespace) -> dict:
     )
 
 
+def _collect(args: argparse.Namespace) -> dict:
+    value = load_json(Path(args.config))
+    return FeedbackCollector(CollectorConfig.from_dict(value)).run_once()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="soil3 feedback fact recorder")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -36,15 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
     manual.add_argument("--reference-action-at", required=True)
     manual.add_argument("--pump-seconds", required=True, type=float)
     manual.set_defaults(handler=_manual_record)
+    collect = commands.add_parser("collect", help="collect receipt-bound factual feedback")
+    collect.add_argument("--config", required=True)
+    collect.set_defaults(handler=_collect)
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         result = args.handler(args)
     except (ActionReceiptError, OSError, ValueError, json.JSONDecodeError) as error:
-        code = error.code if isinstance(error, ActionReceiptError) else "manual_record_failed"
+        code = error.code if isinstance(error, ActionReceiptError) else "collector_command_failed"
         reasons = error.reasons if isinstance(error, ActionReceiptError) else [type(error).__name__]
         print(json.dumps({"error": code, "reasons": reasons}, ensure_ascii=False), file=sys.stderr)
         return 2

@@ -2,23 +2,26 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from services.soil3.episode.episode_v1 import EpisodeStore
 from services.soil3.feedback_collector.action_receipt_v1 import ActionReceiptStore
 from services.soil3.feedback_collector.collector_v1 import CollectorConfig, FeedbackCollector
+from services.soil3.feedback.feedback_v1 import FeedbackStore
 from services.soil3.state.state_v1 import StateBuilder
+from services.soil3.telemetry.common import load_json
 
 
 ACTION_ID = "act-0123456789abcdef01234567"
 ACTION_AT = "2026-10-09T10:00:08Z"
 
 
-def state_snapshot():
+def state_snapshot(observed_at="2026-10-09T10:00:00Z", humidity=31.0):
     return StateBuilder("soil3").build(
         {
-            "observed_at": "2026-10-09T10:00:00Z",
-            "generated_at": "2026-10-09T10:00:01Z",
-            "sensor_readings": [{"timestamp": "2026-10-09T10:00:00Z", "humidity": 31.0}],
+            "observed_at": observed_at,
+            "generated_at": observed_at,
+            "sensor_readings": [{"timestamp": observed_at, "humidity": humidity}],
             "parameters": {"FC": 40.0, "TARGET_LOW": 35.0, "HARD_SAFETY_LOW": 25.0},
         }
     )
@@ -73,3 +76,220 @@ class FeedbackCollectorTests(unittest.TestCase):
 
         self.assertEqual(0, summary["tracked_actions"])
         self.assertEqual([], list(self.config.tracking_dir.glob("*.json")))
+
+    def test_due_30min_window_records_canonical_state_and_null_vision(self):
+        """Replacing the state supplier with a Shadow artifact would record an invented plant response."""
+        self.store.prepare_native(ACTION_ID, state_snapshot(), 8.0, "2026-10-09T10:00:00Z")
+        self.store.complete_command(
+            ACTION_ID,
+            reference_action_at=ACTION_AT,
+            on_published_at="2026-10-09T10:00:00Z",
+            off_published_at=ACTION_AT,
+            pump_seconds=8.0,
+        )
+        collector = FeedbackCollector(
+            self.config,
+            clock=lambda: datetime(2026, 10, 9, 10, 30, tzinfo=timezone.utc),
+            state_supplier=lambda: state_snapshot("2026-10-09T10:30:00Z", humidity=37.0),
+        )
+
+        collector.run_once()
+
+        episode_id = next(self.episode_dir.glob("ep-*.json")).stem
+        records = FeedbackStore(self.config.feedback_dir).list_for_episode(episode_id)
+        self.assertEqual(1, len(records))
+        self.assertEqual("30min", records[0]["window"])
+        self.assertEqual("state.v1", records[0]["observations"]["soil"]["schema_version"])
+        self.assertEqual(37.0, records[0]["observations"]["soil"]["soil"]["humidity_percent"])
+        self.assertIsNone(records[0]["observations"]["vision"])
+
+    def test_24h_window_finalizes_once_and_keeps_missed_windows_explicit(self):
+        """Dropping finalization would leave a completed action unavailable to the closed-Episode lifecycle."""
+        self.store.prepare_native(ACTION_ID, state_snapshot(), 8.0, "2026-10-09T10:00:00Z")
+        self.store.complete_command(
+            ACTION_ID,
+            reference_action_at=ACTION_AT,
+            on_published_at="2026-10-09T10:00:00Z",
+            off_published_at=ACTION_AT,
+            pump_seconds=8.0,
+        )
+        collector = FeedbackCollector(
+            self.config,
+            clock=lambda: datetime(2026, 10, 10, 10, 0, tzinfo=timezone.utc),
+            state_supplier=lambda: state_snapshot("2026-10-10T10:00:00Z", humidity=37.0),
+        )
+
+        collector.run_once()
+        episode_path = next(self.episode_dir.glob("ep-*.json"))
+        first = EpisodeStore(self.episode_dir).read(episode_path.stem)
+        self.assertTrue(load_json(collector.tracking_path(ACTION_ID))["finalized"])
+        collector.run_once()
+        second = EpisodeStore(self.episode_dir).read(episode_path.stem)
+
+        self.assertEqual("closed", first["status"])
+        self.assertEqual(["30min", "2-3h", "6-12h"], first["outcome"]["windows_missing"])
+        self.assertEqual(first, second)
+
+    def test_capture_current_state_uses_health_snapshot_without_csv_fallback(self):
+        """Replacing the health adapter with a CSV source would make post-action evidence non-canonical."""
+        from services.soil3.feedback_collector.collector_v1 import capture_current_state
+
+        config = CollectorConfig(
+            receipt_dir=self.receipt_dir,
+            tracking_dir=self.config.tracking_dir,
+            episode_dir=self.episode_dir,
+            feedback_dir=self.config.feedback_dir,
+            phase3_state_path="/runtime/phase3-state.json",
+            sensor_log_path="/runtime/sensor-log.csv",
+            irrigation_trials_path="/runtime/irrigation-trials.json",
+            parameters={"FC": 40.0, "TARGET_LOW": 35.0, "HARD_SAFETY_LOW": 25.0},
+        )
+        snapshot = {
+            "observed_at": "2026-10-09T10:30:00Z",
+            "sensor_readings": [
+                {"timestamp": "2026-10-09T10:30:00Z", "humidity": 37.0}
+            ],
+            "system_state": {},
+            "watering_history": [],
+            "environment": {},
+            "state_file": {"age_seconds": 1.0},
+        }
+        with patch(
+            "services.soil3.feedback_collector.collector_v1.build_health_snapshot",
+            return_value=snapshot,
+        ) as health:
+            state = capture_current_state(config)
+
+        self.assertEqual("state.v1", state["schema_version"])
+        self.assertEqual(37.0, state["soil"]["humidity_percent"])
+        self.assertEqual(str(config.phase3_state_path), health.call_args.args[1])
+        self.assertNotIn("local_sensor_log_path", health.call_args.kwargs)
+
+    def test_restart_preserves_recorded_window_and_records_the_next_once(self):
+        """Dropping persisted scheduling would duplicate a feedback fact after a collector restart."""
+        self.store.prepare_native(ACTION_ID, state_snapshot(), 8.0, "2026-10-09T10:00:00Z")
+        self.store.complete_command(
+            ACTION_ID,
+            reference_action_at=ACTION_AT,
+            on_published_at="2026-10-09T10:00:00Z",
+            off_published_at=ACTION_AT,
+            pump_seconds=8.0,
+        )
+        now = [datetime(2026, 10, 9, 10, 30, tzinfo=timezone.utc)]
+        first = FeedbackCollector(
+            self.config,
+            clock=lambda: now[0],
+            state_supplier=lambda: state_snapshot(now[0].isoformat().replace("+00:00", "Z")),
+        )
+        first.run_once()
+        now[0] = datetime(2026, 10, 9, 12, 30, tzinfo=timezone.utc)
+        restarted = FeedbackCollector(
+            self.config,
+            clock=lambda: now[0],
+            state_supplier=lambda: state_snapshot(now[0].isoformat().replace("+00:00", "Z")),
+        )
+        restarted.run_once()
+        restarted.run_once()
+
+        episode_id = next(self.episode_dir.glob("ep-*.json")).stem
+        windows = [
+            record["window"]
+            for record in FeedbackStore(self.config.feedback_dir).list_for_episode(episode_id)
+        ]
+        self.assertEqual(["30min", "2-3h"], windows)
+
+    def test_missed_window_is_marked_and_never_backfilled(self):
+        """Backfilling a missed window would invent a delayed observation at the wrong time."""
+        self.store.prepare_native(ACTION_ID, state_snapshot(), 8.0, "2026-10-09T10:00:00Z")
+        self.store.complete_command(
+            ACTION_ID,
+            reference_action_at=ACTION_AT,
+            on_published_at="2026-10-09T10:00:00Z",
+            off_published_at=ACTION_AT,
+            pump_seconds=8.0,
+        )
+        collector = FeedbackCollector(
+            self.config,
+            clock=lambda: datetime(2026, 10, 9, 11, 11, tzinfo=timezone.utc),
+            state_supplier=lambda: state_snapshot("2026-10-09T11:11:00Z"),
+        )
+
+        collector.run_once()
+
+        tracking = load_json(collector.tracking_path(ACTION_ID))
+        self.assertEqual("missed", tracking["windows"]["30min"])
+        self.assertEqual([], list(self.config.feedback_dir.glob("fb-*.json")))
+
+    def test_all_expired_windows_close_without_inventing_feedback(self):
+        """Leaving an action open forever after a long outage would lose its explicit no-observation outcome."""
+        self.store.prepare_native(ACTION_ID, state_snapshot(), 8.0, "2026-10-09T10:00:00Z")
+        self.store.complete_command(
+            ACTION_ID,
+            reference_action_at=ACTION_AT,
+            on_published_at="2026-10-09T10:00:00Z",
+            off_published_at=ACTION_AT,
+            pump_seconds=8.0,
+        )
+        collector = FeedbackCollector(
+            self.config,
+            clock=lambda: datetime(2026, 10, 11, 10, 1, tzinfo=timezone.utc),
+            state_supplier=lambda: self.fail("expired windows must not capture a late state"),
+        )
+
+        collector.run_once()
+
+        episode_id = next(self.episode_dir.glob("ep-*.json")).stem
+        episode = EpisodeStore(self.episode_dir).read(episode_id)
+        self.assertEqual("closed", episode["status"])
+        self.assertEqual(0, episode["outcome"]["record_count"])
+        self.assertEqual(["30min", "2-3h", "6-12h", "24h"], episode["outcome"]["windows_missing"])
+        self.assertEqual([], list(self.config.feedback_dir.glob("fb-*.json")))
+
+    def test_available_vision_facts_are_saved_with_the_same_feedback_window(self):
+        """Writing only a Vision ref would leave feedback without the verified observations it represents."""
+        self.store.prepare_native(ACTION_ID, state_snapshot(), 8.0, "2026-10-09T10:00:00Z")
+        self.store.complete_command(
+            ACTION_ID,
+            reference_action_at=ACTION_AT,
+            on_published_at="2026-10-09T10:00:00Z",
+            off_published_at=ACTION_AT,
+            pump_seconds=8.0,
+        )
+        config = CollectorConfig(
+            receipt_dir=self.config.receipt_dir,
+            tracking_dir=self.config.tracking_dir,
+            episode_dir=self.config.episode_dir,
+            feedback_dir=self.config.feedback_dir,
+            vision_enabled=True,
+        )
+        vision = {
+            "manifest_ref": {"schema_version": "vision_run.v1", "record_id": "run", "path": "/ref", "sha256": "a"},
+            "facts": [{"schema_version": "vision.v1", "image_id": "observation"}],
+        }
+        collector = FeedbackCollector(
+            config,
+            clock=lambda: datetime(2026, 10, 9, 10, 30, tzinfo=timezone.utc),
+            state_supplier=lambda: state_snapshot("2026-10-09T10:30:00Z", humidity=37.0),
+        )
+        with patch(
+            "services.soil3.feedback_collector.collector_v1.capture_current_vision",
+            return_value=vision,
+        ):
+            collector.run_once()
+
+        episode_id = next(self.episode_dir.glob("ep-*.json")).stem
+        record = FeedbackStore(self.config.feedback_dir).list_for_episode(episode_id)[0]
+        self.assertEqual(vision, record["observations"]["vision"])
+
+    def test_vision_configuration_failure_is_recorded_as_missing_not_pipeline_failure(self):
+        """Letting an optional Vision configuration error abort soil feedback would discard real telemetry facts."""
+        from services.soil3.feedback_collector.collector_v1 import capture_current_vision
+
+        config = CollectorConfig(
+            receipt_dir=self.config.receipt_dir,
+            tracking_dir=self.config.tracking_dir,
+            episode_dir=self.config.episode_dir,
+            feedback_dir=self.config.feedback_dir,
+            vision_enabled=True,
+        )
+        self.assertIsNone(capture_current_vision(config))

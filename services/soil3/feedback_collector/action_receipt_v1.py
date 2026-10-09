@@ -15,7 +15,7 @@ import re
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 from services.soil3.cloud_strategy.validator import normalize_timestamp
 from services.soil3.telemetry.common import load_json
@@ -48,7 +48,7 @@ COMMAND_STATUS = {"prepared", "command_completed", "command_incomplete", "manual
 class ActionReceiptError(ValueError):
     """A receipt is malformed, unavailable, or conflicts with an existing ID."""
 
-    def __init__(self, code: str, reasons: list[str] | None = None):
+    def __init__(self, code: str, reasons: Optional[List[str]] = None):
         self.code = code
         self.reasons = list(reasons or [])
         detail = f": {', '.join(self.reasons)}" if self.reasons else ""
@@ -93,7 +93,7 @@ def _canonical_json(value: Dict[str, Any]) -> bytes:
 class ActionReceiptStore:
     """Create and transition one immutable-id receipt per real action attempt."""
 
-    def __init__(self, root_dir: str | Path):
+    def __init__(self, root_dir: Union[str, Path]):
         self.root = Path(root_dir)
 
     def receipt_path(self, action_id: str) -> Path:
@@ -268,8 +268,8 @@ class ActionReceiptStore:
         initial_state: Dict[str, Any],
         pump_seconds: float,
         created_at: Any,
-        trace_id: str | None,
-        episode_id: str | None,
+        trace_id: Optional[str],
+        episode_id: Optional[str],
     ) -> Dict[str, Any]:
         self.receipt_path(action_id)
         if action_source not in SOURCES:

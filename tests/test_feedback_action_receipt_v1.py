@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from services.soil3.feedback_collector.action_receipt_v1 import (
     ActionReceiptError,
@@ -115,3 +116,29 @@ class ActionReceiptStoreTests(unittest.TestCase):
         receipt = self.store.read(ACTION_ID)
         self.assertEqual("manual_confirmed", receipt["command_status"])
         self.assertTrue(receipt["execution_evidence"]["physical_action_confirmed"])
+
+    def test_collect_cli_loads_only_explicit_collector_paths(self):
+        """Making collection infer Phase3 paths would couple the sidecar to a mutable runtime layout."""
+        from services.soil3.feedback_collector import service
+
+        config_path = Path(self.temp.name) / "collector.json"
+        config_path.write_text(json.dumps({
+            "receipt_dir": str(self.store.root),
+            "tracking_dir": str(Path(self.temp.name) / "tracking"),
+            "episode_dir": str(Path(self.temp.name) / "episodes"),
+            "feedback_dir": str(Path(self.temp.name) / "feedback"),
+            "phase3_state_path": str(Path(self.temp.name) / "phase3-state.json"),
+            "parameters": {"FC": 40.0, "TARGET_LOW": 35.0, "HARD_SAFETY_LOW": 25.0},
+            "vision_enabled": False,
+        }), encoding="utf-8")
+        collector = Mock()
+        collector.run_once.return_value = {"tracked_actions": 0}
+
+        with patch("services.soil3.feedback_collector.service.FeedbackCollector", return_value=collector) as factory:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, service.main(["collect", "--config", str(config_path)]))
+
+        config = factory.call_args.args[0]
+        self.assertEqual(self.store.root, config.receipt_dir)
+        self.assertFalse(config.vision_enabled)
+        collector.run_once.assert_called_once_with()

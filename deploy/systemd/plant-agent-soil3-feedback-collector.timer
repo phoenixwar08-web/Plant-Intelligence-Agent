@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Plant Intelligence soil3 feedback collector every five minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=plant-agent-soil3-feedback-collector.service
+
+[Install]
+WantedBy=timers.target
