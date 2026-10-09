@@ -1,5 +1,8 @@
+import json
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from services.soil3.feedback_collector.action_receipt_v1 import (
@@ -90,3 +93,25 @@ class ActionReceiptStoreTests(unittest.TestCase):
 
         self.assertEqual("prepared", reopened.read(ACTION_ID)["command_status"])
         self.assertEqual("intent_only", reopened.read(ACTION_ID)["execution_evidence"]["level"])
+
+    def test_manual_record_cli_persists_confirmation_without_execution_modules(self):
+        """A manual confirmation must be a fact write, not an alternate watering path."""
+        from services.soil3.feedback_collector import service
+
+        state_path = Path(self.temp.name) / "state.json"
+        state_path.write_text(json.dumps(valid_state()), encoding="utf-8")
+        args = [
+            "manual-record",
+            "--receipt-dir", str(self.store.root),
+            "--state-file", str(state_path),
+            "--action-id", ACTION_ID,
+            "--confirmed-by", "owner",
+            "--reference-action-at", PREPARED_AT,
+            "--pump-seconds", "5",
+        ]
+
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(0, service.main(args))
+        receipt = self.store.read(ACTION_ID)
+        self.assertEqual("manual_confirmed", receipt["command_status"])
+        self.assertTrue(receipt["execution_evidence"]["physical_action_confirmed"])

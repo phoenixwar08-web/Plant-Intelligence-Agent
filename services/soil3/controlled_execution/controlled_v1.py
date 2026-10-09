@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from services.soil3.cloud_strategy.validator import fingerprint, normalize_timestamp, parse_timestamp
+from services.soil3.feedback_collector.action_receipt_v1 import ActionReceiptStore
 from services.soil3.phase3_bridge import Phase3Bridge
 from services.soil3.phase3_bridge.bridge_v1 import FORMAL_PHASE3_ENTRYPOINT
 from services.soil3.telemetry.common import atomic_write_json, load_json
@@ -116,6 +117,14 @@ def _is_uuid(value: Any) -> bool:
         return isinstance(value, str)
     except (TypeError, ValueError, AttributeError):
         return False
+
+
+def controlled_action_id(approval_id: str) -> str:
+    """Derive one stable feedback action id from the one-shot approval id."""
+    if not _is_uuid(approval_id):
+        raise ControlledExecutionError("approval_id_invalid")
+    digest = hashlib.sha256(f"controlled:{approval_id}".encode("utf-8")).hexdigest()
+    return "act-" + digest[:24]
 
 
 def _nonempty(value: Any) -> bool:
@@ -559,7 +568,13 @@ def _load_verified_chain(
 
     if reasons:
         return None, list(dict.fromkeys(reasons))
-    return {"trace": trace, "bridge": bridge, "handoff": handoff}, []
+    return {
+        "trace": trace,
+        "state": state,
+        "episode": episode,
+        "bridge": bridge,
+        "handoff": handoff,
+    }, []
 
 
 def _value_name(value: Any) -> str | None:
@@ -627,6 +642,7 @@ class ControlledPhase3Executor:
 
     def __init__(self, receipt_dir: str | Path, *, clock: Callable[[], datetime] = utc_now):
         self.receipt_dir = Path(receipt_dir)
+        self.action_receipts = ActionReceiptStore(self.receipt_dir / "feedback_actions")
         self.clock = clock
 
     def receipt_path(self, approval_id: str) -> Path:
@@ -690,9 +706,19 @@ class ControlledPhase3Executor:
         attempted = dict(started)
         attempted["phase3_called"] = True
         atomic_write_json(receipt_path, attempted)
+        action_id = controlled_action_id(approval_id)
+        self.action_receipts.prepare_controlled(
+            action_id,
+            verified["state"],
+            approval["trace_id"],
+            approval["episode_id"],
+            approval_id,
+            iso_utc(now),
+        )
         try:
             result = _invoke_formal_phase3_cycle(decision_brain)
         except Exception as error:
+            self.action_receipts.mark_incomplete(action_id, type(error).__name__)
             attempted.update({
                 "finished_at": iso_utc(self.clock()),
                 "status": "phase3_error",
@@ -711,5 +737,17 @@ class ControlledPhase3Executor:
         })
         atomic_write_json(receipt_path, attempted)
         if physical is None:
+            self.action_receipts.mark_incomplete(action_id, "phase3_result_invalid")
             raise ControlledExecutionError("phase3_result_invalid")
+        if physical:
+            finished_at = attempted["finished_at"]
+            self.action_receipts.complete_command(
+                action_id,
+                reference_action_at=finished_at,
+                on_published_at=started["started_at"],
+                off_published_at=finished_at,
+                pump_seconds=decision["action_sec"],
+            )
+        else:
+            self.action_receipts.mark_incomplete(action_id, "phase3_no_physical_action")
         return attempted

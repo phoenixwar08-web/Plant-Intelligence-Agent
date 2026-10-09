@@ -16,6 +16,8 @@ from services.soil3.cloud_gate.gate_v2 import GatePolicy, evaluate_gate_v2
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
 from services.soil3.controlled_execution import controlled_v1
 from services.soil3.controlled_execution import ControlledExecutionError, ControlledPhase3Executor
+from services.soil3.controlled_execution.controlled_v1 import controlled_action_id
+from services.soil3.feedback_collector.action_receipt_v1 import ActionReceiptStore
 from services.soil3.episode.episode_v1 import EpisodeStore
 from services.soil3.phase3_bridge import Phase3Bridge
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
@@ -249,6 +251,25 @@ class ControlledPhase3ExecutionTests(unittest.TestCase):
             self.assertEqual(
                 chain.bridge["handoff"]["request_id"], receipt["bridge_request_id"]
             )
+
+    def test_controlled_execution_records_the_verified_trace_and_episode_before_cycle(self):
+        """Removing the sidecar would leave an actual controlled run without a stable action identity."""
+        with tempfile.TemporaryDirectory() as directory:
+            chain = PersistedChain(Path(directory))
+            approval = chain.approval()
+            with mock.patch(
+                "services.soil3.controlled_execution.controlled_v1."
+                "_invoke_formal_phase3_cycle",
+                return_value=phase3_result(5.0),
+            ):
+                self.executor(directory).execute(chain.trace_dir, approval, self.brain())
+
+            store = ActionReceiptStore(Path(directory) / "receipts" / "feedback_actions")
+            action = store.read(controlled_action_id(approval["approval_id"]))
+            self.assertEqual(approval["trace_id"], action["trace_id"])
+            self.assertEqual(approval["episode_id"], action["episode_binding"]["episode_id"])
+            self.assertEqual("command_completed", action["command_status"])
+            self.assertFalse(action["execution_evidence"]["physical_action_confirmed"])
 
     def test_forged_bridge_is_rejected_even_when_trace_hash_is_rewritten(self):
         with tempfile.TemporaryDirectory() as directory:
