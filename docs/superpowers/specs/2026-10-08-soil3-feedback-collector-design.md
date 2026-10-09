@@ -242,4 +242,3 @@ Focused tests will prove:
 8. the manual CLI has no `manual_water`, Phase3, MQTT, or actuator call path;
    and
 9. existing Shadow pipeline behavior remains unchanged.
-
