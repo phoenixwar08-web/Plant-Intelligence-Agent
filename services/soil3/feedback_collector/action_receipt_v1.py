@@ -378,3 +378,63 @@ class ActionReceiptStore:
         trace_id = record.get("trace_id")
         if trace_id is not None and (not isinstance(trace_id, str) or TRACE_ID_PATTERN.fullmatch(trace_id) is None):
             raise ActionReceiptError("receipt_invalid")
+        if record.get("source_receipt_ref") is not None:
+            raise ActionReceiptError("receipt_invalid")
+
+        source = record["action_source"]
+        status = record["command_status"]
+        level = evidence.get("level")
+        physical = evidence["physical_action_confirmed"]
+        if source == "manual_confirmed":
+            if (
+                status != "manual_confirmed"
+                or level != "manual_confirmed"
+                or physical is not True
+                or not isinstance(evidence.get("confirmed_by"), str)
+                or not evidence["confirmed_by"].strip()
+                or reference is None
+                or trace_id is not None
+                or binding != {"mode": "create_independent", "episode_id": None}
+                or set(command) != {"kind", "pump_seconds"}
+                or seconds is None
+            ):
+                raise ActionReceiptError("receipt_invalid")
+            return
+
+        if source == "phase3_native":
+            if trace_id is not None or binding != {"mode": "create_independent", "episode_id": None}:
+                raise ActionReceiptError("receipt_invalid")
+            if set(command) != {"kind", "pump_seconds"} or seconds is None:
+                raise ActionReceiptError("receipt_invalid")
+        elif source == "controlled_execution":
+            if trace_id is None or binding.get("mode") != "existing":
+                raise ActionReceiptError("receipt_invalid")
+            if set(command) != {"kind", "pump_seconds", "approval_id"}:
+                raise ActionReceiptError("receipt_invalid")
+            if not isinstance(command.get("approval_id"), str) or not command["approval_id"]:
+                raise ActionReceiptError("receipt_invalid")
+        else:
+            raise ActionReceiptError("receipt_invalid")
+
+        if status == "prepared":
+            valid = level == "intent_only" and physical is False and reference is None
+        elif status == "command_completed":
+            valid = (
+                level == "command_completed"
+                and physical is False
+                and reference is not None
+                and seconds is not None
+                and normalize_timestamp(evidence.get("mqtt_on_published_at")) is not None
+                and normalize_timestamp(evidence.get("mqtt_off_published_at")) is not None
+            )
+        elif status == "command_incomplete":
+            valid = (
+                level == "command_incomplete"
+                and physical is False
+                and isinstance(evidence.get("reason"), str)
+                and bool(evidence["reason"])
+            )
+        else:
+            valid = False
+        if not valid:
+            raise ActionReceiptError("receipt_invalid")

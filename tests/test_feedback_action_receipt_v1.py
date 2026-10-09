@@ -95,6 +95,19 @@ class ActionReceiptStoreTests(unittest.TestCase):
         self.assertEqual("prepared", reopened.read(ACTION_ID)["command_status"])
         self.assertEqual("intent_only", reopened.read(ACTION_ID)["execution_evidence"]["level"])
 
+    def test_source_and_evidence_transitions_cannot_be_mixed(self):
+        """A prepared native receipt must never be promoted to a manual confirmation by file shape alone."""
+        receipt = self.store.prepare_native(ACTION_ID, valid_state(), 8.0, PREPARED_AT)
+        receipt["execution_evidence"] = {
+            "level": "manual_confirmed",
+            "physical_action_confirmed": True,
+            "confirmed_by": "owner",
+        }
+        self.store.receipt_path(ACTION_ID).write_text(json.dumps(receipt), encoding="utf-8")
+
+        with self.assertRaises(ActionReceiptError):
+            self.store.read(ACTION_ID)
+
     def test_manual_record_cli_persists_confirmation_without_execution_modules(self):
         """A manual confirmation must be a fact write, not an alternate watering path."""
         from services.soil3.feedback_collector import service
