@@ -160,6 +160,48 @@ def classify_outcome(outcome: Any) -> Optional[str]:
     return next(iter(classes)) if len(classes) == 1 else None
 
 
+def _classify_feedback_outcome(outcome: Dict[str, Any]) -> Optional[str]:
+    """Classify the existing feedback.v1 Outcome without deriving a reward."""
+    if (
+        outcome.get("source_schema") != "feedback.v1"
+        or outcome.get("contradictions")
+    ):
+        return None
+    assessments = outcome.get("assessments")
+    if not isinstance(assessments, dict):
+        return None
+    recovery = assessments.get("recovery")
+    if recovery == "good":
+        return "success"
+    if recovery in {"poor", "none"}:
+        return "failure"
+    return None
+
+
+def _has_one_confirmed_feedback_action(episode: Dict[str, Any]) -> bool:
+    actions = []
+    for entry in episode.get("executed_actions") or []:
+        if not isinstance(entry, dict):
+            continue
+        evidence = entry.get("execution_evidence")
+        if not isinstance(evidence, dict):
+            continue
+        if evidence.get("level") in {"manual_confirmed", "device_confirmed"}:
+            actions.append(entry)
+    return len(actions) == 1
+
+
+def _classify_episode_outcome(episode: Dict[str, Any]) -> Optional[str]:
+    outcome = episode.get("outcome")
+    if not isinstance(outcome, dict):
+        return None
+    if outcome.get("source_schema") != "feedback.v1":
+        return classify_outcome(outcome)
+    if not _has_one_confirmed_feedback_action(episode):
+        return None
+    return _classify_feedback_outcome(outcome)
+
+
 def compare_states(current: Dict[str, Any], historical: Dict[str, Any]) -> Dict[str, Any]:
     matched_on: List[Dict[str, Any]] = []
     missing: List[str] = []
@@ -272,7 +314,7 @@ class ExperienceRetriever:
             if episode.get("status") != "closed":
                 skipped["not_closed"] += 1
                 continue
-            outcome_class = classify_outcome(episode.get("outcome"))
+            outcome_class = _classify_episode_outcome(episode)
             if outcome_class is None:
                 skipped["outcome_unclassified"] += 1
                 continue

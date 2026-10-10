@@ -96,6 +96,7 @@ import subprocess
 import time
 import logging
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from email.header import Header
 from email.message import EmailMessage
@@ -132,8 +133,19 @@ from runtime_io import (
     update_json_locked,
 )
 from adaptive_evidence import HARD_INVALID, classify_trial
+from services.soil3.feedback_collector.action_receipt_v1 import (
+    ActionReceiptError,
+    ActionReceiptStore,
+    default_feedback_action_receipt_dir,
+    new_action_id,
+)
+from services.soil3.state.state_v1 import StateBuilder
+from services.soil3.telemetry.events import build_health_snapshot
 
 logger = logging.getLogger("decision_brain")
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 _NIGHTLY_ADVICE_COST_SCALE = 3.0
 
@@ -2348,8 +2360,10 @@ class ActuatorLayer:
     def __init__(self, cfg: ConfigManager, sensor: SensorLayer):
         self.cfg    = cfg
         self.sensor = sensor
+        self._receipt_store = ActionReceiptStore(default_feedback_action_receipt_dir())
         self._mqtt_broker: str     = MQTT_BROKER_DEFAULT
         self._mqtt_topic_pump: str = MQTT_TOPIC_PUMP_CMD_DEFAULT
+        self._bound_feedback_receipt = None
 
         if mqtt is None:
             raise RuntimeError("paho-mqtt 未安装，无法初始化水泵执行器。")
@@ -2360,6 +2374,48 @@ class ActuatorLayer:
         if state.get("pump_active"):
             logger.critical("[Layer6] 启动时发现 pump_active=true，立即发送关泵兜底指令。")
             self._force_pump_off()
+
+    def _capture_action_state(self) -> dict[str, Any]:
+        """Build one read-only factual State snapshot immediately before a command."""
+        snapshot = build_health_snapshot(
+            DEVICE_CODE_DEFAULT,
+            str(FILE_PATHS["SYSTEM_STATE"]),
+            sensor_log_path=str(FILE_PATHS["SENSOR_LOG"]),
+            local_sensor_log_path=str(FILE_PATHS["SENSOR_LOG"]),
+            irrigation_trials_path=str(FILE_PATHS["IRRIGATION_TRIALS"]),
+            service_unit="phase3_soil3.service",
+        )
+        parameters = {
+            "FC": self.cfg.FC,
+            "TARGET_LOW": self.cfg.TARGET_LOW,
+            "HARD_SAFETY_LOW": self.cfg.HARD_SAFETY_LOW,
+            "K_P": self.cfg.K_P,
+        }
+        return StateBuilder(DEVICE_CODE_DEFAULT).build_from_health_snapshot(
+            snapshot, parameters=parameters
+        )
+
+    def bind_feedback_receipt(self, receipt_store: ActionReceiptStore, action_id: str) -> None:
+        """Use one verified controlled receipt for the next real pump command only.
+
+        This changes feedback provenance only.  It does not alter Phase3's
+        decision, duration, MQTT payload, or actuator sequencing.
+        """
+        if getattr(self, "_bound_feedback_receipt", None) is not None:
+            raise RuntimeError("a feedback receipt is already bound")
+        receipt = receipt_store.read(action_id)
+        if (
+            receipt.get("action_source") != "controlled_execution"
+            or receipt.get("command_status") != "prepared"
+        ):
+            raise ActionReceiptError("invalid_transition")
+        self._bound_feedback_receipt = (receipt_store, action_id)
+
+    def clear_feedback_receipt(self, action_id: str) -> None:
+        """Drop an unused controlled receipt binding after its one formal cycle."""
+        bound = getattr(self, "_bound_feedback_receipt", None)
+        if bound is not None and bound[1] == action_id:
+            self._bound_feedback_receipt = None
 
     # ------------------------------------------------------------------
     # Fix-A：拆分为两步——execute_pump（立即返回）+ settle（渗透完成后调用）
@@ -2390,7 +2446,50 @@ class ActuatorLayer:
         返回：
           PendingSoak  : 挂载到 DecisionBrain._pending_soak 的哨兵对象
         """
-        self._activate_pump(water_sec)
+        receipt = None
+        receipt_store = self._receipt_store
+        command_evidence = None
+        if float(water_sec) > 0:
+            bound = getattr(self, "_bound_feedback_receipt", None)
+            self._bound_feedback_receipt = None
+            if bound is not None:
+                receipt_store, action_id = bound
+                receipt = receipt_store.read(action_id)
+                if (
+                    receipt.get("action_source") != "controlled_execution"
+                    or receipt.get("command_status") != "prepared"
+                ):
+                    raise ActionReceiptError("invalid_transition")
+            else:
+                receipt = receipt_store.prepare_native(
+                    new_action_id(),
+                    self._capture_action_state(),
+                    water_sec,
+                    _utc_timestamp(),
+                )
+        try:
+            command_evidence = self._activate_pump(water_sec)
+        except Exception as error:
+            if receipt is not None:
+                receipt_store.mark_incomplete(receipt["action_id"], type(error).__name__)
+            raise
+        if receipt is not None:
+            evidence = command_evidence if isinstance(command_evidence, dict) else {}
+            completed_at = _utc_timestamp()
+            try:
+                receipt_store.complete_command(
+                    receipt["action_id"],
+                    reference_action_at=completed_at,
+                    on_published_at=evidence.get("mqtt_on_published_at", receipt["created_at"]),
+                    off_published_at=evidence.get("mqtt_off_published_at", completed_at),
+                    pump_seconds=water_sec,
+                )
+            except Exception as error:
+                # MQTT on/off has already completed.  Preserve Phase3's
+                # original state and PendingSoak safety path; the prepared
+                # receipt deliberately remains uncertain and is not treated
+                # as feedback-collectable after a later restart.
+                logger.error("[Layer6] feedback receipt completion failed: %s", error)
 
         # 更新系统状态（水泵启停计数）
         large_thr = self.cfg.LARGE_WATER_THRESHOLD
@@ -2783,18 +2882,19 @@ class ActuatorLayer:
     # 硬件驱动：MQTT 开泵（对齐 phase1 send_mqtt_cmd）
     # ------------------------------------------------------------------
 
-    def _activate_pump(self, water_sec: float) -> None:
+    def _activate_pump(self, water_sec: float) -> Optional[dict[str, str]]:
         """对齐 phase1 send_mqtt_cmd：publish on → sleep → publish off。"""
         sec = max(0.0, float(water_sec))
 
         if sec <= 0:
             logger.info("  >>> [物理执行] 决议为 0s，水泵保持静默。")
-            return
+            return None
 
         logger.info(f"  >>> [物理执行] 准备下发灌溉指令，时长: {sec}s")
         pump_was_started = False
         try:
             self._publish_pump("on")
+            on_published_at = _utc_timestamp()
             pump_was_started = True
             def mark_active(state):
                 state["pump_active"] = True
@@ -2803,7 +2903,12 @@ class ActuatorLayer:
             _update_system_state(mark_active)
             time.sleep(sec)
             self._force_pump_off()
+            off_published_at = _utc_timestamp()
             logger.info(f"  >>> [物理执行] {sec}s 灌溉顺利结束，等待水分渗透。")
+            return {
+                "mqtt_on_published_at": on_published_at,
+                "mqtt_off_published_at": off_published_at,
+            }
         except Exception as e:
             if pump_was_started:
                 try:

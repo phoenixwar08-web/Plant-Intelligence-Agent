@@ -249,7 +249,12 @@ class EpisodeStore:
 
     # -- lifecycle operations -------------------------------------------
 
-    def create(self, initial_state: Dict[str, Any]) -> Dict[str, Any]:
+    def create(
+        self,
+        initial_state: Dict[str, Any],
+        *,
+        episode_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Open one episode from a real state.v1 snapshot.
 
         The binding hash is computed here from the snapshot actually stored, so
@@ -258,11 +263,17 @@ class EpisodeStore:
         reasons = validate_initial_state(initial_state)
         if reasons:
             raise EpisodeError("validation_failed", reasons)
+        if episode_id is None:
+            episode_id = new_episode_id()
+        elif not isinstance(episode_id, str) or EPISODE_ID_PATTERN.fullmatch(episode_id) is None:
+            raise EpisodeError("invalid_episode_id")
+        if self.episode_path(episode_id).exists():
+            raise EpisodeError("episode_already_exists")
         snapshot = copy.deepcopy(initial_state)
         now = utc_now()
         record = {
             "schema_version": SCHEMA_VERSION,
-            "episode_id": new_episode_id(),
+            "episode_id": episode_id,
             "device_code": EXPECTED_DEVICE_CODE,
             "status": STATUS_OPEN,
             "created_at": now,

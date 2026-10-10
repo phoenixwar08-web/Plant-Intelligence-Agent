@@ -207,6 +207,47 @@ class ExperienceRetrievalTests(unittest.TestCase):
         self.assertIsNone(classify_outcome({"soil_delta": 8.0}))
         self.assertIsNone(classify_outcome({"result": "success", "status": "failed"}))
 
+    def test_feedback_outcome_requires_one_confirmed_real_action(self):
+        """Treating MQTT completion as causal confirmation would teach Experience from an unproven action."""
+        outcome = {
+            "source_schema": "feedback.v1",
+            "contradictions": [],
+            "assessments": {"recovery": "good"},
+        }
+        confirmed = episode(
+            "ep-000000000000000000000040",
+            state(),
+            outcome,
+            actions=[{
+                "kind": "water",
+                "execution_evidence": {
+                    "level": "manual_confirmed",
+                    "physical_action_confirmed": True,
+                },
+            }],
+        )
+        unconfirmed = episode(
+            "ep-000000000000000000000041",
+            state(),
+            outcome,
+            actions=[{
+                "kind": "water",
+                "execution_evidence": {
+                    "level": "command_completed",
+                    "physical_action_confirmed": False,
+                },
+            }],
+        )
+        self.write_episode(confirmed)
+        self.write_episode(unconfirmed)
+
+        result = ExperienceRetriever(self.root).retrieve(self.current)
+
+        self.assertEqual([confirmed["episode_id"]], [
+            item["episode_id"] for item in result["successful_cases"]
+        ])
+        self.assertEqual(1, result["skipped_history"]["outcome_unclassified"])
+
     def test_invalid_request_is_rejected(self):
         with self.assertRaisesRegex(RetrievalError, "state.v1"):
             ExperienceRetriever(self.root).retrieve({})

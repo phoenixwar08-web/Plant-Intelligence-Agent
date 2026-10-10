@@ -1,0 +1,17 @@
+[Unit]
+Description=Plant Intelligence soil3 factual feedback collector
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/water/releases/plant-intelligence-release
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/root/water/releases/plant-intelligence-release
+ExecStart=/usr/bin/python3 -m services.soil3.feedback_collector.service collect --config /root/water/runtime/instances/soil3/agent_chain/config/feedback-collector.json
+NoNewPrivileges=true
+PrivateTmp=true
+BindReadOnlyPaths=-/tmp/.s.PGSQL.7654
+ProtectSystem=full
+ReadOnlyPaths=/root/water
+ReadWritePaths=/root/water/runtime/instances/soil3/agent_chain
