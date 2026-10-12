@@ -8,12 +8,15 @@ from .evaluator_v1 import (
     TriggerDecision,
     evaluate_trigger,
 )
+from .shadow_store import TriggerShadowError, TriggerShadowStore
 
 __all__ = [
     "CALL_QWEN",
     "LOCAL_SAFETY_ONLY",
     "SKIP_CLOUD",
     "TriggerDecision",
+    "TriggerShadowError",
+    "TriggerShadowStore",
     "build_decision_context",
     "evaluate_trigger",
     "semantic_projection",

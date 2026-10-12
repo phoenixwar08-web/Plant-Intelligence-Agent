@@ -6,6 +6,8 @@ from services.soil3.cloud_trigger import (
     CALL_QWEN,
     LOCAL_SAFETY_ONLY,
     SKIP_CLOUD,
+    TriggerShadowError,
+    TriggerShadowStore,
     build_decision_context,
     evaluate_trigger,
     semantic_projection,
@@ -180,6 +182,119 @@ class TriggerEvaluatorTests(unittest.TestCase):
         result = evaluate_trigger(changed, baseline, deny_age_seconds=18000)
         self.assertEqual(CALL_QWEN, result.decision)
         self.assertIn("semantic_context_changed", result.reason_codes)
+
+
+class TriggerShadowStoreTests(unittest.TestCase):
+    def state_ref(self):
+        return {
+            "schema_version": "state.v1",
+            "path": "/runtime/state/latest.json",
+            "sha256": "a" * 64,
+            "record_id": None,
+        }
+
+    def actual_result(self, *, accepted=True):
+        return {
+            "provider": "qwen_dashscope",
+            "model": "qwen3.8-flash",
+            "validator_accepted": accepted,
+            "validator_reason_codes": [] if accepted else ["actions_invalid"],
+            "strategy_ref": (
+                {
+                    "schema_version": "strategy.v1",
+                    "path": "/runtime/strategy/latest.json",
+                    "sha256": "b" * 64,
+                    "record_id": "strat-1",
+                }
+                if accepted
+                else None
+            ),
+            "water_proposed": accepted,
+            "proposed_water_seconds": 5.0 if accepted else 0.0,
+            "gate_ref": None,
+            "gate_decision": None,
+            "gate_reason_codes": None,
+            "token_usage": None,
+            "cost": None,
+            "latency": {"source": "runtime_monotonic_clock", "value": 12.0, "unit": "ms"},
+        }
+
+    def test_create_finalize_are_atomic_set_once_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TriggerShadowStore(Path(directory))
+            context = build_decision_context(complete_state())
+            created = store.create(
+                TRACE_ID,
+                self.state_ref(),
+                evaluate_trigger(context, None, deny_age_seconds=18000),
+                context,
+                None,
+            )
+            self.assertEqual("trigger_shadow.v1", created["schema_version"])
+            self.assertEqual(CALL_QWEN, created["trigger_decision"])
+            self.assertIsNone(created["actual_qwen_result"])
+            self.assertEqual(
+                {"phase3_called": False, "physical_actions_performed": False},
+                created["execution"],
+            )
+            self.assertEqual(created, store.read(TRACE_ID))
+            self.assertEqual(created, store.create(
+                TRACE_ID,
+                self.state_ref(),
+                evaluate_trigger(context, None, deny_age_seconds=18000),
+                context,
+                None,
+            ))
+
+            finalized = store.finalize(TRACE_ID, self.actual_result())
+            self.assertEqual(self.actual_result(), finalized["actual_qwen_result"])
+            self.assertEqual(finalized, store.finalize(TRACE_ID, self.actual_result()))
+            with self.assertRaises(TriggerShadowError):
+                store.finalize(TRACE_ID, self.actual_result(accepted=False))
+
+    def test_refuses_conflicting_create_and_corrupt_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TriggerShadowStore(Path(directory))
+            context = build_decision_context(complete_state())
+            decision = evaluate_trigger(context, None, deny_age_seconds=18000)
+            store.create(TRACE_ID, self.state_ref(), decision, context, None)
+            changed = build_decision_context(complete_state())
+            changed["humidity"] = 40.0
+            with self.assertRaises(TriggerShadowError):
+                store.create(TRACE_ID, self.state_ref(), decision, changed, None)
+            store.path_for(TRACE_ID).write_text("{}", encoding="utf-8")
+            with self.assertRaises(TriggerShadowError):
+                store.read(TRACE_ID)
+
+    def test_baseline_advances_only_for_call_with_validator_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TriggerShadowStore(Path(directory))
+            context = build_decision_context(complete_state())
+            first_id = "tr-" + "4" * 24
+            skip_id = "tr-" + "5" * 24
+            rejected_id = "tr-" + "6" * 24
+            store.create(
+                first_id,
+                self.state_ref(),
+                evaluate_trigger(context, None, deny_age_seconds=18000),
+                context,
+                None,
+            )
+            store.finalize(first_id, self.actual_result())
+
+            skip = evaluate_trigger(context, semantic_projection(context), deny_age_seconds=18000)
+            store.create(skip_id, self.state_ref(), skip, context, store.artifact_ref(first_id))
+            store.finalize(skip_id, self.actual_result())
+
+            changed = build_decision_context(complete_state())
+            changed["trends"]["humidity_1h"] = 1.0
+            call = evaluate_trigger(changed, semantic_projection(context), deny_age_seconds=18000)
+            store.create(rejected_id, self.state_ref(), call, changed, store.artifact_ref(first_id))
+            store.finalize(rejected_id, self.actual_result(accepted=False))
+
+            baseline = store.latest_valid_call_baseline()
+            self.assertEqual(first_id, baseline["ref"]["record_id"])
+            self.assertEqual(semantic_projection(context), baseline["semantic_projection"])
 
 
 if __name__ == "__main__":
