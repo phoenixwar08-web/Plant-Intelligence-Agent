@@ -144,6 +144,74 @@ class DecisionContextTests(unittest.TestCase):
 
         self.assertIsNone(context["last_real_action"])
 
+    def test_real_phase3_protection_records_are_interpreted_without_active_field(self):
+        state = complete_state()
+        state["safety"]["flags"]["pending_soak"] = {
+            "pump_end_time_wall": 1791806300.0,
+            "soak_duration": 1800.0,
+            "water_sec": 5.0,
+        }
+        state["safety"]["flags"]["dynamic_cooldown"] = {
+            "cooldown_sec": 3600.0,
+            "updated_at": 1791806400.0,
+            "reason": "battle_mid_safe_gap",
+        }
+        state["safety"]["flags"]["hard_safety_low_guard"] = {
+            "effective_low": 28.0,
+            "target_low": 32.0,
+            "reason": "derived",
+            "updated_at": 1791806400.0,
+        }
+
+        context = build_decision_context(
+            state,
+            phase3_system_state={"last_normal_irrigation_timestamp": 1791806200.0},
+        )
+
+        self.assertEqual("active", context["safety_flags"]["pending_soak"])
+        self.assertEqual("active", context["safety_flags"]["dynamic_cooldown"])
+        self.assertEqual("inactive", context["safety_flags"]["hard_safety_low_guard"])
+        decision = evaluate_trigger(context, None, deny_age_seconds=18000)
+        self.assertEqual(SKIP_CLOUD, decision.decision)
+        self.assertIn("protection_active:pending_soak", decision.reason_codes)
+        self.assertIn("protection_active:dynamic_cooldown", decision.reason_codes)
+
+    def test_independent_real_action_resolves_collector_episode_feedback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipts = ActionReceiptStore(root / "receipts")
+            feedback = FeedbackStore(root / "feedback")
+            receipts.record_manual(
+                ACTION_ID,
+                complete_state(),
+                confirmed_by="owner",
+                reference_action_at="2026-10-12T10:01:00Z",
+                pump_seconds=5.0,
+            )
+            independent_episode_id = "ep-" + ACTION_ID[4:]
+            stored_feedback = feedback.record(
+                {
+                    "episode_id": independent_episode_id,
+                    "window": "30min",
+                    "observed_at": "2026-10-12T10:31:00Z",
+                    "reference_action_at": "2026-10-12T10:01:00Z",
+                    "observations": {"soil": {"humidity_percent": 36.0}},
+                }
+            )
+
+            context = build_decision_context(
+                complete_state(),
+                receipt_dir=root / "receipts",
+                feedback_dir=root / "feedback",
+            )
+
+        self.assertEqual(independent_episode_id, context["last_real_action"]["episode_id"])
+        self.assertEqual("available", context["feedback_status"]["status"])
+        self.assertEqual(
+            stored_feedback["feedback_id"],
+            context["feedback_status"]["record"]["feedback_id"],
+        )
+
 
 class TriggerEvaluatorTests(unittest.TestCase):
     def context(self):

@@ -132,7 +132,7 @@ git commit -m "fix: provide canonical history for state trends"
 - Test: `tests/test_cloud_trigger_shadow.py`
 
 **Interfaces:**
-- Produces: `build_decision_context(state, *, last_model_decision=None, receipt_dir=None, feedback_dir=None) -> dict[str, Any]`.
+- Produces: `build_decision_context(state, *, last_model_decision=None, receipt_dir=None, feedback_dir=None, phase3_system_state=None) -> dict[str, Any]`.
 - Produces: `semantic_projection(context) -> dict[str, Any]`.
 - Produces: `TriggerDecision(decision: str, reason_codes: tuple[str, ...])`.
 - Produces: `evaluate_trigger(context, baseline_context, *, deny_age_seconds) -> TriggerDecision`.

@@ -41,6 +41,8 @@ RECEIPT_FIELDS = {
     "trace_id",
     "source_receipt_ref",
 }
+
+
 SOURCES = {"phase3_native", "controlled_execution", "manual_confirmed"}
 COMMAND_STATUS = {"prepared", "command_completed", "command_incomplete", "manual_confirmed"}
 DEFAULT_RECEIPT_DIR = "/root/water/runtime/instances/soil3/agent_chain/feedback_actions"
@@ -54,6 +56,34 @@ class ActionReceiptError(ValueError):
         self.reasons = list(reasons or [])
         detail = f": {', '.join(self.reasons)}" if self.reasons else ""
         super().__init__(f"{code}{detail}")
+
+
+def episode_id_for_receipt(receipt: Any) -> str:
+    """Resolve the Episode used by the Collector for a validated receipt.
+
+    Controlled execution keeps its explicit binding. Native and manually
+    confirmed actions use the Collector's deterministic one-action Episode id,
+    so observers can associate later feedback without guessing a directory or
+    racing the Collector's tracking write.
+    """
+
+    if not isinstance(receipt, dict):
+        raise ActionReceiptError("receipt_invalid")
+    action_id = receipt.get("action_id")
+    binding = receipt.get("episode_binding")
+    if (
+        not isinstance(action_id, str)
+        or ACTION_ID_PATTERN.fullmatch(action_id) is None
+        or not isinstance(binding, dict)
+    ):
+        raise ActionReceiptError("receipt_invalid")
+    if binding.get("mode") == "existing":
+        episode_id = binding.get("episode_id")
+        if isinstance(episode_id, str) and EPISODE_ID_PATTERN.fullmatch(episode_id):
+            return episode_id
+    elif binding == {"mode": "create_independent", "episode_id": None}:
+        return "ep-" + action_id[4:]
+    raise ActionReceiptError("receipt_invalid")
 
 
 def new_action_id() -> str:

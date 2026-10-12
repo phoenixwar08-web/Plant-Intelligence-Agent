@@ -191,11 +191,13 @@ def _opengauss_recent_soil_readings(
     lower_text = lower.isoformat()
     safe_device = str(device_name).replace("'", "''")
     sql = (
-        "SELECT recv_time::text,humidity,temp,ec FROM soil_sensor_readings "
+        "SELECT recv_time::text,humidity,temp,ec FROM ("
+        "SELECT recv_time,humidity,temp,ec,id FROM soil_sensor_readings "
         "WHERE device_code='%s' AND humidity IS NOT NULL AND temp IS NOT NULL "
         "AND ec IS NOT NULL AND recv_time >= '%s'::timestamptz "
         "AND recv_time <= '%s'::timestamptz "
-        "ORDER BY recv_time ASC,id ASC LIMIT %d;"
+        "ORDER BY recv_time DESC,id DESC LIMIT %d"
+        ") AS recent_rows ORDER BY recv_time ASC,id ASC;"
     ) % (safe_device, lower_text, upper_text, row_limit)
     try:
         result = runner(

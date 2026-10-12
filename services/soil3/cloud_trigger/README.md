@@ -21,6 +21,12 @@ only that the MQTT on/off publication flow completed; it is not confirmed
 physical causality. Only `manual_confirmed` or future `device_confirmed`
 evidence is projected as a confirmed action.
 
+Legacy Phase3 protection records are interpreted from their factual timing:
+pending soak uses its persisted end/duration, while dynamic cooldown uses the
+same Phase3 state's last normal-irrigation timestamp. Native/manual action
+Feedback uses the Collector's public deterministic Episode binding rather than
+guessing a tracking-file location.
+
 The deterministic evaluator has fixed priority:
 
 1. Missing/stale safety inputs, a reached hard safety line, dangerous flags,

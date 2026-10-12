@@ -38,7 +38,8 @@ becomes `None`, which `StateBuilder` preserves as a missing State fact.
 The openGauss adapter gains an optional history query. Its upper bound is the
 snapshot timestamp, so a future row cannot enter State. Its lower bound is six
 hours plus the existing `StateBuilder` 30-minute horizon tolerance. Valid rows
-are returned in ascending timestamp order. Invalid rows are omitted; query
+are bounded by selecting the newest configured number of rows, then returned
+in ascending timestamp order. Invalid rows are omitted; query
 failure returns no canonical facts and never falls back to CSV.
 
 `build_health_snapshot` keeps its current latest-only behavior by default.
@@ -63,6 +64,12 @@ to produce `humidity_1h`, `humidity_3h`, and `humidity_6h`.
 Unknown facts remain `None` or an explicit unavailable status. A
 `command_completed` receipt may be observed, but only `manual_confirmed` or
 `device_confirmed` evidence is treated as causal post-action context.
+Native/manual receipt association reuses the Collector's public deterministic
+action-to-Episode resolver, so Feedback lookup does not guess a tracking path.
+For real Phase3 records that predate an explicit `active` member, pending soak
+uses its persisted deadline and dynamic cooldown combines its duration with
+the same Phase3 state's last normal irrigation timestamp. Missing or malformed
+timing facts remain invalid rather than being normalized to inactive.
 
 The semantic projection contains dynamic-boundary relations, trend directions,
 normalized protection/safety states, and confirmed action/Feedback identities.

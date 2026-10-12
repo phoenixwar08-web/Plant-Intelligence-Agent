@@ -15,7 +15,10 @@ from typing import Any, Callable, Dict, Optional
 
 from services.soil3.cloud_strategy.validator import parse_timestamp
 from services.soil3.episode.episode_v1 import EpisodeStore
-from services.soil3.feedback_collector.action_receipt_v1 import ActionReceiptStore
+from services.soil3.feedback_collector.action_receipt_v1 import (
+    ActionReceiptStore,
+    episode_id_for_receipt,
+)
 from services.soil3.feedback.feedback_v1 import FeedbackStore, WINDOW_RANGES_MINUTES
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry.events import build_health_snapshot
@@ -388,11 +391,9 @@ class FeedbackCollector:
             return value
 
         binding = receipt["episode_binding"]
+        episode_id = episode_id_for_receipt(receipt)
         if binding["mode"] == "existing":
-            episode_id = binding["episode_id"]
             self.episodes.read(episode_id)
-        else:
-            episode_id = "ep-" + receipt["action_id"][4:]
         value = {
             "schema_version": TRACKING_SCHEMA,
             "action_id": action_id,

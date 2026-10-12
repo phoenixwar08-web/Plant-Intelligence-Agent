@@ -519,11 +519,16 @@ def _start_trigger_shadow(
     try:
         store = TriggerShadowStore(config.trigger_shadow_dir)
         baseline = store.latest_valid_call_baseline()
+        try:
+            phase3_system_state = json.loads(config.phase3_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            phase3_system_state = None
         context = build_decision_context(
             state,
             last_model_decision=(baseline.get("actual_qwen_result") if baseline else None),
             receipt_dir=config.feedback_action_receipt_dir,
             feedback_dir=config.feedback_dir,
+            phase3_system_state=phase3_system_state,
         )
         decision = evaluate_trigger(
             context,

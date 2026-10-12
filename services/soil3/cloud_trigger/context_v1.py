@@ -11,7 +11,9 @@ from services.soil3.feedback.feedback_v1 import FeedbackError, FeedbackStore
 from services.soil3.feedback_collector.action_receipt_v1 import (
     ActionReceiptError,
     ActionReceiptStore,
+    episode_id_for_receipt,
 )
+from services.soil3.cloud_strategy.validator import parse_timestamp
 from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS
 
 
@@ -41,13 +43,53 @@ def _distance(left: Any, right: Any) -> float | None:
     return round(left_number - right_number, 3)
 
 
-def _active_state(value: Any) -> str:
+def _timestamp_seconds(value: Any) -> float | None:
+    parsed = parse_timestamp(value)
+    return parsed.timestamp() if parsed is not None else None
+
+
+def _active_state(
+    name: str,
+    value: Any,
+    *,
+    observed_at: Any,
+    phase3_system_state: Any,
+) -> str:
     if isinstance(value, bool):
         return "active" if value else "inactive"
     if isinstance(value, dict) and isinstance(value.get("active"), bool):
         return "active" if value["active"] else "inactive"
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value in (0, 1):
         return "active" if value == 1 else "inactive"
+    if not isinstance(value, dict):
+        return "invalid"
+
+    observed_seconds = _timestamp_seconds(observed_at)
+    if name == "pending_soak":
+        pump_end = _finite(value.get("pump_end_time_wall"))
+        duration = _finite(value.get("soak_duration"))
+        if pump_end is None or duration is None or duration < 0 or observed_seconds is None:
+            return "invalid"
+        return "active" if observed_seconds <= pump_end + duration else "inactive"
+    if name == "dynamic_cooldown":
+        cooldown = _finite(value.get("cooldown_sec"))
+        if not isinstance(phase3_system_state, dict):
+            return "invalid"
+        phase3 = phase3_system_state
+        last_water = _finite(phase3.get("last_normal_irrigation_timestamp"))
+        if cooldown is None or cooldown < 0 or observed_seconds is None:
+            return "invalid"
+        if last_water is None:
+            return "inactive" if "last_normal_irrigation_timestamp" not in phase3 else "invalid"
+        return "active" if observed_seconds < last_water + cooldown else "inactive"
+    if name == "hard_safety_low_guard":
+        effective_low = _finite(value.get("effective_low"))
+        updated_at = _finite(value.get("updated_at"))
+        if effective_low is None or updated_at is None or effective_low < 0:
+            return "invalid"
+        # This Phase3 record guards the dynamic threshold itself. It is not an
+        # active hazard unless a producer explicitly supplies active=true.
+        return "inactive"
     return "invalid"
 
 
@@ -82,8 +124,10 @@ def _action_summary(receipt: dict[str, Any] | None) -> dict[str, Any] | None:
     evidence = evidence if isinstance(evidence, dict) else {}
     level = evidence.get("level") if isinstance(evidence.get("level"), str) else None
     physical = evidence.get("physical_action_confirmed") is True
-    binding = receipt.get("episode_binding")
-    episode_id = binding.get("episode_id") if isinstance(binding, dict) else None
+    try:
+        episode_id = episode_id_for_receipt(receipt)
+    except ActionReceiptError:
+        episode_id = None
     return {
         "action_id": receipt.get("action_id"),
         "action_source": receipt.get("action_source"),
@@ -134,6 +178,7 @@ def build_decision_context(
     last_model_decision: Any = None,
     receipt_dir: str | Path | None = None,
     feedback_dir: str | Path | None = None,
+    phase3_system_state: Any = None,
 ) -> dict[str, Any]:
     """Project State and durable local records; unknown never becomes safe."""
 
@@ -154,7 +199,16 @@ def build_decision_context(
     for name in PHASE3_SAFETY_FLAG_KEYS:
         if name == "predictor_circuit":
             continue
-        safety_flags[name] = _active_state(flags[name]) if name in flags else "missing"
+        safety_flags[name] = (
+            _active_state(
+                name,
+                flags[name],
+                observed_at=state.get("observed_at"),
+                phase3_system_state=phase3_system_state,
+            )
+            if name in flags
+            else "missing"
+        )
     predictor = flags.get("predictor_circuit")
     predictor_state = predictor.get("state") if isinstance(predictor, dict) else None
     if "predictor_circuit" not in flags:

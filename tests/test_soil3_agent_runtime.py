@@ -385,6 +385,7 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
         sql = commands[0][-1]
         self.assertIn("recv_time >=", sql)
         self.assertIn("recv_time <=", sql)
+        self.assertIn("ORDER BY recv_time DESC,id DESC LIMIT 256", sql)
         self.assertIn("ORDER BY recv_time ASC,id ASC", sql)
 
     def test_history_query_failure_keeps_all_trends_missing(self):
