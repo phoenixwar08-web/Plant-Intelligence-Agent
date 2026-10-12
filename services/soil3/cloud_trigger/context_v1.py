@@ -225,5 +225,4 @@ def semantic_projection(context: Any) -> dict[str, Any]:
         "confirmed_action_id": action.get("action_id") if action.get("causal_confirmed") is True else None,
         "feedback_id": feedback_record.get("feedback_id"),
         "feedback_window": feedback_record.get("window"),
-        "last_model_decision": copy.deepcopy(context.get("last_model_decision")),
     }

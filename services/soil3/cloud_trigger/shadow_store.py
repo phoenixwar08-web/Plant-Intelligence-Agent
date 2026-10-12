@@ -249,6 +249,7 @@ class TriggerShadowStore:
             "ref": self.artifact_ref(latest["trace_id"]),
             "decision_context_snapshot": copy.deepcopy(latest["decision_context_snapshot"]),
             "semantic_projection": copy.deepcopy(latest["semantic_projection"]),
+            "actual_qwen_result": copy.deepcopy(latest["actual_qwen_result"]),
         }
 
     @staticmethod

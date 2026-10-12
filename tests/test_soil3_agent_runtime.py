@@ -627,6 +627,73 @@ class PipelineTests(StateProducerTests):
             self.assertIsNone(trace["decision"]["episode_ref"])
             self.assertFalse(config.episode_dir.exists())
 
+            from services.soil3.cloud_trigger import TriggerShadowStore
+
+            shadow = TriggerShadowStore(config.trigger_shadow_dir).read(record["trace_id"])
+            self.assertFalse(shadow["actual_qwen_result"]["validator_accepted"])
+            self.assertIsNone(shadow["actual_qwen_result"]["strategy_ref"])
+
+    def test_all_trigger_shadow_decisions_still_call_qwen_once(self):
+        from services.soil3.agent_runtime import runtime_v1
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_trigger import (
+            CALL_QWEN,
+            LOCAL_SAFETY_ONLY,
+            SKIP_CLOUD,
+            TriggerDecision,
+            TriggerShadowStore,
+        )
+
+        for decision_name in (CALL_QWEN, SKIP_CLOUD, LOCAL_SAFETY_ONLY):
+            with self.subTest(decision=decision_name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+                with mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                    return_value=self.health_snapshot(),
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                    return_value=TriggerDecision(decision_name, ("test_reason",)),
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.run_chain",
+                    wraps=runtime_v1.run_chain,
+                ) as cloud_call:
+                    record = run_pipeline(config)
+
+                cloud_call.assert_called_once()
+                self.assertEqual(
+                    str(config.trigger_shadow_dir / f'{record["trace_id"]}.json'),
+                    record["trigger_shadow_path"],
+                )
+                shadow = TriggerShadowStore(config.trigger_shadow_dir).read(record["trace_id"])
+                self.assertEqual(decision_name, shadow["trigger_decision"])
+                self.assertTrue(shadow["actual_qwen_result"]["validator_accepted"])
+                self.assertEqual("deny", shadow["actual_qwen_result"]["gate_decision"])
+                self.assertFalse(shadow["execution"]["phase3_called"])
+
+    def test_trigger_observer_failure_does_not_skip_qwen(self):
+        from services.soil3.agent_runtime import runtime_v1
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_decision_context",
+                side_effect=RuntimeError("observer failed"),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                wraps=runtime_v1.run_chain,
+            ) as cloud_call:
+                record = run_pipeline(config)
+
+            cloud_call.assert_called_once()
+            self.assertIsNone(record["trigger_shadow_path"])
+            self.assertFalse(config.trigger_shadow_dir.exists())
+
     def test_accepted_qwen_strategy_is_stored_with_real_provider_provenance(self):
         """A validated proposal must name the provider that actually produced it."""
         from services.soil3.agent_runtime.runtime_v1 import (
