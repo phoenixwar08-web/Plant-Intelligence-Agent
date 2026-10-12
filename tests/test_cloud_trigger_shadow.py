@@ -176,6 +176,30 @@ class DecisionContextTests(unittest.TestCase):
         self.assertIn("protection_active:pending_soak", decision.reason_codes)
         self.assertIn("protection_active:dynamic_cooldown", decision.reason_codes)
 
+    def test_recent_response_guard_uses_expiry_not_stale_active_bit(self):
+        expired = complete_state()
+        expired["safety"]["flags"]["recent_response_guard"] = {
+            "active": True,
+            "expires_at": 1791806399.0,
+            "delta_per_sec": 0.8,
+        }
+        active = complete_state()
+        active["safety"]["flags"]["recent_response_guard"] = {
+            "active": True,
+            "expires_at": 1791806401.0,
+            "delta_per_sec": 0.8,
+        }
+
+        expired_context = build_decision_context(expired)
+        active_context = build_decision_context(active)
+
+        self.assertEqual("inactive", expired_context["safety_flags"]["recent_response_guard"])
+        self.assertEqual("active", active_context["safety_flags"]["recent_response_guard"])
+        self.assertEqual(
+            SKIP_CLOUD,
+            evaluate_trigger(active_context, None, deny_age_seconds=18000).decision,
+        )
+
     def test_independent_real_action_resolves_collector_episode_feedback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

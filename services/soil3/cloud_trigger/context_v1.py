@@ -57,6 +57,23 @@ def _active_state(
 ) -> str:
     if isinstance(value, bool):
         return "active" if value else "inactive"
+    if name == "recent_response_guard" and isinstance(value, dict):
+        active = value.get("active")
+        if not isinstance(active, bool):
+            return "invalid"
+        if not active:
+            return "inactive"
+        observed_seconds = _timestamp_seconds(observed_at)
+        expires_at = _finite(value.get("expires_at"))
+        delta_per_sec = _finite(value.get("delta_per_sec"))
+        if (
+            observed_seconds is None
+            or expires_at is None
+            or delta_per_sec is None
+            or delta_per_sec <= 0
+        ):
+            return "invalid"
+        return "active" if observed_seconds < expires_at else "inactive"
     if isinstance(value, dict) and isinstance(value.get("active"), bool):
         return "active" if value["active"] else "inactive"
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value in (0, 1):
