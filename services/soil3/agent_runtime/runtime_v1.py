@@ -18,6 +18,7 @@ from services.soil3.cloud_strategy.validator import PROMPT_VERSION, StrategyVali
 from services.soil3.episode.episode_v1 import EpisodeStore
 from services.soil3.phase3_bridge import Phase3Bridge
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
+from services.soil3.state.phase3_parameters import load_state_parameters
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry.events import build_health_snapshot
 from services.soil3.trace import TraceStore
@@ -31,6 +32,7 @@ CONFIG_FIELDS = {
     "vision",
     "experience",
     "phase3_state_path",
+    "phase3_parameters_path",
     "sensor_log_path",
     "irrigation_trials_path",
     "phase3_service_unit",
@@ -99,6 +101,7 @@ class RuntimeConfig:
     experience_enabled: bool
     experience_limit_per_class: int
     phase3_state_path: Path
+    phase3_parameters_path: Path
     sensor_log_path: Path
     irrigation_trials_path: Path
     phase3_service_unit: str
@@ -175,6 +178,9 @@ class RuntimeConfig:
         phase3_state_path = Path(value["phase3_state_path"])
         if phase3_state_path.name != "system_state.json":
             raise ValueError("phase3_state_path must name system_state.json")
+        phase3_parameters_path = Path(value["phase3_parameters_path"])
+        if phase3_parameters_path.name != "evolving_params.json":
+            raise ValueError("phase3_parameters_path must name evolving_params.json")
 
         strategy_validator = value["strategy_validator"]
         if not isinstance(strategy_validator, dict):
@@ -194,6 +200,7 @@ class RuntimeConfig:
             experience_enabled=experience["enabled"],
             experience_limit_per_class=experience["limit_per_class"],
             phase3_state_path=phase3_state_path,
+            phase3_parameters_path=phase3_parameters_path,
             sensor_log_path=Path(value["sensor_log_path"]),
             irrigation_trials_path=Path(value["irrigation_trials_path"]),
             phase3_service_unit="phase3_soil3.service",
@@ -268,7 +275,14 @@ def write_state_snapshot(config: RuntimeConfig) -> dict[str, Any]:
         irrigation_trials_path=str(config.irrigation_trials_path),
         service_unit=config.phase3_service_unit,
     )
-    state = StateBuilder(config.device_code).build_from_health_snapshot(snapshot)
+    parameters = load_state_parameters(
+        config.phase3_parameters_path,
+        snapshot.get("system_state") if isinstance(snapshot, dict) else None,
+    )
+    state = StateBuilder(config.device_code).build_from_health_snapshot(
+        snapshot,
+        parameters,
+    )
     atomic_write_json(config.state_output, state)
     return state
 

@@ -88,6 +88,7 @@ class StateProducerTests(unittest.TestCase):
             "vision": {"enabled": False},
             "experience": {"enabled": False, "limit_per_class": 3},
             "phase3_state_path": str(root / "phase3" / "system_state.json"),
+            "phase3_parameters_path": str(root / "phase3" / "evolving_params.json"),
             "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),
             "irrigation_trials_path": str(root / "phase3" / "irrigation_trials.json"),
             "phase3_service_unit": "phase3_soil3.service",
@@ -154,6 +155,70 @@ class StateProducerTests(unittest.TestCase):
             )
             self.assertNotIn("pending_soak", state["safety"]["flags"])
             self.assertNotIn("cloud_protection", state["safety"]["flags"])
+
+    def test_state_writer_maps_real_phase3_parameters_and_effective_hard_low(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, write_state_snapshot
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parameters_path = root / "phase3" / "evolving_params.json"
+            parameters_path.parent.mkdir(parents=True)
+            parameters_path.write_text(
+                json.dumps({"FC": 45.775, "TARGET_LOW": 32.0, "K_P": 1.53266}),
+                encoding="utf-8",
+            )
+            snapshot = self.health_snapshot()
+            snapshot["system_state"]["hard_safety_low_guard"] = {
+                "active": False,
+                "effective_low": 27.179,
+            }
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=snapshot,
+            ):
+                state = write_state_snapshot(config)
+
+            self.assertEqual(45.775, state["safety"]["field_capacity"])
+            self.assertEqual(32.0, state["safety"]["target_low"])
+            self.assertEqual(27.179, state["safety"]["hard_safety_low"])
+            self.assertEqual(1.53266, state["safety"]["kp"])
+
+    def test_state_writer_keeps_missing_or_malformed_parameters_null(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, write_state_snapshot
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parameters_path = root / "phase3" / "evolving_params.json"
+            parameters_path.parent.mkdir(parents=True)
+            parameters_path.write_text(
+                json.dumps({"FC": "invalid", "TARGET_LOW": None, "K_P": {"bad": 1}}),
+                encoding="utf-8",
+            )
+            snapshot = self.health_snapshot()
+            snapshot["system_state"]["hard_safety_low_guard"] = {
+                "active": False,
+                "effective_low": "invalid",
+            }
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=snapshot,
+            ):
+                state = write_state_snapshot(config)
+
+            self.assertEqual(
+                {
+                    "field_capacity": None,
+                    "target_low": None,
+                    "hard_safety_low": None,
+                    "kp": None,
+                    "flags": snapshot["system_state"],
+                },
+                state["safety"],
+            )
 
     def test_runtime_config_rejects_non_soil3_or_exploration(self):
         """Fails if a future runtime config broadens this deployment's boundary."""
