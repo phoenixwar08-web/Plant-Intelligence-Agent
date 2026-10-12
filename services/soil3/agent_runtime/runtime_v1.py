@@ -75,6 +75,7 @@ QWEN_PROVIDER_FIELDS = {
     "max_tokens",
     "json_response_format",
 }
+STATE_TREND_HISTORY_SECONDS = 6 * 60 * 60 + 30 * 60
 
 
 def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
@@ -274,6 +275,8 @@ def write_state_snapshot(config: RuntimeConfig) -> dict[str, Any]:
         sensor_log_path=str(config.sensor_log_path),
         irrigation_trials_path=str(config.irrigation_trials_path),
         service_unit=config.phase3_service_unit,
+        sensor_limit=256,
+        soil_history_seconds=STATE_TREND_HISTORY_SECONDS,
     )
     parameters = load_state_parameters(
         config.phase3_parameters_path,

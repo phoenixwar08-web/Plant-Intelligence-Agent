@@ -334,6 +334,85 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
             reading,
         )
 
+    def test_reads_bounded_ordered_opengauss_history_for_state_trends(self):
+        class Completed:
+            returncode = 0
+            stdout = (
+                "2026-09-21 05:29:59+00|28.0|22.0|590\n"
+                "2026-09-21 06:00:00+00|29.0|22.1|591\n"
+                "malformed-row\n"
+                "2026-09-21 09:00:00+00|31.0|22.5|600\n"
+                "2026-09-21 11:00:00+00|32.0|22.8|605\n"
+                "2026-09-21 12:00:00+00|33.0|23.0|610\n"
+                "2026-09-21 12:00:01+00|34.0|23.1|611\n"
+            )
+            stderr = ""
+
+        commands = []
+
+        def runner(command, **kwargs):
+            commands.append(command)
+            return Completed()
+
+        readings = events._opengauss_recent_soil_readings(
+            "soil3",
+            observed_at="2026-09-21T12:00:00Z",
+            history_seconds=23400,
+            limit=256,
+            runner=runner,
+        )
+
+        self.assertEqual(
+            [
+                "2026-09-21 06:00:00+00",
+                "2026-09-21 09:00:00+00",
+                "2026-09-21 11:00:00+00",
+                "2026-09-21 12:00:00+00",
+            ],
+            [row["timestamp"] for row in readings],
+        )
+        state = StateBuilder("soil3").build(
+            {
+                "observed_at": "2026-09-21T12:00:00Z",
+                "generated_at": "2026-09-21T12:00:00Z",
+                "sensor_readings": readings,
+            }
+        )
+        self.assertEqual(
+            {"humidity_1h": 1.0, "humidity_3h": 2.0, "humidity_6h": 4.0},
+            state["trends"],
+        )
+        sql = commands[0][-1]
+        self.assertIn("recv_time >=", sql)
+        self.assertIn("recv_time <=", sql)
+        self.assertIn("ORDER BY recv_time ASC,id ASC", sql)
+
+    def test_history_query_failure_keeps_all_trends_missing(self):
+        class Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "connection refused"
+
+        readings = events._opengauss_recent_soil_readings(
+            "soil3",
+            observed_at="2026-09-21T12:00:00Z",
+            history_seconds=23400,
+            limit=256,
+            runner=lambda *args, **kwargs: Failed(),
+        )
+        self.assertEqual([], readings)
+        state = StateBuilder("soil3").build(
+            {
+                "observed_at": "2026-09-21T12:00:00Z",
+                "generated_at": "2026-09-21T12:00:00Z",
+                "sensor_readings": readings,
+            }
+        )
+        self.assertEqual(
+            {"humidity_1h": None, "humidity_3h": None, "humidity_6h": None},
+            state["trends"],
+        )
+
     def test_rejects_invalid_or_unparseable_canonical_soil_row(self):
         """Unsafe database values must remain absent rather than become facts."""
 
