@@ -126,6 +126,24 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual("invalid", context["safety_flags"]["sensor_fault"])
         self.assertEqual("missing", context["safety_flags"]["cloud_protection"])
 
+    def test_prepared_or_incomplete_receipts_are_not_real_action_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipts = ActionReceiptStore(root / "receipts")
+            receipts.prepare_native(
+                ACTION_ID,
+                complete_state(),
+                5,
+                "2026-10-12T10:00:00Z",
+            )
+
+            context = build_decision_context(
+                complete_state(),
+                receipt_dir=root / "receipts",
+            )
+
+        self.assertIsNone(context["last_real_action"])
+
 
 class TriggerEvaluatorTests(unittest.TestCase):
     def context(self):

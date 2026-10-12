@@ -760,24 +760,24 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     trace_id = trace["trace_id"]
     trace_path = trace_store.trace_path(trace_id)
     state = write_state_snapshot(config)
+    state_ref = _artifact_ref("state.v1", config.state_output)
+    trigger_store, trigger_shadow_path = _start_trigger_shadow(
+        config,
+        trace_id,
+        state,
+        state_ref,
+    )
     vision_association, vision_context = _collect_vision(config)
     experience_association, experience_context = _collect_experience(
         config,
         state,
         trace_id,
     )
-    state_ref = _artifact_ref("state.v1", config.state_output)
     trace_store.set_decision(
         trace_id,
         state_ref=state_ref,
         vision=vision_association,
         experience=experience_association,
-    )
-    trigger_store, trigger_shadow_path = _start_trigger_shadow(
-        config,
-        trace_id,
-        state,
-        state_ref,
     )
     prompt = _resolve_prompt_path(config.prompt_path).read_text(encoding="utf-8")
     strategy_started = time.monotonic()

@@ -16,6 +16,11 @@ from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS
 
 
 PREDICTOR_STATES = frozenset({"CLOSED", "HALF_OPEN", "OPEN"})
+REAL_ACTION_EVIDENCE = frozenset({
+    "command_completed",
+    "manual_confirmed",
+    "device_confirmed",
+})
 
 
 def _finite(value: Any) -> float | None:
@@ -53,6 +58,15 @@ def _latest_receipt(receipt_dir: str | Path | None) -> dict[str, Any] | None:
         receipts = list(ActionReceiptStore(receipt_dir).iter_receipts())
     except (ActionReceiptError, OSError, TypeError, ValueError):
         return None
+    receipts = [
+        receipt
+        for receipt in receipts
+        if (
+            isinstance(receipt.get("execution_evidence"), dict)
+            and receipt["execution_evidence"].get("level") in REAL_ACTION_EVIDENCE
+            and receipt.get("reference_action_at") is not None
+        )
+    ]
     if not receipts:
         return None
     return max(
