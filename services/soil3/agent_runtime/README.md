@@ -4,16 +4,9 @@ This runtime reads existing soil3 health facts and runs one complete Shadow
 decision chain:
 
 ```text
-State → Trigger Shadow → explicit Vision/Experience availability → Strategy → Validator
+State → explicit Vision/Experience availability → Strategy → Validator
       → Gate v2 → dry-run Runner → verification-only Bridge → open Episode
 ```
-
-Trigger Shadow is observation-only. It records `CALL_QWEN`, `SKIP_CLOUD`, or
-`LOCAL_SAFETY_ONLY` and the Decision Context used for that suggestion, but the
-runtime still invokes Qwen on every pipeline cycle. Trigger failure is isolated
-from the cloud chain, and no downstream decision or execution module reads the
-Trigger artifact. Issue #63 owns historical replay and tuning before any
-future call-suppression proposal.
 
 Every produced artifact is associated through one Store-generated `trace.v1`
 identifier. Vision and Experience each have an explicit configuration switch.
@@ -78,12 +71,6 @@ systemctl start plant-agent-soil3-pipeline.service
 systemctl status --no-pager plant-agent-soil3-state.service plant-agent-soil3-pipeline.service
 ```
 
-State generation reads existing Phase3 `evolving_params.json` facts for FC,
-TARGET_LOW, and K_P, and reads the effective hard safety low from the matching
-Phase3 state snapshot. Missing or malformed values stay null. The Agent's
-canonical openGauss SELECT is bounded to the latest 6h30m so the unchanged
-State builder can compute 1h/3h/6h trends without future rows or CSV fallback.
-
 The state and pipeline units keep `PrivateTmp=true`.  They optionally bind only
 the openGauss local socket `/tmp/.s.PGSQL.7654` read-only, so the existing
 `runuser -u opengauss` SELECT adapter can read canonical telemetry without
@@ -92,8 +79,8 @@ bind does not make the unit fail open: the adapter query stays unavailable and
 soil humidity/freshness remain missing.  It does not use CSV fallback or write
 to openGauss.
 
-After inspecting the generated `state`, `trigger_shadow`, `strategy`, `gate`,
-`runner`, `bridge`, `traces`, `runs`, and `episodes` records below
+After inspecting the generated `state`, `strategy`, `gate`, `runner`, `bridge`,
+`traces`, `runs`, and `episodes` records below
 `/root/water/runtime/instances/soil3/agent_chain`,
 enable the independently reversible schedules:
 
