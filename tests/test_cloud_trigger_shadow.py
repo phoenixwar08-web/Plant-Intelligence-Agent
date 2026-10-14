@@ -293,6 +293,22 @@ class TriggerEvaluatorTests(unittest.TestCase):
         self.assertEqual(CALL_QWEN, result.decision)
         self.assertIn("semantic_context_changed", result.reason_codes)
 
+    def test_boundary_value_drift_with_unchanged_relations_skips_cloud(self):
+        baseline_context = self.context()
+        baseline = semantic_projection(baseline_context)
+
+        changed_state = complete_state()
+        changed_state["safety"]["target_low"] = 32.1
+        changed_context = build_decision_context(changed_state)
+
+        self.assertEqual(
+            baseline["boundary_relations"],
+            semantic_projection(changed_context)["boundary_relations"],
+        )
+        result = evaluate_trigger(changed_context, baseline, deny_age_seconds=18000)
+        self.assertEqual(SKIP_CLOUD, result.decision)
+        self.assertIn("semantic_context_unchanged", result.reason_codes)
+
 
 class TriggerShadowStoreTests(unittest.TestCase):
     def state_ref(self):

@@ -287,7 +287,6 @@ def semantic_projection(context: Any) -> dict[str, Any]:
     """Return the deterministic, explainable fields compared between calls."""
 
     context = context if isinstance(context, dict) else {}
-    boundaries = context.get("boundaries") if isinstance(context.get("boundaries"), dict) else {}
     distances = context.get("distances") if isinstance(context.get("distances"), dict) else {}
     trends = context.get("trends") if isinstance(context.get("trends"), dict) else {}
     flags = context.get("safety_flags") if isinstance(context.get("safety_flags"), dict) else {}
@@ -295,7 +294,6 @@ def semantic_projection(context: Any) -> dict[str, Any]:
     feedback = context.get("feedback_status") if isinstance(context.get("feedback_status"), dict) else {}
     feedback_record = feedback.get("record") if isinstance(feedback.get("record"), dict) else {}
     return {
-        "boundaries": copy.deepcopy(boundaries),
         "boundary_relations": {
             key: _relation(distances.get(key))
             for key in (
