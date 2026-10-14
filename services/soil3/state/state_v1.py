@@ -24,6 +24,7 @@ PHASE3_SAFETY_FLAG_KEYS = (
 # A trend is only meaningful when the historical reading is close to its named
 # horizon; an older reading must not silently stand in for (for example) 3h ago.
 TREND_SAMPLE_TOLERANCE = timedelta(minutes=30)
+SOIL3_LOCAL_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def _number(value: Any) -> float | None:
@@ -39,7 +40,13 @@ def _time(value: Any) -> datetime | None:
     try:
         if isinstance(value, (int, float)) and math.isfinite(value):
             return datetime.fromtimestamp(value, timezone.utc)
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+        text = str(value).replace("Z", "+00:00")
+        if len(text) >= 3 and text[-3] in "+-" and text[-2:].isdigit():
+            text += ":00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=SOIL3_LOCAL_TIMEZONE)
+        return parsed.astimezone(timezone.utc)
     except (OSError, OverflowError, TypeError, ValueError):
         return None
 

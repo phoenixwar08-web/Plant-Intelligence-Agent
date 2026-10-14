@@ -2,11 +2,13 @@ import ast
 import json
 import tempfile
 import unittest
+from datetime import datetime as RealDatetime
 from pathlib import Path
 from unittest import mock
 
 from services.soil3.cloud_gate.budget import BudgetLedger
 from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
+from services.soil3.state import state_v1
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry import events
 
@@ -285,6 +287,19 @@ class StateProducerTests(unittest.TestCase):
 
 
 class CanonicalSoilTelemetryTests(unittest.TestCase):
+    class Python39Datetime:
+        """Model Python 3.9's rejection of ISO offsets without minutes."""
+
+        @classmethod
+        def fromisoformat(cls, value):
+            if len(value) >= 3 and value[-3] in "+-" and value[-2:].isdigit():
+                raise ValueError("short timezone offsets are unsupported")
+            return RealDatetime.fromisoformat(value)
+
+        @classmethod
+        def fromtimestamp(cls, *args, **kwargs):
+            return RealDatetime.fromtimestamp(*args, **kwargs)
+
     def _snapshot(self, root, *, canonical_reading, local_sensor_content=None):
         state_path = root / "phase3" / "system_state.json"
         state_path.parent.mkdir(parents=True)
@@ -387,6 +402,73 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
         self.assertIn("recv_time <=", sql)
         self.assertIn("ORDER BY recv_time DESC,id DESC LIMIT 256", sql)
         self.assertIn("ORDER BY recv_time ASC,id ASC", sql)
+
+    def test_history_query_uses_local_naive_bounds_for_uct_database_session(self):
+        class Completed:
+            returncode = 0
+            stdout = (
+                "2026-10-14 03:21:01|30.0|22.0|590\n"
+                "2026-10-14 06:21:01|31.0|22.2|595\n"
+                "2026-10-14 08:21:01|32.0|22.4|600\n"
+                "2026-10-14 09:21:01|33.0|22.5|610\n"
+            )
+            stderr = ""
+
+        commands = []
+
+        def runner(command, **kwargs):
+            commands.append(command)
+            return Completed()
+
+        readings = events._opengauss_recent_soil_readings(
+            "soil3",
+            observed_at="2026-10-14T01:21:01Z",
+            history_seconds=23400,
+            limit=256,
+            runner=runner,
+        )
+
+        sql = commands[0][-1]
+        self.assertIn("recv_time >= '2026-10-14 02:51:01'::timestamp", sql)
+        self.assertIn("recv_time <= '2026-10-14 09:21:01'::timestamp", sql)
+        self.assertNotIn("timestamptz", sql)
+        self.assertEqual(4, len(readings))
+        state = StateBuilder("soil3").build(
+            {
+                "observed_at": "2026-10-14T01:21:01Z",
+                "generated_at": "2026-10-14T01:21:01Z",
+                "sensor_readings": readings,
+            }
+        )
+        self.assertEqual(
+            {"humidity_1h": 1.0, "humidity_3h": 2.0, "humidity_6h": 3.0},
+            state["trends"],
+        )
+
+    def test_python39_short_timezone_offsets_are_accepted(self):
+        with mock.patch.object(events, "datetime", self.Python39Datetime), mock.patch.object(
+            state_v1, "datetime", self.Python39Datetime
+        ):
+            utc_seconds = events._database_timestamp_seconds("2026-10-14 01:21:01+00")
+            local_seconds = events._database_timestamp_seconds("2026-10-14 09:21:01+08")
+            state = StateBuilder("soil3").build(
+                {
+                    "observed_at": "2026-10-14 01:21:01+00",
+                    "generated_at": "2026-10-14 01:22:01+00",
+                    "sensor_readings": [
+                        {
+                            "timestamp": "2026-10-14 09:21:01+08",
+                            "humidity": 33.0,
+                            "temperature": 22.5,
+                            "ec_raw": 610.0,
+                        }
+                    ],
+                }
+            )
+
+        self.assertIsNotNone(utc_seconds)
+        self.assertEqual(utc_seconds, local_seconds)
+        self.assertEqual(60.0, state["data_quality"]["soil_age_sec"])
 
     def test_history_query_failure_keeps_all_trends_missing(self):
         class Failed:
