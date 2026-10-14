@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .common import load_json, utc_timestamp
@@ -158,6 +158,70 @@ def _opengauss_latest_soil_reading(device_name, *, timeout=12, runner=subprocess
     if result.returncode != 0:
         return None
     return _parse_canonical_soil_row(result.stdout)
+
+
+def _opengauss_recent_soil_readings(
+    device_name,
+    *,
+    observed_at,
+    history_seconds,
+    limit,
+    timeout=12,
+    runner=subprocess.run,
+):
+    """Read a bounded canonical history without falling back to local CSV."""
+
+    upper_seconds = _database_timestamp_seconds(observed_at)
+    try:
+        window_seconds = float(history_seconds)
+        row_limit = int(limit)
+    except (TypeError, ValueError, OverflowError):
+        return []
+    if (
+        upper_seconds is None
+        or not math.isfinite(window_seconds)
+        or window_seconds <= 0
+        or row_limit < 1
+    ):
+        return []
+    row_limit = min(row_limit, 4096)
+    upper = datetime.fromtimestamp(upper_seconds, timezone.utc)
+    lower = upper - timedelta(seconds=window_seconds)
+    upper_text = upper.isoformat()
+    lower_text = lower.isoformat()
+    safe_device = str(device_name).replace("'", "''")
+    sql = (
+        "SELECT recv_time::text,humidity,temp,ec FROM ("
+        "SELECT recv_time,humidity,temp,ec,id FROM soil_sensor_readings "
+        "WHERE device_code='%s' AND humidity IS NOT NULL AND temp IS NOT NULL "
+        "AND ec IS NOT NULL AND recv_time >= '%s'::timestamptz "
+        "AND recv_time <= '%s'::timestamptz "
+        "ORDER BY recv_time DESC,id DESC LIMIT %d"
+        ") AS recent_rows ORDER BY recv_time ASC,id ASC;"
+    ) % (safe_device, lower_text, upper_text, row_limit)
+    try:
+        result = runner(
+            _opengauss_command(sql),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+
+    bounded = []
+    for line in str(result.stdout or "").splitlines():
+        row = _parse_canonical_soil_row(line)
+        if row is None:
+            continue
+        timestamp = _database_timestamp_seconds(row["timestamp"])
+        if timestamp is None or timestamp < lower.timestamp() or timestamp > upper_seconds:
+            continue
+        bounded.append((timestamp, row))
+    return [row for _, row in sorted(bounded, key=lambda item: item[0])]
 
 
 def _opengauss_health(device_name, now=None, timeout=12):
@@ -378,6 +442,7 @@ def build_health_snapshot(
     service_unit=None,
     mqtt_connected=True,
     sensor_limit=24,
+    soil_history_seconds=None,
     watering_limit=20,
     now=None,
 ):
@@ -404,8 +469,17 @@ def build_health_snapshot(
     gauss_source = str(gauss.get("source") or "")
     gauss_health = _opengauss_health(device_name, now=current)
     gauss_age = gauss_health.get("latest_row_age_seconds")
-    canonical_soil = _opengauss_latest_soil_reading(device_name)
-    sensor_readings = [canonical_soil] if canonical_soil is not None else []
+    observed_at = datetime.fromtimestamp(current, timezone.utc).isoformat().replace("+00:00", "Z")
+    if soil_history_seconds is None:
+        canonical_soil = _opengauss_latest_soil_reading(device_name)
+        sensor_readings = [canonical_soil] if canonical_soil is not None else []
+    else:
+        sensor_readings = _opengauss_recent_soil_readings(
+            device_name,
+            observed_at=observed_at,
+            history_seconds=soil_history_seconds,
+            limit=sensor_limit,
+        )
     latest_sensor = sensor_readings[-1] if sensor_readings else {}
     local_observation = _latest_local_sensor_observation(local_sensor_log_path, now=current)
     local_observation_age = (
@@ -418,7 +492,6 @@ def build_health_snapshot(
         local_observation_age is not None
         and local_observation_age <= sensor_data_stale_seconds
     )
-    observed_at = datetime.fromtimestamp(current, timezone.utc).isoformat().replace("+00:00", "Z")
     raw_id = "%s:%0.3f" % (device_name, current)
     snapshot_id = "snap-" + hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:24]
     return {

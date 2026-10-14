@@ -88,6 +88,7 @@ class StateProducerTests(unittest.TestCase):
             "vision": {"enabled": False},
             "experience": {"enabled": False, "limit_per_class": 3},
             "phase3_state_path": str(root / "phase3" / "system_state.json"),
+            "phase3_parameters_path": str(root / "phase3" / "evolving_params.json"),
             "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),
             "irrigation_trials_path": str(root / "phase3" / "irrigation_trials.json"),
             "phase3_service_unit": "phase3_soil3.service",
@@ -154,6 +155,70 @@ class StateProducerTests(unittest.TestCase):
             )
             self.assertNotIn("pending_soak", state["safety"]["flags"])
             self.assertNotIn("cloud_protection", state["safety"]["flags"])
+
+    def test_state_writer_maps_real_phase3_parameters_and_effective_hard_low(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, write_state_snapshot
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parameters_path = root / "phase3" / "evolving_params.json"
+            parameters_path.parent.mkdir(parents=True)
+            parameters_path.write_text(
+                json.dumps({"FC": 45.775, "TARGET_LOW": 32.0, "K_P": 1.53266}),
+                encoding="utf-8",
+            )
+            snapshot = self.health_snapshot()
+            snapshot["system_state"]["hard_safety_low_guard"] = {
+                "active": False,
+                "effective_low": 27.179,
+            }
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=snapshot,
+            ):
+                state = write_state_snapshot(config)
+
+            self.assertEqual(45.775, state["safety"]["field_capacity"])
+            self.assertEqual(32.0, state["safety"]["target_low"])
+            self.assertEqual(27.179, state["safety"]["hard_safety_low"])
+            self.assertEqual(1.53266, state["safety"]["kp"])
+
+    def test_state_writer_keeps_missing_or_malformed_parameters_null(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, write_state_snapshot
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parameters_path = root / "phase3" / "evolving_params.json"
+            parameters_path.parent.mkdir(parents=True)
+            parameters_path.write_text(
+                json.dumps({"FC": "invalid", "TARGET_LOW": None, "K_P": {"bad": 1}}),
+                encoding="utf-8",
+            )
+            snapshot = self.health_snapshot()
+            snapshot["system_state"]["hard_safety_low_guard"] = {
+                "active": False,
+                "effective_low": "invalid",
+            }
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=snapshot,
+            ):
+                state = write_state_snapshot(config)
+
+            self.assertEqual(
+                {
+                    "field_capacity": None,
+                    "target_low": None,
+                    "hard_safety_low": None,
+                    "kp": None,
+                    "flags": snapshot["system_state"],
+                },
+                state["safety"],
+            )
 
     def test_runtime_config_rejects_non_soil3_or_exploration(self):
         """Fails if a future runtime config broadens this deployment's boundary."""
@@ -267,6 +332,86 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
                 "ec_raw": 610.0,
             },
             reading,
+        )
+
+    def test_reads_bounded_ordered_opengauss_history_for_state_trends(self):
+        class Completed:
+            returncode = 0
+            stdout = (
+                "2026-09-21 05:29:59+00|28.0|22.0|590\n"
+                "2026-09-21 06:00:00+00|29.0|22.1|591\n"
+                "malformed-row\n"
+                "2026-09-21 09:00:00+00|31.0|22.5|600\n"
+                "2026-09-21 11:00:00+00|32.0|22.8|605\n"
+                "2026-09-21 12:00:00+00|33.0|23.0|610\n"
+                "2026-09-21 12:00:01+00|34.0|23.1|611\n"
+            )
+            stderr = ""
+
+        commands = []
+
+        def runner(command, **kwargs):
+            commands.append(command)
+            return Completed()
+
+        readings = events._opengauss_recent_soil_readings(
+            "soil3",
+            observed_at="2026-09-21T12:00:00Z",
+            history_seconds=23400,
+            limit=256,
+            runner=runner,
+        )
+
+        self.assertEqual(
+            [
+                "2026-09-21 06:00:00+00",
+                "2026-09-21 09:00:00+00",
+                "2026-09-21 11:00:00+00",
+                "2026-09-21 12:00:00+00",
+            ],
+            [row["timestamp"] for row in readings],
+        )
+        state = StateBuilder("soil3").build(
+            {
+                "observed_at": "2026-09-21T12:00:00Z",
+                "generated_at": "2026-09-21T12:00:00Z",
+                "sensor_readings": readings,
+            }
+        )
+        self.assertEqual(
+            {"humidity_1h": 1.0, "humidity_3h": 2.0, "humidity_6h": 4.0},
+            state["trends"],
+        )
+        sql = commands[0][-1]
+        self.assertIn("recv_time >=", sql)
+        self.assertIn("recv_time <=", sql)
+        self.assertIn("ORDER BY recv_time DESC,id DESC LIMIT 256", sql)
+        self.assertIn("ORDER BY recv_time ASC,id ASC", sql)
+
+    def test_history_query_failure_keeps_all_trends_missing(self):
+        class Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "connection refused"
+
+        readings = events._opengauss_recent_soil_readings(
+            "soil3",
+            observed_at="2026-09-21T12:00:00Z",
+            history_seconds=23400,
+            limit=256,
+            runner=lambda *args, **kwargs: Failed(),
+        )
+        self.assertEqual([], readings)
+        state = StateBuilder("soil3").build(
+            {
+                "observed_at": "2026-09-21T12:00:00Z",
+                "generated_at": "2026-09-21T12:00:00Z",
+                "sensor_readings": readings,
+            }
+        )
+        self.assertEqual(
+            {"humidity_1h": None, "humidity_3h": None, "humidity_6h": None},
+            state["trends"],
         )
 
     def test_rejects_invalid_or_unparseable_canonical_soil_row(self):
@@ -482,6 +627,73 @@ class PipelineTests(StateProducerTests):
             self.assertIsNone(trace["decision"]["bridge_ref"])
             self.assertIsNone(trace["decision"]["episode_ref"])
             self.assertFalse(config.episode_dir.exists())
+
+            from services.soil3.cloud_trigger import TriggerShadowStore
+
+            shadow = TriggerShadowStore(config.trigger_shadow_dir).read(record["trace_id"])
+            self.assertFalse(shadow["actual_qwen_result"]["validator_accepted"])
+            self.assertIsNone(shadow["actual_qwen_result"]["strategy_ref"])
+
+    def test_all_trigger_shadow_decisions_still_call_qwen_once(self):
+        from services.soil3.agent_runtime import runtime_v1
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_trigger import (
+            CALL_QWEN,
+            LOCAL_SAFETY_ONLY,
+            SKIP_CLOUD,
+            TriggerDecision,
+            TriggerShadowStore,
+        )
+
+        for decision_name in (CALL_QWEN, SKIP_CLOUD, LOCAL_SAFETY_ONLY):
+            with self.subTest(decision=decision_name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+                with mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                    return_value=self.health_snapshot(),
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                    return_value=TriggerDecision(decision_name, ("test_reason",)),
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.run_chain",
+                    wraps=runtime_v1.run_chain,
+                ) as cloud_call:
+                    record = run_pipeline(config)
+
+                cloud_call.assert_called_once()
+                self.assertEqual(
+                    str(config.trigger_shadow_dir / f'{record["trace_id"]}.json'),
+                    record["trigger_shadow_path"],
+                )
+                shadow = TriggerShadowStore(config.trigger_shadow_dir).read(record["trace_id"])
+                self.assertEqual(decision_name, shadow["trigger_decision"])
+                self.assertTrue(shadow["actual_qwen_result"]["validator_accepted"])
+                self.assertEqual("deny", shadow["actual_qwen_result"]["gate_decision"])
+                self.assertFalse(shadow["execution"]["phase3_called"])
+
+    def test_trigger_observer_failure_does_not_skip_qwen(self):
+        from services.soil3.agent_runtime import runtime_v1
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_decision_context",
+                side_effect=RuntimeError("observer failed"),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                wraps=runtime_v1.run_chain,
+            ) as cloud_call:
+                record = run_pipeline(config)
+
+            cloud_call.assert_called_once()
+            self.assertIsNone(record["trigger_shadow_path"])
+            self.assertFalse(config.trigger_shadow_dir.exists())
 
     def test_accepted_qwen_strategy_is_stored_with_real_provider_provenance(self):
         """A validated proposal must name the provider that actually produced it."""

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trigger_shadow.v1.schema.json",
+  "title": "Trigger Shadow V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "trace_id",
+    "created_at",
+    "updated_at",
+    "state_ref",
+    "trigger_decision",
+    "trigger_reason_codes",
+    "decision_context_snapshot",
+    "semantic_projection",
+    "baseline_ref",
+    "actual_qwen_result",
+    "execution"
+  ],
+  "properties": {
+    "schema_version": {"const": "trigger_shadow.v1"},
+    "trace_id": {"type": "string", "pattern": "^tr-[0-9a-f]{24}$"},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"},
+    "state_ref": {"type": "object"},
+    "trigger_decision": {
+      "enum": ["CALL_QWEN", "SKIP_CLOUD", "LOCAL_SAFETY_ONLY"]
+    },
+    "trigger_reason_codes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "decision_context_snapshot": {"type": "object"},
+    "semantic_projection": {"type": "object"},
+    "baseline_ref": {"type": ["object", "null"]},
+    "actual_qwen_result": {"type": ["object", "null"]},
+    "execution": {
+      "const": {
+        "phase3_called": false,
+        "physical_actions_performed": false
+      }
+    }
+  }
+}

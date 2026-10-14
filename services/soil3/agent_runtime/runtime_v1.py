@@ -15,9 +15,15 @@ from typing import Any
 from services.soil3.cloud_gate import GatePolicy, evaluate_gate_v2
 from services.soil3.cloud_strategy.service import append_audit, run_chain
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, StrategyValidator, fingerprint, normalize_timestamp
+from services.soil3.cloud_trigger import (
+    TriggerShadowStore,
+    build_decision_context,
+    evaluate_trigger,
+)
 from services.soil3.episode.episode_v1 import EpisodeStore
 from services.soil3.phase3_bridge import Phase3Bridge
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
+from services.soil3.state.phase3_parameters import load_state_parameters
 from services.soil3.state.state_v1 import StateBuilder
 from services.soil3.telemetry.events import build_health_snapshot
 from services.soil3.trace import TraceStore
@@ -31,6 +37,7 @@ CONFIG_FIELDS = {
     "vision",
     "experience",
     "phase3_state_path",
+    "phase3_parameters_path",
     "sensor_log_path",
     "irrigation_trials_path",
     "phase3_service_unit",
@@ -73,6 +80,7 @@ QWEN_PROVIDER_FIELDS = {
     "max_tokens",
     "json_response_format",
 }
+STATE_TREND_HISTORY_SECONDS = 6 * 60 * 60 + 30 * 60
 
 
 def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
@@ -99,6 +107,7 @@ class RuntimeConfig:
     experience_enabled: bool
     experience_limit_per_class: int
     phase3_state_path: Path
+    phase3_parameters_path: Path
     sensor_log_path: Path
     irrigation_trials_path: Path
     phase3_service_unit: str
@@ -175,6 +184,9 @@ class RuntimeConfig:
         phase3_state_path = Path(value["phase3_state_path"])
         if phase3_state_path.name != "system_state.json":
             raise ValueError("phase3_state_path must name system_state.json")
+        phase3_parameters_path = Path(value["phase3_parameters_path"])
+        if phase3_parameters_path.name != "evolving_params.json":
+            raise ValueError("phase3_parameters_path must name evolving_params.json")
 
         strategy_validator = value["strategy_validator"]
         if not isinstance(strategy_validator, dict):
@@ -194,6 +206,7 @@ class RuntimeConfig:
             experience_enabled=experience["enabled"],
             experience_limit_per_class=experience["limit_per_class"],
             phase3_state_path=phase3_state_path,
+            phase3_parameters_path=phase3_parameters_path,
             sensor_log_path=Path(value["sensor_log_path"]),
             irrigation_trials_path=Path(value["irrigation_trials_path"]),
             phase3_service_unit="phase3_soil3.service",
@@ -252,6 +265,14 @@ class RuntimeConfig:
         return self.runtime_root / "bridge"
 
     @property
+    def trigger_shadow_dir(self) -> Path:
+        return self.runtime_root / "trigger_shadow"
+
+    @property
+    def feedback_action_receipt_dir(self) -> Path:
+        return self.runtime_root / "feedback_actions"
+
+    @property
     def audit_dir(self) -> Path:
         return self.runtime_root / "audit"
 
@@ -267,8 +288,17 @@ def write_state_snapshot(config: RuntimeConfig) -> dict[str, Any]:
         sensor_log_path=str(config.sensor_log_path),
         irrigation_trials_path=str(config.irrigation_trials_path),
         service_unit=config.phase3_service_unit,
+        sensor_limit=256,
+        soil_history_seconds=STATE_TREND_HISTORY_SECONDS,
     )
-    state = StateBuilder(config.device_code).build_from_health_snapshot(snapshot)
+    parameters = load_state_parameters(
+        config.phase3_parameters_path,
+        snapshot.get("system_state") if isinstance(snapshot, dict) else None,
+    )
+    state = StateBuilder(config.device_code).build_from_health_snapshot(
+        snapshot,
+        parameters,
+    )
     atomic_write_json(config.state_output, state)
     return state
 
@@ -478,6 +508,120 @@ def _model_metrics(strategy_result: dict[str, Any], latency_ms: float) -> dict[s
     }
 
 
+def _start_trigger_shadow(
+    config: RuntimeConfig,
+    trace_id: str,
+    state: dict[str, Any],
+    state_ref: dict[str, Any],
+) -> tuple[TriggerShadowStore | None, str | None]:
+    """Start a best-effort observer; failure must not affect cloud invocation."""
+
+    try:
+        store = TriggerShadowStore(config.trigger_shadow_dir)
+        baseline = store.latest_valid_call_baseline()
+        try:
+            phase3_system_state = json.loads(config.phase3_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            phase3_system_state = None
+        context = build_decision_context(
+            state,
+            last_model_decision=(baseline.get("actual_qwen_result") if baseline else None),
+            receipt_dir=config.feedback_action_receipt_dir,
+            feedback_dir=config.feedback_dir,
+            phase3_system_state=phase3_system_state,
+        )
+        decision = evaluate_trigger(
+            context,
+            baseline.get("semantic_projection") if baseline else None,
+            deny_age_seconds=config.gate_policy.deny_age_seconds,
+        )
+        store.create(
+            trace_id,
+            state_ref,
+            decision,
+            context,
+            baseline.get("ref") if baseline else None,
+        )
+        return store, str(store.path_for(trace_id))
+    except Exception:
+        return None, None
+
+
+def _water_proposal(strategy: Any) -> tuple[bool, float]:
+    if not isinstance(strategy, dict):
+        return False, 0.0
+    seconds = 0.0
+    for action in strategy.get("actions", []):
+        if not isinstance(action, dict) or action.get("type") != "water":
+            continue
+        value = action.get("pump_seconds")
+        if (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and isfinite(float(value))
+            and float(value) > 0
+        ):
+            seconds += float(value)
+    return seconds > 0, seconds
+
+
+def _trigger_actual_result(
+    strategy_result: dict[str, Any],
+    model_metrics: dict[str, Any],
+    *,
+    strategy_ref: dict[str, Any] | None = None,
+    gate_ref: dict[str, Any] | None = None,
+    gate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    validation = strategy_result.get("validation")
+    validation = validation if isinstance(validation, dict) else {}
+    strategy = validation.get("strategy") if isinstance(validation.get("strategy"), dict) else None
+    accepted = validation.get("accepted") is True and strategy is not None and strategy_ref is not None
+    reasons = validation.get("reason_codes")
+    if not isinstance(reasons, list) or not all(isinstance(item, str) and item for item in reasons):
+        reasons = [] if accepted else ["validation_result_unavailable"]
+    water_proposed, proposed_seconds = _water_proposal(strategy if accepted else None)
+    cloud = strategy_result.get("cloud")
+    cloud = cloud if isinstance(cloud, dict) else {}
+    gate_value = (
+        gate
+        if (
+            isinstance(gate, dict)
+            and gate_ref is not None
+            and gate_ref.get("schema_version") == "gate.v2"
+        )
+        else None
+    )
+    return {
+        "provider": cloud.get("provider") if isinstance(cloud.get("provider"), str) else model_metrics.get("provider"),
+        "model": cloud.get("model") if isinstance(cloud.get("model"), str) else model_metrics.get("model"),
+        "validator_accepted": accepted,
+        "validator_reason_codes": list(reasons),
+        "strategy_ref": strategy_ref if accepted else None,
+        "water_proposed": water_proposed,
+        "proposed_water_seconds": proposed_seconds,
+        "gate_ref": gate_ref if gate_value is not None else None,
+        "gate_decision": gate_value.get("decision") if gate_value is not None else None,
+        "gate_reason_codes": list(gate_value.get("reason_codes", [])) if gate_value is not None else None,
+        "token_usage": model_metrics.get("token_usage"),
+        "cost": model_metrics.get("cost"),
+        "latency": model_metrics.get("latency"),
+    }
+
+
+def _finalize_trigger_shadow(
+    store: TriggerShadowStore | None,
+    trace_id: str,
+    actual_result: dict[str, Any],
+) -> None:
+    if store is None:
+        return
+    try:
+        store.finalize(trace_id, actual_result)
+    except Exception:
+        return
+
+
 def _gate_contract_valid(
     gate: Any,
     state: dict[str, Any],
@@ -621,6 +765,13 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     trace_id = trace["trace_id"]
     trace_path = trace_store.trace_path(trace_id)
     state = write_state_snapshot(config)
+    state_ref = _artifact_ref("state.v1", config.state_output)
+    trigger_store, trigger_shadow_path = _start_trigger_shadow(
+        config,
+        trace_id,
+        state,
+        state_ref,
+    )
     vision_association, vision_context = _collect_vision(config)
     experience_association, experience_context = _collect_experience(
         config,
@@ -629,7 +780,7 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     )
     trace_store.set_decision(
         trace_id,
-        state_ref=_artifact_ref("state.v1", config.state_output),
+        state_ref=state_ref,
         vision=vision_association,
         experience=experience_association,
     )
@@ -648,9 +799,10 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         experience_context=experience_context,
     )
     strategy_latency_ms = (time.monotonic() - strategy_started) * 1000.0
+    model_metrics = _model_metrics(strategy_result, strategy_latency_ms)
     trace_store.set_decision(
         trace_id,
-        model_metrics=_model_metrics(strategy_result, strategy_latency_ms),
+        model_metrics=model_metrics,
     )
     validation = strategy_result.get("validation")
     if (
@@ -669,6 +821,11 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         validation["strategy"]["model"] = strategy_model
     audit_path = append_audit(config.audit_dir, strategy_result)
     if not isinstance(validation, dict) or not validation.get("accepted") or not isinstance(validation.get("strategy"), dict):
+        _finalize_trigger_shadow(
+            trigger_store,
+            trace_id,
+            _trigger_actual_result(strategy_result, model_metrics),
+        )
         cloud = strategy_result.get("cloud")
         cloud = cloud if isinstance(cloud, dict) else {}
         strategy_config = config.strategy_config()
@@ -683,6 +840,7 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
             "trace_path": str(trace_path),
             "state_path": str(config.state_output),
             "state_sha256": fingerprint(state),
+            "trigger_shadow_path": trigger_shadow_path,
             "strategy_path": None,
             "gate_path": None,
             "gate_decision": None,
@@ -700,13 +858,14 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
 
     strategy = validation["strategy"]
     atomic_write_json(config.strategy_output, strategy)
+    strategy_ref = _artifact_ref(
+        "strategy.v1",
+        config.strategy_output,
+        record_id=strategy["strategy_id"],
+    )
     trace_store.set_decision(
         trace_id,
-        strategy_ref=_artifact_ref(
-            "strategy.v1",
-            config.strategy_output,
-            record_id=strategy["strategy_id"],
-        ),
+        strategy_ref=strategy_ref,
     )
     gate = evaluate_gate_v2(
         state=state,
@@ -715,15 +874,27 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         exploration_requested=False,
     )
     atomic_write_json(config.gate_output, gate)
+    gate_ref = _artifact_ref(
+        str(gate.get("schema_version") or "unknown"),
+        config.gate_output,
+        record_id=(gate.get("gate_id") if isinstance(gate.get("gate_id"), str) else None),
+    )
     trace_store.set_decision(
         trace_id,
-        gate_ref=_artifact_ref(
-            str(gate.get("schema_version") or "unknown"),
-            config.gate_output,
-            record_id=(gate.get("gate_id") if isinstance(gate.get("gate_id"), str) else None),
-        ),
+        gate_ref=gate_ref,
         gate_decision=gate["decision"],
         gate_reason_codes=gate["reason_codes"],
+    )
+    _finalize_trigger_shadow(
+        trigger_store,
+        trace_id,
+        _trigger_actual_result(
+            strategy_result,
+            model_metrics,
+            strategy_ref=strategy_ref,
+            gate_ref=gate_ref,
+            gate=gate,
+        ),
     )
 
     episode_store = EpisodeStore(config.episode_dir)
@@ -821,6 +992,7 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         "trace_path": str(trace_path),
         "state_path": str(config.state_output),
         "state_sha256": fingerprint(state),
+        "trigger_shadow_path": trigger_shadow_path,
         "strategy_path": str(config.strategy_output),
         "gate_path": str(config.gate_output),
         "gate_decision": gate["decision"],

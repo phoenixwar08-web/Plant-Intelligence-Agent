@@ -5,6 +5,7 @@
 | Module | Responsibility |
 | --- | --- |
 | State | Normalize current sensor, environment, irrigation, and safety facts. |
+| Cloud Invocation Trigger Shadow | Compare factual Decision Context changes and record a non-authoritative cloud-call suggestion; Phase 0 never suppresses Qwen. |
 | Vision | Convert a captured plant image into structured visual facts. |
 | Cloud Strategy | Propose structured, non-executing care actions. |
 | Validator | Reject malformed, unknown, or invalid strategy content. |
@@ -54,6 +55,16 @@ facts stay null and are never inferred. Strategy, Gate v2, dry-run Runner,
 verification-only Bridge, and an open Episode then continue on the same trace.
 This integration always records `phase3_called=false` and
 `physical_actions_performed=false`.
+
+Issue #62 adds a Phase-0 Trigger observer after State. State receives the
+existing Phase3 dynamic parameter facts and bounded canonical openGauss history
+needed for 1h/3h/6h trends. The observer records one of `CALL_QWEN`,
+`SKIP_CLOUD`, or `LOCAL_SAFETY_ONLY` from deterministic semantic-change and
+safety rules, then the existing pipeline calls Qwen unconditionally. Its
+`trigger_shadow.v1` artifact is experimental evidence only: it is not part of
+`trace.v1`, is not an execution input, and cannot reach Gate, Runner, Bridge,
+Phase3, MQTT, or ActuatorLayer. Historical replay and interval/heartbeat
+calibration are deferred to Issue #63.
 
 State, Vision, Strategy, Episode, Feedback, Trace, and Replay may read facts and create records within their authorized Issue boundaries. They do not bypass Phase3 or become an actuator path.
 

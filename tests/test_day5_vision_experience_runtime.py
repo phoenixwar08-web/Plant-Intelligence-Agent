@@ -33,6 +33,7 @@ def runtime_config(root, *, vision, experience):
         "vision": {"enabled": vision},
         "experience": {"enabled": experience, "limit_per_class": 3},
         "phase3_state_path": str(root / "phase3" / "system_state.json"),
+        "phase3_parameters_path": str(root / "phase3" / "evolving_params.json"),
         "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),
         "irrigation_trials_path": str(root / "phase3" / "irrigation_trials.json"),
         "phase3_service_unit": "phase3_soil3.service",
