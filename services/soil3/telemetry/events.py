@@ -37,6 +37,18 @@ SNAPSHOT_STATE_KEYS = (
     "cloud_protection",
 )
 
+# openGauss stores soil_sensor_readings.recv_time as an Asia/Shanghai wall-clock
+# value in a timestamp-without-time-zone column.  Keep that source meaning
+# explicit even when the database session or Python host uses another timezone.
+SOIL3_LOCAL_TIMEZONE = timezone(timedelta(hours=8))
+
+
+def _expand_short_timezone_offset(value):
+    text = str(value or "").strip().replace("Z", "+00:00")
+    if len(text) >= 3 and text[-3] in "+-" and text[-2:].isdigit():
+        return text + ":00"
+    return text
+
 
 def _service_status(unit):
     if not unit:
@@ -56,13 +68,13 @@ def _service_status(unit):
 
 
 def _database_timestamp_seconds(value):
-    text = str(value or "").strip()
+    text = _expand_short_timezone_offset(value)
     if not text:
         return None
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None:
-            parsed = parsed.astimezone()
+            parsed = parsed.replace(tzinfo=SOIL3_LOCAL_TIMEZONE)
         return parsed.astimezone(timezone.utc).timestamp()
     except (TypeError, ValueError):
         return None
@@ -185,17 +197,17 @@ def _opengauss_recent_soil_readings(
     ):
         return []
     row_limit = min(row_limit, 4096)
-    upper = datetime.fromtimestamp(upper_seconds, timezone.utc)
+    upper = datetime.fromtimestamp(upper_seconds, SOIL3_LOCAL_TIMEZONE)
     lower = upper - timedelta(seconds=window_seconds)
-    upper_text = upper.isoformat()
-    lower_text = lower.isoformat()
+    upper_text = upper.replace(tzinfo=None).isoformat(sep=" ")
+    lower_text = lower.replace(tzinfo=None).isoformat(sep=" ")
     safe_device = str(device_name).replace("'", "''")
     sql = (
         "SELECT recv_time::text,humidity,temp,ec FROM ("
         "SELECT recv_time,humidity,temp,ec,id FROM soil_sensor_readings "
         "WHERE device_code='%s' AND humidity IS NOT NULL AND temp IS NOT NULL "
-        "AND ec IS NOT NULL AND recv_time >= '%s'::timestamptz "
-        "AND recv_time <= '%s'::timestamptz "
+        "AND ec IS NOT NULL AND recv_time >= '%s'::timestamp "
+        "AND recv_time <= '%s'::timestamp "
         "ORDER BY recv_time DESC,id DESC LIMIT %d"
         ") AS recent_rows ORDER BY recv_time ASC,id ASC;"
     ) % (safe_device, lower_text, upper_text, row_limit)
