@@ -1,6 +1,11 @@
 import unittest
 
-from services.soil3.state.state_v1 import StateBuilder
+from services.soil3.state.state_v1 import (
+    PHASE3_OPTIONAL_SAFETY_FLAG_KEYS,
+    PHASE3_REQUIRED_SAFETY_FLAG_KEYS,
+    PHASE3_SAFETY_FLAG_KEYS,
+    StateBuilder,
+)
 
 
 class StateV1Tests(unittest.TestCase):
@@ -79,6 +84,24 @@ class StateV1Tests(unittest.TestCase):
             "predictor_circuit": {"state": "HALF_OPEN"},
         })
         self.assertNotIn("pending_soak", state["safety"]["flags"])
+        self.assertNotIn("cloud_protection", state["safety"]["flags"])
+
+    def test_safety_fact_partition_preserves_optional_absence(self):
+        self.assertEqual(
+            frozenset({"pending_soak", "cloud_protection"}),
+            PHASE3_OPTIONAL_SAFETY_FLAG_KEYS,
+        )
+        self.assertFalse(
+            PHASE3_OPTIONAL_SAFETY_FLAG_KEYS & PHASE3_REQUIRED_SAFETY_FLAG_KEYS
+        )
+        self.assertEqual(
+            frozenset(PHASE3_SAFETY_FLAG_KEYS),
+            PHASE3_OPTIONAL_SAFETY_FLAG_KEYS | PHASE3_REQUIRED_SAFETY_FLAG_KEYS,
+        )
+
+        state = self.builder.build(self.facts)
+        self.assertNotIn("pending_soak", state["safety"]["flags"])
+        self.assertNotIn("cloud_protection", state["safety"]["flags"])
 
     def test_accepts_real_unix_watering_timestamps_for_freshness(self):
         state = self.builder.build({

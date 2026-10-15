@@ -41,7 +41,6 @@ def complete_state():
             "kp": 1.2,
             "flags": {
                 "pump_active": False,
-                "pending_soak": False,
                 "water_delivery_suspect": False,
                 "reservoir_empty_suspect": False,
                 "low_wet_recovery_suspect": False,
@@ -51,7 +50,6 @@ def complete_state():
                 "watering_trigger_guard": False,
                 "recent_response_guard": False,
                 "hard_safety_low_guard": False,
-                "cloud_protection": False,
             },
         },
         "irrigation": {"pump_active": False},
@@ -118,13 +116,110 @@ class DecisionContextTests(unittest.TestCase):
         self.assertIsNone(projection["confirmed_action_id"])
         self.assertEqual(stored_feedback["feedback_id"], projection["feedback_id"])
 
-    def test_unknown_and_malformed_safety_facts_are_not_normalized_to_false(self):
+    def test_required_malformed_fact_is_not_normalized_to_false(self):
         state = complete_state()
         state["safety"]["flags"]["sensor_fault"] = {"active": "unknown"}
-        del state["safety"]["flags"]["cloud_protection"]
         context = build_decision_context(state)
         self.assertEqual("invalid", context["safety_flags"]["sensor_fault"])
-        self.assertEqual("missing", context["safety_flags"]["cloud_protection"])
+        self.assertEqual("inactive", context["safety_flags"]["cloud_protection"])
+
+    def test_optional_absence_is_usable_only_with_phase3_freshness(self):
+        for value in ("missing", None):
+            with self.subTest(value=value):
+                state = complete_state()
+                if value is None:
+                    state["safety"]["flags"]["pending_soak"] = None
+                context = build_decision_context(state)
+
+                self.assertEqual("inactive", context["safety_flags"]["pending_soak"])
+                self.assertEqual("inactive", context["safety_flags"]["cloud_protection"])
+                self.assertEqual(
+                    CALL_QWEN,
+                    evaluate_trigger(context, None, deny_age_seconds=18000).decision,
+                )
+
+        unavailable = complete_state()
+        unavailable["data_quality"]["phase3_state_age_sec"] = None
+        unavailable_context = build_decision_context(unavailable)
+        self.assertEqual("missing", unavailable_context["safety_flags"]["pending_soak"])
+        self.assertEqual(
+            LOCAL_SAFETY_ONLY,
+            evaluate_trigger(unavailable_context, None, deny_age_seconds=18000).decision,
+        )
+
+        stale = complete_state()
+        stale["data_quality"]["phase3_state_age_sec"] = 18001.0
+        stale_context = build_decision_context(stale)
+        self.assertEqual("inactive", stale_context["safety_flags"]["pending_soak"])
+        self.assertEqual(
+            LOCAL_SAFETY_ONLY,
+            evaluate_trigger(stale_context, None, deny_age_seconds=18000).decision,
+        )
+
+    def test_persisted_pending_soak_remains_active_until_phase3_removes_it(self):
+        cases = {
+            "before nominal deadline": 1791806401.0,
+            "at nominal deadline": 1791806400.0,
+            "after nominal deadline": 1791806399.0,
+        }
+        for label, pump_end in cases.items():
+            with self.subTest(case=label):
+                state = complete_state()
+                state["safety"]["flags"]["pending_soak"] = {
+                    "pump_end_time_wall": pump_end,
+                    "soak_duration": 0.0,
+                }
+                context = build_decision_context(state)
+
+                self.assertEqual("active", context["safety_flags"]["pending_soak"])
+                decision = evaluate_trigger(context, None, deny_age_seconds=18000)
+                self.assertEqual(SKIP_CLOUD, decision.decision)
+                self.assertIn("protection_active:pending_soak", decision.reason_codes)
+
+    def test_malformed_pending_soak_remains_fail_closed(self):
+        malformed_values = (
+            False,
+            0,
+            {},
+            {"pump_end_time_wall": 1791806400.0},
+            {"pump_end_time_wall": 1791806400.0, "soak_duration": -1.0},
+            {"pump_end_time_wall": "not-a-number", "soak_duration": 1.0},
+        )
+        for value in malformed_values:
+            with self.subTest(value=value):
+                state = complete_state()
+                state["safety"]["flags"]["pending_soak"] = value
+                context = build_decision_context(state)
+
+                self.assertEqual("invalid", context["safety_flags"]["pending_soak"])
+                self.assertEqual(
+                    LOCAL_SAFETY_ONLY,
+                    evaluate_trigger(context, None, deny_age_seconds=18000).decision,
+                )
+
+    def test_cloud_protection_absence_is_optional_but_present_values_are_validated(self):
+        cases = (
+            ("missing", None, "inactive", CALL_QWEN),
+            ("inactive boolean", False, "inactive", CALL_QWEN),
+            ("inactive object", {"active": False}, "inactive", CALL_QWEN),
+            ("active boolean", True, "active", LOCAL_SAFETY_ONLY),
+            ("active object", {"active": True}, "active", LOCAL_SAFETY_ONLY),
+            ("malformed object", {"active": "unknown"}, "invalid", LOCAL_SAFETY_ONLY),
+            ("malformed null", None, "invalid", LOCAL_SAFETY_ONLY),
+            ("malformed numeric", 0, "invalid", LOCAL_SAFETY_ONLY),
+        )
+        for label, value, expected_status, expected_decision in cases:
+            with self.subTest(case=label):
+                state = complete_state()
+                if label != "missing":
+                    state["safety"]["flags"]["cloud_protection"] = value
+                context = build_decision_context(state)
+
+                self.assertEqual(expected_status, context["safety_flags"]["cloud_protection"])
+                self.assertEqual(
+                    expected_decision,
+                    evaluate_trigger(context, None, deny_age_seconds=18000).decision,
+                )
 
     def test_prepared_or_incomplete_receipts_are_not_real_action_context(self):
         with tempfile.TemporaryDirectory() as directory:

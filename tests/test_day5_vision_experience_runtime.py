@@ -60,7 +60,6 @@ def health_snapshot():
     now = utc_now()
     flags = {
         "pump_active": False,
-        "pending_soak": False,
         "water_delivery_suspect": False,
         "reservoir_empty_suspect": False,
         "low_wet_recovery_suspect": False,
@@ -70,7 +69,6 @@ def health_snapshot():
         "watering_trigger_guard": False,
         "recent_response_guard": False,
         "hard_safety_low_guard": False,
-        "cloud_protection": False,
     }
     return {
         "observed_at": now,

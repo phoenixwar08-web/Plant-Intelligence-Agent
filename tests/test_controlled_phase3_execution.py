@@ -21,7 +21,7 @@ from services.soil3.feedback_collector.action_receipt_v1 import ActionReceiptSto
 from services.soil3.episode.episode_v1 import EpisodeStore
 from services.soil3.phase3_bridge import Phase3Bridge
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
-from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS
+from services.soil3.state.state_v1 import PHASE3_REQUIRED_SAFETY_FLAG_KEYS
 from services.soil3.telemetry.common import atomic_write_json
 from services.soil3.trace import TraceStore
 
@@ -40,7 +40,7 @@ def artifact_ref(schema_version, path, record_id=None):
 
 
 def state_snapshot():
-    flags = {key: False for key in PHASE3_SAFETY_FLAG_KEYS}
+    flags = {key: False for key in PHASE3_REQUIRED_SAFETY_FLAG_KEYS}
     flags["predictor_circuit"] = {"state": "CLOSED", "active": False}
     return {
         "schema_version": "state.v1",

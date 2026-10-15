@@ -14,7 +14,10 @@ from services.soil3.feedback_collector.action_receipt_v1 import (
     episode_id_for_receipt,
 )
 from services.soil3.cloud_strategy.validator import parse_timestamp
-from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS
+from services.soil3.state.state_v1 import (
+    PHASE3_OPTIONAL_SAFETY_FLAG_KEYS,
+    PHASE3_SAFETY_FLAG_KEYS,
+)
 
 
 PREDICTOR_STATES = frozenset({"CLOSED", "HALF_OPEN", "OPEN"})
@@ -55,6 +58,22 @@ def _active_state(
     observed_at: Any,
     phase3_system_state: Any,
 ) -> str:
+    if name == "cloud_protection":
+        if isinstance(value, bool):
+            return "active" if value else "inactive"
+        if isinstance(value, dict) and isinstance(value.get("active"), bool):
+            return "active" if value["active"] else "inactive"
+        return "invalid"
+    if name == "pending_soak":
+        if not isinstance(value, dict):
+            return "invalid"
+        pump_end = _finite(value.get("pump_end_time_wall"))
+        duration = _finite(value.get("soak_duration"))
+        if pump_end is None or duration is None or duration < 0:
+            return "invalid"
+        # Phase3 owns settlement.  A persisted record remains protective until
+        # its next run_cycle observes the plant and removes the record.
+        return "active"
     if isinstance(value, bool):
         return "active" if value else "inactive"
     if name == "recent_response_guard" and isinstance(value, dict):
@@ -82,12 +101,6 @@ def _active_state(
         return "invalid"
 
     observed_seconds = _timestamp_seconds(observed_at)
-    if name == "pending_soak":
-        pump_end = _finite(value.get("pump_end_time_wall"))
-        duration = _finite(value.get("soak_duration"))
-        if pump_end is None or duration is None or duration < 0 or observed_seconds is None:
-            return "invalid"
-        return "active" if observed_seconds <= pump_end + duration else "inactive"
     if name == "dynamic_cooldown":
         cooldown = _finite(value.get("cooldown_sec"))
         if not isinstance(phase3_system_state, dict):
@@ -108,6 +121,15 @@ def _active_state(
         # active hazard unless a producer explicitly supplies active=true.
         return "inactive"
     return "invalid"
+
+
+def _absent_safety_state(name: str, phase3_state_age_sec: Any) -> str:
+    if name not in PHASE3_OPTIONAL_SAFETY_FLAG_KEYS:
+        return "missing"
+    if name == "cloud_protection":
+        return "inactive"
+    age = _finite(phase3_state_age_sec)
+    return "inactive" if age is not None and age >= 0 else "missing"
 
 
 def _latest_receipt(receipt_dir: str | Path | None) -> dict[str, Any] | None:
@@ -205,6 +227,7 @@ def build_decision_context(
     trends = state.get("trends") if isinstance(state.get("trends"), dict) else {}
     quality = state.get("data_quality") if isinstance(state.get("data_quality"), dict) else {}
     flags = safety.get("flags") if isinstance(safety.get("flags"), dict) else {}
+    phase3_state_age_sec = quality.get("phase3_state_age_sec")
 
     humidity = _finite(soil.get("humidity_percent"))
     boundaries = {
@@ -216,15 +239,15 @@ def build_decision_context(
     for name in PHASE3_SAFETY_FLAG_KEYS:
         if name == "predictor_circuit":
             continue
-        safety_flags[name] = (
-            _active_state(
-                name,
-                flags[name],
-                observed_at=state.get("observed_at"),
-                phase3_system_state=phase3_system_state,
-            )
-            if name in flags
-            else "missing"
+        value_is_absent = name not in flags or (name == "pending_soak" and flags[name] is None)
+        if value_is_absent:
+            safety_flags[name] = _absent_safety_state(name, phase3_state_age_sec)
+            continue
+        safety_flags[name] = _active_state(
+            name,
+            flags[name],
+            observed_at=state.get("observed_at"),
+            phase3_system_state=phase3_system_state,
         )
     predictor = flags.get("predictor_circuit")
     predictor_state = predictor.get("state") if isinstance(predictor, dict) else None
