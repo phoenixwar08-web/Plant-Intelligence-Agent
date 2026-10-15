@@ -112,7 +112,14 @@ def _pending_soak_active(value: Any) -> bool | None:
         return None
     pump_end = _finite_or_none(value.get("pump_end_time_wall"))
     duration = _finite_nonnegative_or_none(value.get("soak_duration"))
-    if pump_end is None or duration is None:
+    water_sec = _finite_or_none(value.get("water_sec"))
+    pre_humidity = _finite_or_none(value.get("pre_humidity"))
+    if (
+        pump_end is None
+        or duration is None
+        or water_sec is None
+        or pre_humidity is None
+    ):
         return None
     # The persisted record is the protection sentinel. Phase3 removes it only
     # after the next cycle performs settlement, so elapsed wall time alone must

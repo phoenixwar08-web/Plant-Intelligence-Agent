@@ -168,6 +168,8 @@ class DecisionContextTests(unittest.TestCase):
                 state["safety"]["flags"]["pending_soak"] = {
                     "pump_end_time_wall": pump_end,
                     "soak_duration": 0.0,
+                    "water_sec": 5.0,
+                    "pre_humidity": 34.0,
                 }
                 context = build_decision_context(state)
 
@@ -182,8 +184,31 @@ class DecisionContextTests(unittest.TestCase):
             0,
             {},
             {"pump_end_time_wall": 1791806400.0},
+            {"pump_end_time_wall": 1791806400.0, "soak_duration": 1200.0},
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "pre_humidity": 34.0,
+            },
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "water_sec": 5.0,
+            },
             {"pump_end_time_wall": 1791806400.0, "soak_duration": -1.0},
             {"pump_end_time_wall": "not-a-number", "soak_duration": 1.0},
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "water_sec": "not-a-number",
+                "pre_humidity": 34.0,
+            },
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "water_sec": 5.0,
+                "pre_humidity": "not-a-number",
+            },
         )
         for value in malformed_values:
             with self.subTest(value=value):
@@ -245,6 +270,7 @@ class DecisionContextTests(unittest.TestCase):
             "pump_end_time_wall": 1791806300.0,
             "soak_duration": 1800.0,
             "water_sec": 5.0,
+            "pre_humidity": 34.0,
         }
         state["safety"]["flags"]["dynamic_cooldown"] = {
             "cooldown_sec": 3600.0,

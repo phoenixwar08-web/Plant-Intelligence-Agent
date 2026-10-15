@@ -19,13 +19,30 @@ SCHEMA_PATH = ROOT / "services" / "soil3" / "cloud_gate" / "gate.v2.schema.json"
 
 
 class CloudGateV2Tests(unittest.TestCase):
+    def test_incomplete_pending_soak_is_invalid_in_both_gate_versions(self):
+        state = fresh_state(
+            flags={
+                "pending_soak": {
+                    "pump_end_time_wall": 1791806400.0,
+                    "soak_duration": 1200.0,
+                }
+            }
+        )
+        strategy = valid_strategy(state)
+
+        v1 = evaluate_gate(state, strategy, policy(), False)
+        v2 = evaluate_gate_v2(state, strategy, policy(), False)
+
+        self.assertEqual(["safety_flag_invalid:pending_soak"], v1["reason_codes"])
+        self.assertEqual(v1["reason_codes"], v2["reason_codes"])
+
     def test_optional_safety_compatibility_matches_gate_v1(self):
         cases = (
             ("optional facts absent", {}, "allow"),
             ("pending soak null", {"pending_soak": None}, "allow"),
             (
                 "pending soak persisted",
-                {"pending_soak": {"pump_end_time_wall": 1791806399.0, "soak_duration": 0.0}},
+                {"pending_soak": {"pump_end_time_wall": 1791806399.0, "soak_duration": 0.0, "water_sec": 5.0, "pre_humidity": 34.0}},
                 "deny",
             ),
             ("cloud protection inactive", {"cloud_protection": {"active": False}}, "allow"),

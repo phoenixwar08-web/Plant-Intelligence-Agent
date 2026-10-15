@@ -33,8 +33,9 @@ The compatibility rule follows the persisted Phase3 contract:
 
 - missing or `null` means no persisted soak task, but is treated as inactive
   only when the surrounding Phase3 state freshness checks pass;
-- a persisted object must contain finite `pump_end_time_wall` and a finite,
-  non-negative `soak_duration`;
+- a persisted object must contain finite `pump_end_time_wall`, `water_sec`, and
+  `pre_humidity` values plus a finite, non-negative `soak_duration`, matching
+  the fields Phase3 requires to restore `PendingSoak`;
 - malformed scalar or object values remain invalid and fail closed;
 - a valid object remains active for Trigger and Gate while it is persisted,
   including after its nominal deadline.

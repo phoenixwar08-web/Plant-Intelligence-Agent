@@ -128,19 +128,19 @@ class CloudGateAdmissionTests(unittest.TestCase):
             ("null", {"pending_soak": None}, "allow", []),
             (
                 "persisted before nominal deadline",
-                {"pending_soak": {"pump_end_time_wall": 1791806401.0, "soak_duration": 0.0}},
+                {"pending_soak": {"pump_end_time_wall": 1791806401.0, "soak_duration": 0.0, "water_sec": 5.0, "pre_humidity": 34.0}},
                 "deny",
                 ["safety_flag_active:pending_soak"],
             ),
             (
                 "persisted at nominal deadline",
-                {"pending_soak": {"pump_end_time_wall": 1791806400.0, "soak_duration": 0.0}},
+                {"pending_soak": {"pump_end_time_wall": 1791806400.0, "soak_duration": 0.0, "water_sec": 5.0, "pre_humidity": 34.0}},
                 "deny",
                 ["safety_flag_active:pending_soak"],
             ),
             (
                 "persisted after nominal deadline",
-                {"pending_soak": {"pump_end_time_wall": 1791806399.0, "soak_duration": 0.0}},
+                {"pending_soak": {"pump_end_time_wall": 1791806399.0, "soak_duration": 0.0, "water_sec": 5.0, "pre_humidity": 34.0}},
                 "deny",
                 ["safety_flag_active:pending_soak"],
             ),
@@ -159,8 +159,31 @@ class CloudGateAdmissionTests(unittest.TestCase):
             0,
             {},
             {"pump_end_time_wall": 1791806400.0},
+            {"pump_end_time_wall": 1791806400.0, "soak_duration": 1200.0},
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "pre_humidity": 34.0,
+            },
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "water_sec": 5.0,
+            },
             {"pump_end_time_wall": 1791806400.0, "soak_duration": -1.0},
             {"pump_end_time_wall": "not-a-number", "soak_duration": 1.0},
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "water_sec": "not-a-number",
+                "pre_humidity": 34.0,
+            },
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "water_sec": 5.0,
+                "pre_humidity": "not-a-number",
+            },
         )
         for value in malformed_values:
             with self.subTest(value=value):

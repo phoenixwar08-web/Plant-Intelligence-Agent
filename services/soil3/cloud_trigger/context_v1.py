@@ -69,7 +69,15 @@ def _active_state(
             return "invalid"
         pump_end = _finite(value.get("pump_end_time_wall"))
         duration = _finite(value.get("soak_duration"))
-        if pump_end is None or duration is None or duration < 0:
+        water_sec = _finite(value.get("water_sec"))
+        pre_humidity = _finite(value.get("pre_humidity"))
+        if (
+            pump_end is None
+            or duration is None
+            or duration < 0
+            or water_sec is None
+            or pre_humidity is None
+        ):
             return "invalid"
         # Phase3 owns settlement.  A persisted record remains protective until
         # its next run_cycle observes the plant and removes the record.
