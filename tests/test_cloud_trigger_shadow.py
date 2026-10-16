@@ -124,36 +124,34 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual("inactive", context["safety_flags"]["cloud_protection"])
 
     def test_optional_absence_is_usable_only_with_phase3_freshness(self):
-        for value in ("missing", None):
-            with self.subTest(value=value):
+        cases = (
+            ("missing", 18000.0, "inactive", CALL_QWEN),
+            (None, 18000.0, "inactive", CALL_QWEN),
+            ("missing", 18001.0, "missing", LOCAL_SAFETY_ONLY),
+            (None, 18001.0, "missing", LOCAL_SAFETY_ONLY),
+        )
+        for value, age, expected_status, expected_decision in cases:
+            with self.subTest(value=value, age=age):
                 state = complete_state()
+                state["data_quality"]["phase3_state_age_sec"] = age
                 if value is None:
                     state["safety"]["flags"]["pending_soak"] = None
-                context = build_decision_context(state)
+                context = build_decision_context(state, deny_age_seconds=18000)
 
-                self.assertEqual("inactive", context["safety_flags"]["pending_soak"])
+                self.assertEqual(expected_status, context["safety_flags"]["pending_soak"])
                 self.assertEqual("inactive", context["safety_flags"]["cloud_protection"])
                 self.assertEqual(
-                    CALL_QWEN,
+                    expected_decision,
                     evaluate_trigger(context, None, deny_age_seconds=18000).decision,
                 )
 
         unavailable = complete_state()
         unavailable["data_quality"]["phase3_state_age_sec"] = None
-        unavailable_context = build_decision_context(unavailable)
+        unavailable_context = build_decision_context(unavailable, deny_age_seconds=18000)
         self.assertEqual("missing", unavailable_context["safety_flags"]["pending_soak"])
         self.assertEqual(
             LOCAL_SAFETY_ONLY,
             evaluate_trigger(unavailable_context, None, deny_age_seconds=18000).decision,
-        )
-
-        stale = complete_state()
-        stale["data_quality"]["phase3_state_age_sec"] = 18001.0
-        stale_context = build_decision_context(stale)
-        self.assertEqual("inactive", stale_context["safety_flags"]["pending_soak"])
-        self.assertEqual(
-            LOCAL_SAFETY_ONLY,
-            evaluate_trigger(stale_context, None, deny_age_seconds=18000).decision,
         )
 
     def test_persisted_pending_soak_remains_active_until_phase3_removes_it(self):
@@ -171,7 +169,7 @@ class DecisionContextTests(unittest.TestCase):
                     "water_sec": 5.0,
                     "pre_humidity": 34.0,
                 }
-                context = build_decision_context(state)
+                context = build_decision_context(state, deny_age_seconds=18000)
 
                 self.assertEqual("active", context["safety_flags"]["pending_soak"])
                 decision = evaluate_trigger(context, None, deny_age_seconds=18000)
@@ -238,7 +236,7 @@ class DecisionContextTests(unittest.TestCase):
                 state = complete_state()
                 if label != "missing":
                     state["safety"]["flags"]["cloud_protection"] = value
-                context = build_decision_context(state)
+                context = build_decision_context(state, deny_age_seconds=18000)
 
                 self.assertEqual(expected_status, context["safety_flags"]["cloud_protection"])
                 self.assertEqual(
@@ -311,8 +309,8 @@ class DecisionContextTests(unittest.TestCase):
             "delta_per_sec": 0.8,
         }
 
-        expired_context = build_decision_context(expired)
-        active_context = build_decision_context(active)
+        expired_context = build_decision_context(expired, deny_age_seconds=18000)
+        active_context = build_decision_context(active, deny_age_seconds=18000)
 
         self.assertEqual("inactive", expired_context["safety_flags"]["recent_response_guard"])
         self.assertEqual("active", active_context["safety_flags"]["recent_response_guard"])
@@ -360,7 +358,7 @@ class DecisionContextTests(unittest.TestCase):
 
 class TriggerEvaluatorTests(unittest.TestCase):
     def context(self):
-        return build_decision_context(complete_state())
+        return build_decision_context(complete_state(), deny_age_seconds=18000)
 
     def test_missing_core_fact_stale_state_and_hard_low_fail_locally(self):
         missing = self.context()
@@ -420,7 +418,7 @@ class TriggerEvaluatorTests(unittest.TestCase):
 
         changed_state = complete_state()
         changed_state["safety"]["target_low"] = 32.1
-        changed_context = build_decision_context(changed_state)
+        changed_context = build_decision_context(changed_state, deny_age_seconds=18000)
 
         self.assertEqual(
             baseline["boundary_relations"],
@@ -469,7 +467,7 @@ class TriggerShadowStoreTests(unittest.TestCase):
     def test_create_finalize_are_atomic_set_once_and_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             store = TriggerShadowStore(Path(directory))
-            context = build_decision_context(complete_state())
+            context = build_decision_context(complete_state(), deny_age_seconds=18000)
             created = store.create(
                 TRACE_ID,
                 self.state_ref(),
@@ -502,10 +500,10 @@ class TriggerShadowStoreTests(unittest.TestCase):
     def test_refuses_conflicting_create_and_corrupt_record(self):
         with tempfile.TemporaryDirectory() as directory:
             store = TriggerShadowStore(Path(directory))
-            context = build_decision_context(complete_state())
+            context = build_decision_context(complete_state(), deny_age_seconds=18000)
             decision = evaluate_trigger(context, None, deny_age_seconds=18000)
             store.create(TRACE_ID, self.state_ref(), decision, context, None)
-            changed = build_decision_context(complete_state())
+            changed = build_decision_context(complete_state(), deny_age_seconds=18000)
             changed["humidity"] = 40.0
             with self.assertRaises(TriggerShadowError):
                 store.create(TRACE_ID, self.state_ref(), decision, changed, None)
@@ -516,7 +514,7 @@ class TriggerShadowStoreTests(unittest.TestCase):
     def test_baseline_advances_only_for_call_with_validator_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             store = TriggerShadowStore(Path(directory))
-            context = build_decision_context(complete_state())
+            context = build_decision_context(complete_state(), deny_age_seconds=18000)
             first_id = "tr-" + "4" * 24
             skip_id = "tr-" + "5" * 24
             rejected_id = "tr-" + "6" * 24
@@ -533,7 +531,7 @@ class TriggerShadowStoreTests(unittest.TestCase):
             store.create(skip_id, self.state_ref(), skip, context, store.artifact_ref(first_id))
             store.finalize(skip_id, self.actual_result())
 
-            changed = build_decision_context(complete_state())
+            changed = build_decision_context(complete_state(), deny_age_seconds=18000)
             changed["trends"]["humidity_1h"] = 1.0
             call = evaluate_trigger(changed, semantic_projection(context), deny_age_seconds=18000)
             store.create(rejected_id, self.state_ref(), call, changed, store.artifact_ref(first_id))

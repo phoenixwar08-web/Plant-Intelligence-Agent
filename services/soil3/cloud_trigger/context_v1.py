@@ -131,13 +131,26 @@ def _active_state(
     return "invalid"
 
 
-def _absent_safety_state(name: str, phase3_state_age_sec: Any) -> str:
+def _absent_safety_state(
+    name: str,
+    phase3_state_age_sec: Any,
+    deny_age_seconds: Any,
+) -> str:
     if name not in PHASE3_OPTIONAL_SAFETY_FLAG_KEYS:
         return "missing"
     if name == "cloud_protection":
         return "inactive"
     age = _finite(phase3_state_age_sec)
-    return "inactive" if age is not None and age >= 0 else "missing"
+    deny_age = _finite(deny_age_seconds)
+    return (
+        "inactive"
+        if age is not None
+        and age >= 0
+        and deny_age is not None
+        and deny_age >= 0
+        and age <= deny_age
+        else "missing"
+    )
 
 
 def _latest_receipt(receipt_dir: str | Path | None) -> dict[str, Any] | None:
@@ -222,6 +235,7 @@ def _feedback_summary(
 def build_decision_context(
     state: Any,
     *,
+    deny_age_seconds: Any = None,
     last_model_decision: Any = None,
     receipt_dir: str | Path | None = None,
     feedback_dir: str | Path | None = None,
@@ -249,7 +263,11 @@ def build_decision_context(
             continue
         value_is_absent = name not in flags or (name == "pending_soak" and flags[name] is None)
         if value_is_absent:
-            safety_flags[name] = _absent_safety_state(name, phase3_state_age_sec)
+            safety_flags[name] = _absent_safety_state(
+                name,
+                phase3_state_age_sec,
+                deny_age_seconds,
+            )
             continue
         safety_flags[name] = _active_state(
             name,

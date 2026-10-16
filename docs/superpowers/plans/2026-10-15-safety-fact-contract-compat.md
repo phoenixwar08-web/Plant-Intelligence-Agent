@@ -84,7 +84,7 @@ Expected failures: missing optional facts currently become `LOCAL_SAFETY_ONLY`, 
 - [ ] **Step 3: Implement the minimal Trigger projection**
 
 - Treat absent `cloud_protection` as inactive.
-- Treat absent/null `pending_soak` as inactive only when `phase3_state_age_sec` is finite and non-negative; otherwise retain missing/unavailable behavior.
+- Pass the existing Gate policy `deny_age_seconds` into Decision Context and treat absent/null `pending_soak` as inactive only when `phase3_state_age_sec` is finite, non-negative, and no greater than that limit; otherwise retain missing/unavailable behavior.
 - Validate persisted pending soak as a dictionary with finite `pump_end_time_wall`, `water_sec`, and `pre_humidity` values plus finite non-negative `soak_duration`, then keep it active regardless of nominal deadline.
 - Leave required facts, dangerous facts, freshness checks, and protection priority unchanged.
 

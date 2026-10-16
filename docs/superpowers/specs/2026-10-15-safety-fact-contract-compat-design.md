@@ -32,7 +32,9 @@ write `false`, synthesize an inactive object, or otherwise change the frozen
 The compatibility rule follows the persisted Phase3 contract:
 
 - missing or `null` means no persisted soak task, but is treated as inactive
-  only when the surrounding Phase3 state freshness checks pass;
+  only when `phase3_state_age_sec` is finite, non-negative, and no greater
+  than the existing Gate policy `deny_age_seconds`; unavailable or stale
+  Phase3 state keeps the fact missing;
 - a persisted object must contain finite `pump_end_time_wall`, `water_sec`, and
   `pre_humidity` values plus a finite, non-negative `soak_duration`, matching
   the fields Phase3 requires to restore `PendingSoak`;
