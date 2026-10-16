@@ -20,6 +20,10 @@ PHASE3_SAFETY_FLAG_KEYS = (
     "hard_safety_low_guard",
     "cloud_protection",
 )
+PHASE3_OPTIONAL_SAFETY_FLAG_KEYS = frozenset({"pending_soak", "cloud_protection"})
+PHASE3_REQUIRED_SAFETY_FLAG_KEYS = (
+    frozenset(PHASE3_SAFETY_FLAG_KEYS) - PHASE3_OPTIONAL_SAFETY_FLAG_KEYS
+)
 
 # A trend is only meaningful when the historical reading is close to its named
 # horizon; an older reading must not silently stand in for (for example) 3h ago.

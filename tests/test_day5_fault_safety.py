@@ -17,7 +17,7 @@ from services.soil3.agent_runtime.runtime_v1 import (
 from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
-from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS, StateBuilder
+from services.soil3.state.state_v1 import PHASE3_REQUIRED_SAFETY_FLAG_KEYS, StateBuilder
 from services.soil3.trace.trace_v1 import TraceError, TraceStore
 
 
@@ -30,7 +30,7 @@ def utc_text(value):
 
 
 def complete_safety_flags():
-    flags = {name: False for name in PHASE3_SAFETY_FLAG_KEYS}
+    flags = {name: False for name in PHASE3_REQUIRED_SAFETY_FLAG_KEYS}
     flags["predictor_circuit"] = {"state": "CLOSED", "active": False}
     return flags
 
@@ -204,11 +204,9 @@ class Day5FaultSafetyTests(unittest.TestCase):
             "incomplete_safety": (
                 health_snapshot(complete_safety=False),
                 [
-                    "safety_flag_unavailable:cloud_protection",
                     "safety_flag_unavailable:dynamic_cooldown",
                     "safety_flag_unavailable:hard_safety_low_guard",
                     "safety_flag_unavailable:low_wet_recovery_suspect",
-                    "safety_flag_unavailable:pending_soak",
                     "safety_flag_unavailable:predictor_circuit",
                     "safety_flag_unavailable:recent_response_guard",
                     "safety_flag_unavailable:reservoir_empty_suspect",

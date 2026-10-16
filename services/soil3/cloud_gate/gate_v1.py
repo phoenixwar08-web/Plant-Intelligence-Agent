@@ -11,7 +11,11 @@ from services.soil3.cloud_strategy.validator import (
     fingerprint,
     normalize_timestamp,
 )
-from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS
+from services.soil3.state.state_v1 import (
+    PHASE3_OPTIONAL_SAFETY_FLAG_KEYS,
+    PHASE3_REQUIRED_SAFETY_FLAG_KEYS,
+    PHASE3_SAFETY_FLAG_KEYS,
+)
 
 from .budget import BudgetLedgerError, BudgetReservationConflict
 
@@ -22,8 +26,9 @@ POLICY_FIELDS = {
     "window_seconds",
     "max_exploration_water_seconds",
 }
-REQUIRED_PROTECTION_FLAGS = frozenset(PHASE3_SAFETY_FLAG_KEYS)
-ACTIVE_PROTECTION_FLAGS = REQUIRED_PROTECTION_FLAGS - {"predictor_circuit"}
+REQUIRED_PROTECTION_FLAGS = PHASE3_REQUIRED_SAFETY_FLAG_KEYS
+OPTIONAL_PROTECTION_FLAGS = PHASE3_OPTIONAL_SAFETY_FLAG_KEYS
+ACTIVE_PROTECTION_FLAGS = frozenset(PHASE3_SAFETY_FLAG_KEYS) - {"predictor_circuit"}
 PREDICTOR_CIRCUIT_STATES = {"CLOSED", "HALF_OPEN", "OPEN"}
 
 
@@ -80,6 +85,16 @@ def _finite_nonnegative_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) and number >= 0 else None
 
 
+def _finite_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _flag_active(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -87,6 +102,36 @@ def _flag_active(value: Any) -> bool | None:
         return value["active"]
     if isinstance(value, (int, float)) and value in (0, 1):
         return bool(value)
+    return None
+
+
+def _pending_soak_active(value: Any) -> bool | None:
+    if value is None:
+        return False
+    if not isinstance(value, dict):
+        return None
+    pump_end = _finite_or_none(value.get("pump_end_time_wall"))
+    duration = _finite_nonnegative_or_none(value.get("soak_duration"))
+    water_sec = _finite_or_none(value.get("water_sec"))
+    pre_humidity = _finite_or_none(value.get("pre_humidity"))
+    if (
+        pump_end is None
+        or duration is None
+        or water_sec is None
+        or pre_humidity is None
+    ):
+        return None
+    # The persisted record is the protection sentinel. Phase3 removes it only
+    # after the next cycle performs settlement, so elapsed wall time alone must
+    # never release Gate admission.
+    return True
+
+
+def _cloud_protection_active(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("active"), bool):
+        return value["active"]
     return None
 
 
@@ -176,6 +221,19 @@ def evaluate_gate(
         if name == "predictor_circuit":
             continue
         active = _flag_active(flags[name])
+        if active is None:
+            reasons.append(f"safety_flag_invalid:{name}")
+        elif active:
+            reasons.append(f"safety_flag_active:{name}")
+
+    for name in sorted(OPTIONAL_PROTECTION_FLAGS):
+        if name not in flags:
+            continue
+        active = (
+            _pending_soak_active(flags[name])
+            if name == "pending_soak"
+            else _cloud_protection_active(flags[name])
+        )
         if active is None:
             reasons.append(f"safety_flag_invalid:{name}")
         elif active:

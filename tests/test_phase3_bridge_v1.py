@@ -13,14 +13,14 @@ from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
 from services.soil3.phase3_bridge.bridge_v1 import FORMAL_PHASE3_ENTRYPOINT, Phase3Bridge
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
-from services.soil3.state.state_v1 import PHASE3_SAFETY_FLAG_KEYS
+from services.soil3.state.state_v1 import PHASE3_REQUIRED_SAFETY_FLAG_KEYS
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def state_snapshot():
-    flags = {key: False for key in PHASE3_SAFETY_FLAG_KEYS}
+    flags = {key: False for key in PHASE3_REQUIRED_SAFETY_FLAG_KEYS}
     flags["predictor_circuit"] = {"state": "CLOSED", "active": False}
     return {
         "schema_version": "state.v1",

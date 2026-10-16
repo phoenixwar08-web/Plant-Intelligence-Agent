@@ -45,7 +45,6 @@ except ImportError:
 
 SAFE_PHASE3_FLAGS = {
     "pump_active": False,
-    "pending_soak": False,
     "water_delivery_suspect": {"active": False},
     "reservoir_empty_suspect": {"active": False},
     "low_wet_recovery_suspect": {"active": False},
@@ -55,7 +54,6 @@ SAFE_PHASE3_FLAGS = {
     "watering_trigger_guard": {"active": False},
     "recent_response_guard": {"active": False},
     "hard_safety_low_guard": {"active": False},
-    "cloud_protection": {"active": False},
 }
 
 

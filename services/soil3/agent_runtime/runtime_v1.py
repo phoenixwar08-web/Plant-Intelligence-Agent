@@ -525,6 +525,7 @@ def _start_trigger_shadow(
             phase3_system_state = None
         context = build_decision_context(
             state,
+            deny_age_seconds=config.gate_policy.deny_age_seconds,
             last_model_decision=(baseline.get("actual_qwen_result") if baseline else None),
             receipt_dir=config.feedback_action_receipt_dir,
             feedback_dir=config.feedback_dir,
