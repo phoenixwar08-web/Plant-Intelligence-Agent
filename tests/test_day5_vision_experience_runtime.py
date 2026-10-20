@@ -11,6 +11,7 @@ from unittest import mock
 
 from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
 from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
+from services.soil3.cloud_trigger import CALL_QWEN, TriggerDecision
 from services.soil3.experience_retrieval import RetrievalError
 from services.soil3.trace import TraceStore
 from services.soil3.vision import CaptureOutcome, VisionArtifactRef, VisionRunResult
@@ -229,6 +230,10 @@ class Day5VisionExperienceRuntimeTests(unittest.TestCase):
             mock.patch(
                 "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
                 side_effect=admitted_gate,
+            ),
+            mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                return_value=TriggerDecision(CALL_QWEN, ("vision_experience_test",)),
             ),
         ]
         stack.extend(patches.values())

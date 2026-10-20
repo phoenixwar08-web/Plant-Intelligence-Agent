@@ -80,7 +80,7 @@ def test_call_qwen_trigger_runs_existing_shadow_chain_once(self):
 Run:
 
 ```powershell
-python -m unittest tests.test_soil3_agent_runtime.StateProducerTests.test_call_qwen_trigger_runs_existing_shadow_chain_once -v
+python -m unittest tests.test_soil3_agent_runtime.PipelineTests.test_call_qwen_trigger_runs_existing_shadow_chain_once -v
 ```
 
 Expected: FAIL because the current runtime record has none of the four Phase 1
@@ -163,7 +163,7 @@ temporary runtime root.
 Run:
 
 ```powershell
-python -m unittest tests.test_soil3_agent_runtime.StateProducerTests.test_non_call_trigger_decisions_stop_before_cloud_and_downstream -v
+python -m unittest tests.test_soil3_agent_runtime.PipelineTests.test_non_call_trigger_decisions_stop_before_cloud_and_downstream -v
 ```
 
 Expected: FAIL because the current Phase 0 runtime calls `_collect_vision()`,
@@ -247,8 +247,8 @@ Run:
 
 ```powershell
 python -m unittest \
-  tests.test_soil3_agent_runtime.StateProducerTests.test_call_qwen_trigger_runs_existing_shadow_chain_once \
-  tests.test_soil3_agent_runtime.StateProducerTests.test_non_call_trigger_decisions_stop_before_cloud_and_downstream -v
+  tests.test_soil3_agent_runtime.PipelineTests.test_call_qwen_trigger_runs_existing_shadow_chain_once \
+  tests.test_soil3_agent_runtime.PipelineTests.test_non_call_trigger_decisions_stop_before_cloud_and_downstream -v
 ```
 
 Expected: 2 tests pass; no blocked entry point is called.
@@ -328,7 +328,7 @@ def test_trigger_admission_failure_is_persisted_and_never_calls_cloud(self):
 Run:
 
 ```powershell
-python -m unittest tests.test_soil3_agent_runtime.StateProducerTests.test_trigger_admission_failure_is_persisted_and_never_calls_cloud -v
+python -m unittest tests.test_soil3_agent_runtime.PipelineTests.test_trigger_admission_failure_is_persisted_and_never_calls_cloud -v
 ```
 
 Expected: FAIL because the current implementation either ignores the Trigger
@@ -361,9 +361,9 @@ Run:
 
 ```powershell
 python -m unittest \
-  tests.test_soil3_agent_runtime.StateProducerTests.test_trigger_admission_failure_is_persisted_and_never_calls_cloud \
-  tests.test_soil3_agent_runtime.StateProducerTests.test_trigger_store_failure_never_calls_cloud \
-  tests.test_soil3_agent_runtime.StateProducerTests.test_invalid_trigger_decision_never_calls_cloud -v
+  tests.test_soil3_agent_runtime.PipelineTests.test_trigger_admission_failure_is_persisted_and_never_calls_cloud \
+  tests.test_soil3_agent_runtime.PipelineTests.test_trigger_store_failure_never_calls_cloud \
+  tests.test_soil3_agent_runtime.PipelineTests.test_invalid_trigger_decision_never_calls_cloud -v
 ```
 
 Expected: 3 tests pass and all cloud/downstream mocks remain uncalled.

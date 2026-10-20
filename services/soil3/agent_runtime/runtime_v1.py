@@ -88,7 +88,7 @@ STATE_TREND_HISTORY_SECONDS = 6 * 60 * 60 + 30 * 60
 
 
 @dataclass(frozen=True)
-class TriggerAdmission:
+class _TriggerAdmission:
     store: TriggerShadowStore
     path: str
     decision: TriggerDecision
@@ -524,7 +524,7 @@ def _start_trigger_shadow(
     trace_id: str,
     state: dict[str, Any],
     state_ref: dict[str, Any],
-) -> TriggerAdmission:
+) -> _TriggerAdmission:
     """Persist the local Trigger decision before it can admit cloud work."""
 
     store = TriggerShadowStore(config.trigger_shadow_dir)
@@ -553,7 +553,7 @@ def _start_trigger_shadow(
         context,
         baseline.get("ref") if baseline else None,
     )
-    return TriggerAdmission(
+    return _TriggerAdmission(
         store=store,
         path=str(store.path_for(trace_id)),
         decision=decision,
