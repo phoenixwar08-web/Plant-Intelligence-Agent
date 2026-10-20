@@ -591,6 +591,16 @@ class CanonicalSoilTelemetryTests(unittest.TestCase):
 
 
 class PipelineTests(StateProducerTests):
+    def setUp(self):
+        from services.soil3.cloud_trigger import CALL_QWEN, TriggerDecision
+
+        self._trigger_call_patcher = mock.patch(
+            "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+            return_value=TriggerDecision(CALL_QWEN, ("pipeline_test_call",)),
+        )
+        self._trigger_call_patcher.start()
+        self.addCleanup(self._trigger_call_patcher.stop)
+
     @staticmethod
     def admitted_gate(state, strategy, policy, exploration_requested):
         gate = evaluate_gate_v2(
@@ -716,18 +726,57 @@ class PipelineTests(StateProducerTests):
             self.assertFalse(shadow["actual_qwen_result"]["validator_accepted"])
             self.assertIsNone(shadow["actual_qwen_result"]["strategy_ref"])
 
-    def test_all_trigger_shadow_decisions_still_call_qwen_once(self):
+    def test_call_qwen_trigger_runs_existing_shadow_chain_once(self):
         from services.soil3.agent_runtime import runtime_v1
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
         from services.soil3.cloud_trigger import (
             CALL_QWEN,
+            TriggerDecision,
+            TriggerShadowStore,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                return_value=TriggerDecision(CALL_QWEN, ("test_call",)),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                wraps=runtime_v1.run_chain,
+            ) as cloud_call:
+                record = run_pipeline(config)
+
+            cloud_call.assert_called_once()
+            self.assertEqual("recorded", record["trigger_status"])
+            self.assertEqual(CALL_QWEN, record["trigger_decision"])
+            self.assertEqual(["test_call"], record["trigger_reason_codes"])
+            self.assertEqual("called", record["cloud_invocation_status"])
+            self.assertIsNotNone(record["gate_path"])
+            shadow = TriggerShadowStore(config.trigger_shadow_dir).read(record["trace_id"])
+            self.assertEqual(CALL_QWEN, shadow["trigger_decision"])
+            self.assertTrue(shadow["actual_qwen_result"]["validator_accepted"])
+            self.assertEqual("deny", shadow["actual_qwen_result"]["gate_decision"])
+            self.assertFalse(shadow["execution"]["phase3_called"])
+
+    def test_non_call_trigger_decisions_stop_before_cloud_and_downstream(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_trigger import (
             LOCAL_SAFETY_ONLY,
             SKIP_CLOUD,
             TriggerDecision,
             TriggerShadowStore,
         )
+        from services.soil3.trace.trace_v1 import TraceStore
 
-        for decision_name in (CALL_QWEN, SKIP_CLOUD, LOCAL_SAFETY_ONLY):
+        cases = (
+            (SKIP_CLOUD, "skipped_trigger"),
+            (LOCAL_SAFETY_ONLY, "blocked_local_safety"),
+        )
+        for decision_name, cloud_status in cases:
             with self.subTest(decision=decision_name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 config = RuntimeConfig.from_dict(self.runtime_config_value(root))
@@ -738,25 +787,82 @@ class PipelineTests(StateProducerTests):
                     "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
                     return_value=TriggerDecision(decision_name, ("test_reason",)),
                 ), mock.patch(
-                    "services.soil3.agent_runtime.runtime_v1.run_chain",
-                    wraps=runtime_v1.run_chain,
-                ) as cloud_call:
+                    "services.soil3.agent_runtime.runtime_v1._collect_vision"
+                ) as vision, mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1._collect_experience"
+                ) as experience, mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.run_chain"
+                ) as cloud_call, mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2"
+                ) as gate, mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.DryRunRunner.run"
+                ) as runner, mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.Phase3Bridge.verify"
+                ) as bridge, mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.EpisodeStore.create"
+                ) as episode:
                     record = run_pipeline(config)
 
-                cloud_call.assert_called_once()
-                self.assertEqual(
-                    str(config.trigger_shadow_dir / f'{record["trace_id"]}.json'),
-                    record["trigger_shadow_path"],
+                for blocked in (
+                    vision,
+                    experience,
+                    cloud_call,
+                    gate,
+                    runner,
+                    bridge,
+                    episode,
+                ):
+                    blocked.assert_not_called()
+                self.assertEqual("recorded", record["trigger_status"])
+                self.assertEqual(decision_name, record["trigger_decision"])
+                self.assertEqual(["test_reason"], record["trigger_reason_codes"])
+                self.assertEqual(cloud_status, record["cloud_invocation_status"])
+                self.assertIsNone(record["provider"])
+                self.assertIsNone(record["model"])
+                self.assertIsNone(record["strategy_path"])
+                self.assertIsNone(record["gate_path"])
+                self.assertIsNone(record["audit_path"])
+                self.assertFalse(config.strategy_output.exists())
+                self.assertFalse(config.gate_output.exists())
+                self.assertFalse(config.runner_dir.exists())
+                self.assertFalse(config.bridge_dir.exists())
+                self.assertFalse(config.episode_dir.exists())
+                self.assertFalse(config.audit_dir.exists())
+                self.assertFalse(config.experience_dir.exists())
+
+                shadow = TriggerShadowStore(config.trigger_shadow_dir).read(
+                    record["trace_id"]
                 )
-                shadow = TriggerShadowStore(config.trigger_shadow_dir).read(record["trace_id"])
-                self.assertEqual(decision_name, shadow["trigger_decision"])
-                self.assertTrue(shadow["actual_qwen_result"]["validator_accepted"])
-                self.assertEqual("deny", shadow["actual_qwen_result"]["gate_decision"])
-                self.assertFalse(shadow["execution"]["phase3_called"])
+                self.assertIsNone(shadow["actual_qwen_result"])
+                self.assertIsNone(
+                    TriggerShadowStore(
+                        config.trigger_shadow_dir
+                    ).latest_valid_call_baseline()
+                )
+                trace = TraceStore(config.trace_dir).read(record["trace_id"])
+                self.assertIsNotNone(trace["decision"]["state_ref"])
+                self.assertEqual(
+                    {"availability": "not_requested", "ref": None},
+                    trace["decision"]["vision"],
+                )
+                self.assertEqual(
+                    {"availability": "not_requested", "ref": None},
+                    trace["decision"]["experience"],
+                )
+                self.assertIsNone(trace["decision"]["model_metrics"]["provider"])
+                self.assertIsNone(trace["decision"]["strategy_ref"])
+                self.assertIsNone(trace["decision"]["gate_ref"])
+                self.assertIsNone(trace["decision"]["runner_ref"])
+                self.assertIsNone(trace["decision"]["bridge_ref"])
+                self.assertIsNone(trace["decision"]["episode_ref"])
 
     def test_trigger_shadow_persists_stale_absent_pending_soak_as_missing(self):
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
-        from services.soil3.cloud_trigger import LOCAL_SAFETY_ONLY, TriggerShadowStore
+        from services.soil3.cloud_trigger import (
+            LOCAL_SAFETY_ONLY,
+            TriggerDecision,
+            TriggerShadowStore,
+        )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -767,6 +873,12 @@ class PipelineTests(StateProducerTests):
             with mock.patch(
                 "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
                 return_value=snapshot,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                return_value=TriggerDecision(
+                    LOCAL_SAFETY_ONLY,
+                    ("stale:phase3_state_age_sec",),
+                ),
             ):
                 record = run_pipeline(config)
 
@@ -781,9 +893,9 @@ class PipelineTests(StateProducerTests):
                 shadow["semantic_projection"]["safety_flags"]["pending_soak"],
             )
 
-    def test_trigger_observer_failure_does_not_skip_qwen(self):
-        from services.soil3.agent_runtime import runtime_v1
+    def test_trigger_admission_failure_is_persisted_and_never_calls_cloud(self):
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.trace.trace_v1 import TraceStore
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -793,16 +905,93 @@ class PipelineTests(StateProducerTests):
                 return_value=self.health_snapshot(),
             ), mock.patch(
                 "services.soil3.agent_runtime.runtime_v1.build_decision_context",
-                side_effect=RuntimeError("observer failed"),
+                side_effect=RuntimeError("secret-bearing observer detail"),
             ), mock.patch(
-                "services.soil3.agent_runtime.runtime_v1.run_chain",
-                wraps=runtime_v1.run_chain,
-            ) as cloud_call:
-                record = run_pipeline(config)
+                "services.soil3.agent_runtime.runtime_v1.run_chain"
+            ) as cloud_call, mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._collect_vision"
+            ) as vision, mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._collect_experience"
+            ) as experience:
+                with self.assertRaisesRegex(RuntimeError, "trigger admission failed"):
+                    run_pipeline(config)
 
-            cloud_call.assert_called_once()
-            self.assertIsNone(record["trigger_shadow_path"])
+            cloud_call.assert_not_called()
+            vision.assert_not_called()
+            experience.assert_not_called()
             self.assertFalse(config.trigger_shadow_dir.exists())
+            record_path, = config.runs_dir.glob("*.json")
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual("failed_closed", record["trigger_status"])
+            self.assertIsNone(record["trigger_decision"])
+            self.assertEqual(
+                ["trigger_admission_failed"],
+                record["trigger_reason_codes"],
+            )
+            self.assertEqual(
+                "blocked_trigger_failure",
+                record["cloud_invocation_status"],
+            )
+            self.assertNotIn("secret-bearing", json.dumps(record))
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            self.assertIsNotNone(trace["decision"]["state_ref"])
+            self.assertIsNone(trace["decision"]["strategy_ref"])
+
+    def test_trigger_store_failure_never_calls_cloud(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.TriggerShadowStore.create",
+                side_effect=OSError("disk full"),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain"
+            ) as cloud_call:
+                with self.assertRaisesRegex(RuntimeError, "trigger admission failed"):
+                    run_pipeline(config)
+
+            cloud_call.assert_not_called()
+            record_path, = config.runs_dir.glob("*.json")
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual("failed_closed", record["trigger_status"])
+            self.assertEqual(
+                "blocked_trigger_failure",
+                record["cloud_invocation_status"],
+            )
+            self.assertNotIn("disk full", json.dumps(record))
+
+    def test_invalid_trigger_decision_never_calls_cloud(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_trigger import TriggerDecision
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                return_value=TriggerDecision("UNKNOWN", ("invalid",)),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain"
+            ) as cloud_call:
+                with self.assertRaisesRegex(RuntimeError, "trigger admission failed"):
+                    run_pipeline(config)
+
+            cloud_call.assert_not_called()
+            record_path, = config.runs_dir.glob("*.json")
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertIsNone(record["trigger_decision"])
+            self.assertEqual(
+                ["trigger_admission_failed"],
+                record["trigger_reason_codes"],
+            )
 
     def test_accepted_qwen_strategy_is_stored_with_real_provider_provenance(self):
         """A validated proposal must name the provider that actually produced it."""

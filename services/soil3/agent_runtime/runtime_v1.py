@@ -16,6 +16,10 @@ from services.soil3.cloud_gate import GatePolicy, evaluate_gate_v2
 from services.soil3.cloud_strategy.service import append_audit, run_chain
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, StrategyValidator, fingerprint, normalize_timestamp
 from services.soil3.cloud_trigger import (
+    CALL_QWEN,
+    LOCAL_SAFETY_ONLY,
+    SKIP_CLOUD,
+    TriggerDecision,
     TriggerShadowStore,
     build_decision_context,
     evaluate_trigger,
@@ -81,6 +85,13 @@ QWEN_PROVIDER_FIELDS = {
     "json_response_format",
 }
 STATE_TREND_HISTORY_SECONDS = 6 * 60 * 60 + 30 * 60
+
+
+@dataclass(frozen=True)
+class TriggerAdmission:
+    store: TriggerShadowStore
+    path: str
+    decision: TriggerDecision
 
 
 def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
@@ -513,39 +524,40 @@ def _start_trigger_shadow(
     trace_id: str,
     state: dict[str, Any],
     state_ref: dict[str, Any],
-) -> tuple[TriggerShadowStore | None, str | None]:
-    """Start a best-effort observer; failure must not affect cloud invocation."""
+) -> TriggerAdmission:
+    """Persist the local Trigger decision before it can admit cloud work."""
 
+    store = TriggerShadowStore(config.trigger_shadow_dir)
+    baseline = store.latest_valid_call_baseline()
     try:
-        store = TriggerShadowStore(config.trigger_shadow_dir)
-        baseline = store.latest_valid_call_baseline()
-        try:
-            phase3_system_state = json.loads(config.phase3_state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            phase3_system_state = None
-        context = build_decision_context(
-            state,
-            deny_age_seconds=config.gate_policy.deny_age_seconds,
-            last_model_decision=(baseline.get("actual_qwen_result") if baseline else None),
-            receipt_dir=config.feedback_action_receipt_dir,
-            feedback_dir=config.feedback_dir,
-            phase3_system_state=phase3_system_state,
-        )
-        decision = evaluate_trigger(
-            context,
-            baseline.get("semantic_projection") if baseline else None,
-            deny_age_seconds=config.gate_policy.deny_age_seconds,
-        )
-        store.create(
-            trace_id,
-            state_ref,
-            decision,
-            context,
-            baseline.get("ref") if baseline else None,
-        )
-        return store, str(store.path_for(trace_id))
-    except Exception:
-        return None, None
+        phase3_system_state = json.loads(config.phase3_state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        phase3_system_state = None
+    context = build_decision_context(
+        state,
+        deny_age_seconds=config.gate_policy.deny_age_seconds,
+        last_model_decision=(baseline.get("actual_qwen_result") if baseline else None),
+        receipt_dir=config.feedback_action_receipt_dir,
+        feedback_dir=config.feedback_dir,
+        phase3_system_state=phase3_system_state,
+    )
+    decision = evaluate_trigger(
+        context,
+        baseline.get("semantic_projection") if baseline else None,
+        deny_age_seconds=config.gate_policy.deny_age_seconds,
+    )
+    store.create(
+        trace_id,
+        state_ref,
+        decision,
+        context,
+        baseline.get("ref") if baseline else None,
+    )
+    return TriggerAdmission(
+        store=store,
+        path=str(store.path_for(trace_id)),
+        decision=decision,
+    )
 
 
 def _water_proposal(strategy: Any) -> tuple[bool, float]:
@@ -758,6 +770,51 @@ def build_offline_fixture(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _write_no_cloud_runtime_record(
+    config: RuntimeConfig,
+    *,
+    trace_id: str,
+    trace_path: Path,
+    state: dict[str, Any],
+    trigger_status: str,
+    trigger_decision: str | None,
+    trigger_reason_codes: list[str],
+    cloud_invocation_status: str,
+    trigger_shadow_path: str | None,
+    not_started_status: str,
+) -> dict[str, Any]:
+    run_id = str(uuid.uuid4())
+    record = {
+        "schema_version": "agent_runtime.v1",
+        "run_id": run_id,
+        "provider_mode": config.provider_mode,
+        "provider": None,
+        "model": None,
+        "trace_id": trace_id,
+        "trace_path": str(trace_path),
+        "state_path": str(config.state_output),
+        "state_sha256": fingerprint(state),
+        "trigger_status": trigger_status,
+        "trigger_decision": trigger_decision,
+        "trigger_reason_codes": list(trigger_reason_codes),
+        "cloud_invocation_status": cloud_invocation_status,
+        "trigger_shadow_path": trigger_shadow_path,
+        "strategy_path": None,
+        "gate_path": None,
+        "gate_decision": None,
+        "runner_status": not_started_status,
+        "runner_path": None,
+        "bridge_status": not_started_status,
+        "bridge_path": None,
+        "episode_id": None,
+        "episode_path": None,
+        "audit_path": None,
+        "execution": {"physical_actions_performed": False, "phase3_called": False},
+    }
+    atomic_write_json(config.runs_dir / f"{run_id}.json", record)
+    return record
+
+
 def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     """Run one traceable end-to-end Shadow cycle without actuator access."""
 
@@ -767,12 +824,60 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     trace_path = trace_store.trace_path(trace_id)
     state = write_state_snapshot(config)
     state_ref = _artifact_ref("state.v1", config.state_output)
-    trigger_store, trigger_shadow_path = _start_trigger_shadow(
-        config,
-        trace_id,
-        state,
-        state_ref,
-    )
+    trace_store.set_decision(trace_id, state_ref=state_ref)
+    try:
+        admission = _start_trigger_shadow(
+            config,
+            trace_id,
+            state,
+            state_ref,
+        )
+    except Exception as error:
+        _write_no_cloud_runtime_record(
+            config,
+            trace_id=trace_id,
+            trace_path=trace_path,
+            state=state,
+            trigger_status="failed_closed",
+            trigger_decision=None,
+            trigger_reason_codes=["trigger_admission_failed"],
+            cloud_invocation_status="blocked_trigger_failure",
+            trigger_shadow_path=None,
+            not_started_status="not_started_trigger_failure",
+        )
+        raise RuntimeError("trigger admission failed") from error
+    trigger_store = admission.store
+    trigger_shadow_path = admission.path
+    trigger_decision = admission.decision.decision
+    trigger_reason_codes = list(admission.decision.reason_codes)
+    if trigger_decision == SKIP_CLOUD:
+        return _write_no_cloud_runtime_record(
+            config,
+            trace_id=trace_id,
+            trace_path=trace_path,
+            state=state,
+            trigger_status="recorded",
+            trigger_decision=trigger_decision,
+            trigger_reason_codes=trigger_reason_codes,
+            cloud_invocation_status="skipped_trigger",
+            trigger_shadow_path=trigger_shadow_path,
+            not_started_status="not_started_trigger_skip",
+        )
+    if trigger_decision == LOCAL_SAFETY_ONLY:
+        return _write_no_cloud_runtime_record(
+            config,
+            trace_id=trace_id,
+            trace_path=trace_path,
+            state=state,
+            trigger_status="recorded",
+            trigger_decision=trigger_decision,
+            trigger_reason_codes=trigger_reason_codes,
+            cloud_invocation_status="blocked_local_safety",
+            trigger_shadow_path=trigger_shadow_path,
+            not_started_status="not_started_local_safety",
+        )
+    if trigger_decision != CALL_QWEN:
+        raise RuntimeError("trigger admission failed")
     vision_association, vision_context = _collect_vision(config)
     experience_association, experience_context = _collect_experience(
         config,
@@ -781,7 +886,6 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     )
     trace_store.set_decision(
         trace_id,
-        state_ref=state_ref,
         vision=vision_association,
         experience=experience_association,
     )
@@ -841,6 +945,10 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
             "trace_path": str(trace_path),
             "state_path": str(config.state_output),
             "state_sha256": fingerprint(state),
+            "trigger_status": "recorded",
+            "trigger_decision": trigger_decision,
+            "trigger_reason_codes": trigger_reason_codes,
+            "cloud_invocation_status": "called",
             "trigger_shadow_path": trigger_shadow_path,
             "strategy_path": None,
             "gate_path": None,
@@ -993,6 +1101,10 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         "trace_path": str(trace_path),
         "state_path": str(config.state_output),
         "state_sha256": fingerprint(state),
+        "trigger_status": "recorded",
+        "trigger_decision": trigger_decision,
+        "trigger_reason_codes": trigger_reason_codes,
+        "cloud_invocation_status": "called",
         "trigger_shadow_path": trigger_shadow_path,
         "strategy_path": str(config.strategy_output),
         "gate_path": str(config.gate_output),
