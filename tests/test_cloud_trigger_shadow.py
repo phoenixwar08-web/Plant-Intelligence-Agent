@@ -72,6 +72,22 @@ class DecisionContextTests(unittest.TestCase):
         self.assertEqual("rising", semantic_projection(context)["trend_directions"]["humidity_6h"])
         self.assertEqual({"status": "unavailable", "record": None}, context["feedback_status"])
 
+    def test_trend_direction_uses_sensor_resolution_deadband(self):
+        context = build_decision_context(complete_state(), deny_age_seconds=18000)
+        for value, expected in (
+            (-0.2, "falling"),
+            (-0.1, "stable"),
+            (0.0, "stable"),
+            (0.1, "stable"),
+            (0.2, "rising"),
+        ):
+            with self.subTest(value=value):
+                context["trends"]["humidity_1h"] = value
+                self.assertEqual(
+                    expected,
+                    semantic_projection(context)["trend_directions"]["humidity_1h"],
+                )
+
     def test_keeps_latest_receipt_evidence_and_matching_feedback_factual(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -427,6 +443,25 @@ class TriggerEvaluatorTests(unittest.TestCase):
         result = evaluate_trigger(changed_context, baseline, deny_age_seconds=18000)
         self.assertEqual(SKIP_CLOUD, result.decision)
         self.assertIn("semantic_context_unchanged", result.reason_codes)
+
+    def test_sensor_resolution_trend_jitter_does_not_recall_qwen(self):
+        baseline_context = self.context()
+        baseline_context["trends"]["humidity_1h"] = 0.0
+        baseline = semantic_projection(baseline_context)
+
+        for value in (0.1, 0.0, -0.1):
+            with self.subTest(value=value):
+                current = self.context()
+                current["trends"]["humidity_1h"] = value
+                decision = evaluate_trigger(current, baseline, deny_age_seconds=18000)
+                self.assertEqual(SKIP_CLOUD, decision.decision)
+                self.assertEqual(("semantic_context_unchanged",), decision.reason_codes)
+
+        meaningful = self.context()
+        meaningful["trends"]["humidity_1h"] = 0.2
+        decision = evaluate_trigger(meaningful, baseline, deny_age_seconds=18000)
+        self.assertEqual(CALL_QWEN, decision.decision)
+        self.assertEqual(("semantic_context_changed",), decision.reason_codes)
 
 
 class TriggerShadowStoreTests(unittest.TestCase):
