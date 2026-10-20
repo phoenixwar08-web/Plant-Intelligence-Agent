@@ -993,6 +993,49 @@ class PipelineTests(StateProducerTests):
                 record["trigger_reason_codes"],
             )
 
+    def test_malformed_trigger_reason_codes_fail_closed_before_cloud(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_trigger import CALL_QWEN, TriggerDecision
+
+        optional_context = (
+            {"availability": "not_requested", "ref": None},
+            {"availability": "not_requested", "facts": None},
+        )
+        for malformed_reason_codes in ("not-a-reason-tuple", ()):
+            with self.subTest(reason_codes=malformed_reason_codes):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+                    with mock.patch(
+                        "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                        return_value=self.health_snapshot(),
+                    ), mock.patch(
+                        "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                        return_value=TriggerDecision(CALL_QWEN, malformed_reason_codes),
+                    ), mock.patch(
+                        "services.soil3.agent_runtime.runtime_v1._collect_vision",
+                        return_value=optional_context,
+                    ) as vision, mock.patch(
+                        "services.soil3.agent_runtime.runtime_v1._collect_experience",
+                        return_value=optional_context,
+                    ) as experience, mock.patch(
+                        "services.soil3.agent_runtime.runtime_v1.run_chain",
+                        side_effect=AssertionError("cloud_was_called"),
+                    ) as cloud_call:
+                        with self.assertRaisesRegex(RuntimeError, "trigger admission failed"):
+                            run_pipeline(config)
+
+                    cloud_call.assert_not_called()
+                    vision.assert_not_called()
+                    experience.assert_not_called()
+                    record_path, = config.runs_dir.glob("*.json")
+                    record = json.loads(record_path.read_text(encoding="utf-8"))
+                    self.assertEqual("failed_closed", record["trigger_status"])
+                    self.assertEqual(
+                        "blocked_trigger_failure",
+                        record["cloud_invocation_status"],
+                    )
+
     def test_accepted_qwen_strategy_is_stored_with_real_provider_provenance(self):
         """A validated proposal must name the provider that actually produced it."""
         from services.soil3.agent_runtime.runtime_v1 import (

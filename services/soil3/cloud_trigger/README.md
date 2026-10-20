@@ -1,9 +1,15 @@
-# Cloud Invocation Trigger Shadow V1
+# Cloud Invocation Trigger V1
 
-This package observes whether one soil3 State would justify waking the cloud
-model. It is Phase 0 only: every pipeline cycle still calls Qwen exactly as it
-did before. No Strategy, Gate, Runner, Bridge, Phase3, MQTT, or actuator code
-consumes a Trigger decision.
+This package decides whether one soil3 State justifies waking the cloud model.
+In Phase 1 the runtime persists the Trigger admission before any optional cloud
+context is collected. `CALL_QWEN` enters the existing Vision / Experience / Qwen
+chain; `SKIP_CLOUD` and `LOCAL_SAFETY_ONLY` stop before those calls while keeping
+the factual Trigger and runtime records. A malformed or failed Trigger
+admission fails closed and does not call Qwen, Vision, or Experience.
+
+The Trigger is not an irrigation decision or execution authority. It does not
+replace Strategy validation, Gate, Runner, Bridge, Phase3, MQTT, or the actuator
+boundary. Runner and Bridge remain shadow / dry-run when the cloud chain runs.
 
 The Decision Context uses existing facts only:
 
@@ -46,11 +52,11 @@ belong to Issue #63.
 One `trigger_shadow.v1` record is stored per Trace under
 `agent_chain/trigger_shadow`. It records the suggested decision, reasons,
 Decision Context, baseline reference, and a small factual summary of what the
-unconditional Qwen/Validator/Gate path actually produced. Token, cost, and
-latency fields are present only when a real source supplies them. Every record
-declares `phase3_called=false` and `physical_actions_performed=false`.
+Qwen/Validator/Gate path actually produced when cloud admission occurred.
+Token, cost, and latency fields are present only when a real source supplies
+them. Every record declares `phase3_called=false` and
+`physical_actions_performed=false`.
 
-Trigger collection is best-effort. If context construction or persistence
-fails, the existing Qwen pipeline still runs and the runtime records a null
-Trigger artifact path. This package does not deploy or enable a production
-cloud-call gate.
+Trigger admission is fail-closed. If context construction, evaluation, or
+persistence fails, the runtime records `blocked_trigger_failure` and the cloud
+pipeline does not start.
