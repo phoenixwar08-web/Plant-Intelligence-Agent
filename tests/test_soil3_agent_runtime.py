@@ -754,6 +754,33 @@ class PipelineTests(StateProducerTests):
                 self.assertEqual("deny", shadow["actual_qwen_result"]["gate_decision"])
                 self.assertFalse(shadow["execution"]["phase3_called"])
 
+    def test_trigger_shadow_persists_stale_absent_pending_soak_as_missing(self):
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_trigger import LOCAL_SAFETY_ONLY, TriggerShadowStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            snapshot = self.health_snapshot()
+            snapshot["state_file"]["age_seconds"] = 18001.0
+
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=snapshot,
+            ):
+                record = run_pipeline(config)
+
+            shadow = TriggerShadowStore(config.trigger_shadow_dir).read(record["trace_id"])
+            self.assertEqual(LOCAL_SAFETY_ONLY, shadow["trigger_decision"])
+            self.assertEqual(
+                "missing",
+                shadow["decision_context_snapshot"]["safety_flags"]["pending_soak"],
+            )
+            self.assertEqual(
+                "missing",
+                shadow["semantic_projection"]["safety_flags"]["pending_soak"],
+            )
+
     def test_trigger_observer_failure_does_not_skip_qwen(self):
         from services.soil3.agent_runtime import runtime_v1
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
@@ -1014,7 +1041,6 @@ class PipelineTests(StateProducerTests):
 
         safe_flags = {
             "pump_active": False,
-            "pending_soak": False,
             "water_delivery_suspect": {"active": False},
             "reservoir_empty_suspect": {"active": False},
             "low_wet_recovery_suspect": {"active": False},
@@ -1024,7 +1050,6 @@ class PipelineTests(StateProducerTests):
             "watering_trigger_guard": {"active": False},
             "recent_response_guard": {"active": False},
             "hard_safety_low_guard": {"active": False},
-            "cloud_protection": {"active": False},
         }
 
         with tempfile.TemporaryDirectory() as directory:

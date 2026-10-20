@@ -9,12 +9,11 @@ from services.soil3.cloud_gate.budget import BudgetLedger, BudgetLedgerError
 from services.soil3.cloud_gate import service
 from services.soil3.cloud_gate.gate_v1 import GatePolicy, evaluate_gate
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
-from services.soil3.state.state_v1 import StateBuilder
+from services.soil3.state.state_v1 import PHASE3_REQUIRED_SAFETY_FLAG_KEYS, StateBuilder
 
 
 SAFE_PHASE3_FLAGS = {
     "pump_active": False,
-    "pending_soak": False,
     "water_delivery_suspect": {"active": False},
     "reservoir_empty_suspect": {"active": False},
     "low_wet_recovery_suspect": {"active": False},
@@ -24,7 +23,6 @@ SAFE_PHASE3_FLAGS = {
     "watering_trigger_guard": {"active": False},
     "recent_response_guard": {"active": False},
     "hard_safety_low_guard": {"active": False},
-    "cloud_protection": {"active": False},
 }
 
 
@@ -124,6 +122,131 @@ class CloudGateAdmissionTests(unittest.TestCase):
         self.assertEqual("deny", record["decision"])
         self.assertEqual(["safety_flag_active:sensor_fault"], record["reason_codes"])
 
+    def test_pending_soak_absence_is_allowed_but_persisted_record_remains_active(self):
+        cases = (
+            ("missing", {}, "allow", []),
+            ("null", {"pending_soak": None}, "allow", []),
+            (
+                "persisted before nominal deadline",
+                {"pending_soak": {"pump_end_time_wall": 1791806401.0, "soak_duration": 0.0, "water_sec": 5.0, "pre_humidity": 34.0}},
+                "deny",
+                ["safety_flag_active:pending_soak"],
+            ),
+            (
+                "persisted at nominal deadline",
+                {"pending_soak": {"pump_end_time_wall": 1791806400.0, "soak_duration": 0.0, "water_sec": 5.0, "pre_humidity": 34.0}},
+                "deny",
+                ["safety_flag_active:pending_soak"],
+            ),
+            (
+                "persisted after nominal deadline",
+                {"pending_soak": {"pump_end_time_wall": 1791806399.0, "soak_duration": 0.0, "water_sec": 5.0, "pre_humidity": 34.0}},
+                "deny",
+                ["safety_flag_active:pending_soak"],
+            ),
+        )
+        for label, flags, expected_decision, expected_reasons in cases:
+            with self.subTest(case=label):
+                state = fresh_state(flags=flags)
+                record = evaluate_gate(state, valid_strategy(state), policy(), False)
+
+                self.assertEqual(expected_decision, record["decision"])
+                self.assertEqual(expected_reasons, record["reason_codes"])
+
+    def test_malformed_pending_soak_remains_fail_closed(self):
+        malformed_values = (
+            False,
+            0,
+            {},
+            {"pump_end_time_wall": 1791806400.0},
+            {"pump_end_time_wall": 1791806400.0, "soak_duration": 1200.0},
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "pre_humidity": 34.0,
+            },
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "water_sec": 5.0,
+            },
+            {"pump_end_time_wall": 1791806400.0, "soak_duration": -1.0},
+            {"pump_end_time_wall": "not-a-number", "soak_duration": 1.0},
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "water_sec": "not-a-number",
+                "pre_humidity": 34.0,
+            },
+            {
+                "pump_end_time_wall": 1791806400.0,
+                "soak_duration": 1200.0,
+                "water_sec": 5.0,
+                "pre_humidity": "not-a-number",
+            },
+        )
+        for value in malformed_values:
+            with self.subTest(value=value):
+                state = fresh_state(flags={"pending_soak": value})
+                record = evaluate_gate(state, valid_strategy(state), policy(), False)
+
+                self.assertEqual("deny", record["decision"])
+                self.assertEqual(
+                    ["safety_flag_invalid:pending_soak"], record["reason_codes"]
+                )
+
+    def test_cloud_protection_absence_is_optional_but_present_values_are_validated(self):
+        cases = (
+            ("missing", {}, "allow", []),
+            ("inactive boolean", {"cloud_protection": False}, "allow", []),
+            ("inactive object", {"cloud_protection": {"active": False}}, "allow", []),
+            (
+                "active boolean",
+                {"cloud_protection": True},
+                "deny",
+                ["safety_flag_active:cloud_protection"],
+            ),
+            (
+                "active object",
+                {"cloud_protection": {"active": True}},
+                "deny",
+                ["safety_flag_active:cloud_protection"],
+            ),
+            (
+                "malformed object",
+                {"cloud_protection": {"active": "unknown"}},
+                "deny",
+                ["safety_flag_invalid:cloud_protection"],
+            ),
+            (
+                "malformed null",
+                {"cloud_protection": None},
+                "deny",
+                ["safety_flag_invalid:cloud_protection"],
+            ),
+            (
+                "malformed numeric",
+                {"cloud_protection": 0},
+                "deny",
+                ["safety_flag_invalid:cloud_protection"],
+            ),
+        )
+        for label, flags, expected_decision, expected_reasons in cases:
+            with self.subTest(case=label):
+                state = fresh_state(flags=flags)
+                record = evaluate_gate(state, valid_strategy(state), policy(), False)
+
+                self.assertEqual(expected_decision, record["decision"])
+                self.assertEqual(expected_reasons, record["reason_codes"])
+
+    def test_optional_absence_does_not_override_stale_phase3_state(self):
+        state = fresh_state(phase3_state_age_sec=18001)
+
+        record = evaluate_gate(state, valid_strategy(state), policy(), False)
+
+        self.assertEqual("deny", record["decision"])
+        self.assertIn("phase3_state_age_denied", record["reason_codes"])
+
     def test_missing_or_malformed_phase3_safety_facts_fail_closed(self):
         cases = {
             "flags missing": lambda state: state["safety"].pop("flags"),
@@ -137,7 +260,7 @@ class CloudGateAdmissionTests(unittest.TestCase):
                 {"predictor_circuit": {"state": "UNKNOWN"}}
             ),
         }
-        for required_flag in SAFE_PHASE3_FLAGS:
+        for required_flag in PHASE3_REQUIRED_SAFETY_FLAG_KEYS:
             cases[f"{required_flag} missing"] = (
                 lambda state, key=required_flag: state["safety"]["flags"].pop(key)
             )
