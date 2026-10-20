@@ -1,12 +1,33 @@
 # Soil3 proposal-only runtime
 
-This runtime reads existing soil3 health facts and runs one complete Shadow
-decision chain:
+This runtime reads existing soil3 health facts and evaluates the local Trigger
+before it may run the complete Shadow decision chain:
 
 ```text
-State → explicit Vision/Experience availability → Strategy → Validator
-      → Gate v2 → dry-run Runner → verification-only Bridge → open Episode
+State → Trigger
+          ├─ SKIP_CLOUD → factual local records only
+          ├─ LOCAL_SAFETY_ONLY → factual local safety records only
+          └─ CALL_QWEN → explicit Vision/Experience availability → Strategy
+                       → Validator → Gate v2 → dry-run Runner
+                       → verification-only Bridge → open Episode
 ```
+
+The Trigger result controls cloud admission without deciding whether to water
+and without replacing Gate or Phase3:
+
+| Trigger result | Vision / Experience | Qwen and later Shadow stages | Runtime result |
+| --- | --- | --- | --- |
+| `CALL_QWEN` | Existing configured behavior | Runs once through the existing chain | `cloud_invocation_status=called` |
+| `SKIP_CLOUD` | Not requested | Not started | `cloud_invocation_status=skipped_trigger` |
+| `LOCAL_SAFETY_ONLY` | Not requested | Not started | `cloud_invocation_status=blocked_local_safety` |
+| Trigger admission failure | Not requested | Not started; service reports failure | `cloud_invocation_status=blocked_trigger_failure` |
+
+The State and `trigger_shadow.v1` decision are persisted before a cloud call is
+admitted. A non-call Trigger record keeps `actual_qwen_result=null`; its Trace
+contains the factual State reference while model metrics and all downstream
+references remain null, and Vision/Experience remain `not_requested`. Trigger
+context, evaluator, baseline, or persistence failures are fail-closed and
+cannot fall through to Qwen.
 
 Every produced artifact is associated through one Store-generated `trace.v1`
 identifier. Vision and Experience each have an explicit configuration switch.
@@ -37,11 +58,12 @@ record declares both physical actions and Phase3 calls false.
 Trace execution remains `phase3_called=false` and
 `physical_actions_performed=false` for every optional-module state.
 
-Every successful pipeline record states `episode_status: open` and
-`feedback_status: pending`. Feedback windows may be attached incrementally;
-the final intended window attaches the aggregated Outcome and closes the
-Episode through `EpisodeStore.close()`. The runtime never reopens or mutates a
-closed Episode.
+Every cloud-admitted pipeline record that reaches Episode states
+`episode_status: open` and `feedback_status: pending`. Feedback windows may be
+attached incrementally; the final intended window attaches the aggregated
+Outcome and closes the Episode through `EpisodeStore.close()`. A no-cloud
+cycle creates no Episode and invents no Feedback status. The runtime never
+reopens or mutates a closed Episode.
 
 `offline_fixture` is the release-default test and explicit rollback mode. It
 is never a silent replacement for Qwen. A Qwen request/validation failure

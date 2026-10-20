@@ -164,7 +164,11 @@ class TriggerShadowStore:
             raise TriggerShadowError("validation_failed", ["state_ref_invalid"])
         if not isinstance(decision, TriggerDecision) or decision.decision not in DECISIONS:
             raise TriggerShadowError("validation_failed", ["trigger_decision_invalid"])
-        if not all(isinstance(item, str) and item for item in decision.reason_codes):
+        if (
+            not isinstance(decision.reason_codes, tuple)
+            or not decision.reason_codes
+            or not all(isinstance(item, str) and item for item in decision.reason_codes)
+        ):
             raise TriggerShadowError("validation_failed", ["trigger_reason_codes_invalid"])
         if not isinstance(context, dict) or context.get("schema_version") != "decision_context.v1":
             raise TriggerShadowError("validation_failed", ["decision_context_invalid"])

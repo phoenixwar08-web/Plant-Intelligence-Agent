@@ -16,6 +16,13 @@ from services.soil3.agent_runtime.runtime_v1 import (
 )
 from services.soil3.cloud_gate.gate_v2 import evaluate_gate_v2
 from services.soil3.cloud_strategy.validator import PROMPT_VERSION, fingerprint
+from services.soil3.cloud_trigger import (
+    CALL_QWEN,
+    LOCAL_SAFETY_ONLY,
+    TriggerDecision,
+    TriggerShadowStore,
+    evaluate_trigger as real_evaluate_trigger,
+)
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
 from services.soil3.state.state_v1 import PHASE3_REQUIRED_SAFETY_FLAG_KEYS, StateBuilder
 from services.soil3.trace.trace_v1 import TraceError, TraceStore
@@ -186,6 +193,14 @@ class MutableClock:
 
 
 class Day5FaultSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self._trigger_call_patcher = mock.patch(
+            "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+            return_value=TriggerDecision(CALL_QWEN, ("fault_test_call",)),
+        )
+        self._trigger_call_patcher.start()
+        self.addCleanup(self._trigger_call_patcher.stop)
+
     def assert_stopped_before_bridge(self, record):
         self.assertIsNone(record["runner_path"])
         self.assertIsNone(record["bridge_path"])
@@ -195,44 +210,46 @@ class Day5FaultSafetyTests(unittest.TestCase):
         cases = {
             "stale_sensor": (
                 health_snapshot(soil_age_seconds=18001),
-                ["soil_data_age_denied"],
+                "stale:soil_age_sec",
             ),
             "missing_sensor": (
                 health_snapshot(include_sensor=False),
-                ["soil_humidity_unavailable", "soil_data_age_unavailable"],
+                "core_fact_unavailable:humidity",
             ),
             "incomplete_safety": (
                 health_snapshot(complete_safety=False),
-                [
-                    "safety_flag_unavailable:dynamic_cooldown",
-                    "safety_flag_unavailable:hard_safety_low_guard",
-                    "safety_flag_unavailable:low_wet_recovery_suspect",
-                    "safety_flag_unavailable:predictor_circuit",
-                    "safety_flag_unavailable:recent_response_guard",
-                    "safety_flag_unavailable:reservoir_empty_suspect",
-                    "safety_flag_unavailable:sensor_fault",
-                    "safety_flag_unavailable:water_delivery_suspect",
-                    "safety_flag_unavailable:watering_trigger_guard",
-                    "predictor_circuit_invalid",
-                ],
+                "safety_fact_missing:sensor_fault",
             ),
         }
-        for label, (snapshot, expected_reasons) in cases.items():
+        for label, (snapshot, expected_reason) in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
                 config = runtime_config(Path(directory))
                 with mock.patch(
                     "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
                     return_value=snapshot,
+                ), mock.patch(
+                    "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                    side_effect=real_evaluate_trigger,
                 ):
                     record = run_pipeline(config)
 
-                self.assertEqual("deny", record["gate_decision"])
-                self.assertEqual("skipped_due_to_gate_deny", record["runner_status"])
-                self.assertEqual("not_started_gate_deny", record["bridge_status"])
+                self.assertEqual(LOCAL_SAFETY_ONLY, record["trigger_decision"])
+                self.assertEqual(
+                    "blocked_local_safety",
+                    record["cloud_invocation_status"],
+                )
+                self.assertIn(expected_reason, record["trigger_reason_codes"])
+                self.assertIsNone(record["gate_decision"])
+                self.assertEqual("not_started_local_safety", record["runner_status"])
+                self.assertEqual("not_started_local_safety", record["bridge_status"])
                 self.assert_stopped_before_bridge(record)
                 state = json.loads(config.state_output.read_text(encoding="utf-8"))
-                gate = json.loads(config.gate_output.read_text(encoding="utf-8"))
-                self.assertEqual(expected_reasons, gate["reason_codes"])
+                self.assertFalse(config.gate_output.exists())
+                shadow = TriggerShadowStore(config.trigger_shadow_dir).read(
+                    record["trace_id"]
+                )
+                self.assertEqual(LOCAL_SAFETY_ONLY, shadow["trigger_decision"])
+                self.assertIn(expected_reason, shadow["trigger_reason_codes"])
                 if label == "stale_sensor":
                     self.assertEqual(31.5, state["soil"]["humidity_percent"])
                     self.assertGreater(state["data_quality"]["soil_age_sec"], 18000)
@@ -243,8 +260,8 @@ class Day5FaultSafetyTests(unittest.TestCase):
                 else:
                     self.assertEqual({"pump_active": False}, state["safety"]["flags"])
                 trace = TraceStore(config.trace_dir).read(record["trace_id"])
-                self.assertEqual("deny", trace["decision"]["gate_decision"])
-                self.assertEqual(expected_reasons, trace["decision"]["gate_reason_codes"])
+                self.assertIsNone(trace["decision"]["gate_decision"])
+                self.assertIsNone(trace["decision"]["gate_reason_codes"])
                 self.assertEqual(NO_EXECUTION, trace["execution"])
 
     def test_provider_failure_invalid_json_and_validator_rejection_stop_early(self):

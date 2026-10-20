@@ -5,7 +5,7 @@
 | Module | Responsibility |
 | --- | --- |
 | State | Normalize current sensor, environment, irrigation, and safety facts. |
-| Cloud Invocation Trigger Shadow | Compare factual Decision Context changes and record a non-authoritative cloud-call suggestion; Phase 0 never suppresses Qwen. |
+| Cloud Invocation Trigger | Compare factual Decision Context changes and admit or suppress cloud work; it never decides irrigation or replaces Gate/Phase3. |
 | Vision | Convert a captured plant image into structured visual facts. |
 | Cloud Strategy | Propose structured, non-executing care actions. |
 | Validator | Reject malformed, unknown, or invalid strategy content. |
@@ -56,15 +56,18 @@ verification-only Bridge, and an open Episode then continue on the same trace.
 This integration always records `phase3_called=false` and
 `physical_actions_performed=false`.
 
-Issue #62 adds a Phase-0 Trigger observer after State. State receives the
+Issue #62 added the Phase-0 Trigger observer after State. State receives the
 existing Phase3 dynamic parameter facts and bounded canonical openGauss history
-needed for 1h/3h/6h trends. The observer records one of `CALL_QWEN`,
-`SKIP_CLOUD`, or `LOCAL_SAFETY_ONLY` from deterministic semantic-change and
-safety rules, then the existing pipeline calls Qwen unconditionally. Its
-`trigger_shadow.v1` artifact is experimental evidence only: it is not part of
-`trace.v1`, is not an execution input, and cannot reach Gate, Runner, Bridge,
-Phase3, MQTT, or ActuatorLayer. Historical replay and interval/heartbeat
-calibration are deferred to Issue #63.
+needed for 1h/3h/6h trends. Issue #69 promotes the same deterministic result to
+cloud admission: the runtime durably records `CALL_QWEN`, `SKIP_CLOUD`, or
+`LOCAL_SAFETY_ONLY` before branching. Only `CALL_QWEN` collects optional
+Vision/Experience and enters Qwen, Validator, Gate, Runner, Bridge, and Episode.
+The other decisions retain factual State, Trace, Decision Context, reasons, and
+semantic projection without model or downstream artifacts. Trigger admission
+failure is fail-closed and cannot fall through to Qwen. `trigger_shadow.v1`
+remains analysis evidence outside `trace.v1`; it is not an irrigation decision
+or an execution input and cannot call Phase3, MQTT, or ActuatorLayer.
+Historical replay and interval/heartbeat calibration remain Issue #63.
 
 State, Vision, Strategy, Episode, Feedback, Trace, and Replay may read facts and create records within their authorized Issue boundaries. They do not bypass Phase3 or become an actuator path.
 
