@@ -46,6 +46,10 @@ The deterministic evaluator has fixed priority:
 The semantic projection compares dynamic boundary relations, trend direction,
 safety/protection state, and confirmed action/Feedback identities. It does not
 compare the complete State hash and introduces no plant threshold constant.
+Trend direction uses a fixed `+/-0.1` percentage-point deadband matching the
+canonical soil sensor resolution. Values inside that band remain `stable` so
+measurement quantization cannot repeatedly admit Qwen. This is only a cloud
+invocation noise filter; it does not change State, Gate, or Phase3 thresholds.
 Replay calibration, minimum intervals, and maximum-silence heartbeat policy
 belong to Issue #63.
 

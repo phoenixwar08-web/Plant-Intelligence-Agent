@@ -21,6 +21,7 @@ from services.soil3.state.state_v1 import (
 
 
 PREDICTOR_STATES = frozenset({"CLOSED", "HALF_OPEN", "OPEN"})
+TREND_DIRECTION_DEADBAND_PERCENT = 0.1
 REAL_ACTION_EVIDENCE = frozenset({
     "command_completed",
     "manual_confirmed",
@@ -325,9 +326,9 @@ def _direction(value: Any) -> str:
     number = _finite(value)
     if number is None:
         return "unknown"
-    if number < 0:
+    if number < -TREND_DIRECTION_DEADBAND_PERCENT:
         return "falling"
-    if number > 0:
+    if number > TREND_DIRECTION_DEADBAND_PERCENT:
         return "rising"
     return "stable"
 
