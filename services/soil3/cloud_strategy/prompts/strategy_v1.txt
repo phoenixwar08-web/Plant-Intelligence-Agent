@@ -23,6 +23,7 @@ Required top-level fields you must write. Every object below accepts only the ke
 - execution: exactly {"mode":"proposal_only","actuator_commands_allowed":false}
 
 Every timestamp in the input projection is already RFC 3339 UTC with a trailing Z, and every timestamp you write must be in that one form: a value with another offset, without a timezone, or as a number is rejected by the local Validator even when it names the right instant.
+Never use placeholder or example timestamps. You must copy input observed_at exactly into state_observed_at and copy input generated_at exactly into state_generated_at. Example dates describe formatting only and are never valid response values unless the input contains that exact value.
 
 Never write state_sha256. The local service computes a SHA-256 fingerprint of the exact state.v1 snapshot and attaches it after parsing your output, so any state_sha256 you produce is discarded and a wrong one cannot bind a proposal to a different snapshot.
 
