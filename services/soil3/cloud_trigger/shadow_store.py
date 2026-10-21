@@ -140,6 +140,31 @@ def _actual_valid(value: Any) -> bool:
     return all(_metric_valid(value[name]) for name in ("token_usage", "cost", "latency"))
 
 
+def _pre_deadband_semantic_projection(context: dict[str, Any]) -> dict[str, Any]:
+    """Reproduce the former zero-deadband projection for read compatibility."""
+
+    projection = semantic_projection(context)
+    trends = context.get("trends") if isinstance(context.get("trends"), dict) else {}
+    directions = projection["trend_directions"]
+    for key, direction in directions.items():
+        if direction != "stable":
+            continue
+        value = trends.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(number):
+            continue
+        if number < 0:
+            directions[key] = "falling"
+        elif number > 0:
+            directions[key] = "rising"
+    return projection
+
+
 class TriggerShadowStore:
     """Persist one set-once Trigger observation beside each runtime Trace."""
 
@@ -277,7 +302,11 @@ class TriggerShadowStore:
         context = record.get("decision_context_snapshot")
         if not isinstance(context, dict) or context.get("schema_version") != "decision_context.v1":
             raise TriggerShadowError("record_invalid")
-        if record.get("semantic_projection") != semantic_projection(context):
+        stored_projection = record.get("semantic_projection")
+        if (
+            stored_projection != semantic_projection(context)
+            and stored_projection != _pre_deadband_semantic_projection(context)
+        ):
             raise TriggerShadowError("record_invalid")
         baseline = record.get("baseline_ref")
         if baseline is not None and not _reference_valid(baseline, schema_version=SCHEMA_VERSION):

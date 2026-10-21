@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -575,6 +576,73 @@ class TriggerShadowStoreTests(unittest.TestCase):
             baseline = store.latest_valid_call_baseline()
             self.assertEqual(first_id, baseline["ref"]["record_id"])
             self.assertEqual(semantic_projection(context), baseline["semantic_projection"])
+
+    def test_pre_deadband_positive_trend_record_remains_a_valid_call_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TriggerShadowStore(Path(directory))
+            context = build_decision_context(complete_state(), deny_age_seconds=18000)
+            context["trends"]["humidity_1h"] = 0.1
+            store.create(
+                TRACE_ID,
+                self.state_ref(),
+                evaluate_trigger(context, None, deny_age_seconds=18000),
+                context,
+                None,
+            )
+            store.finalize(TRACE_ID, self.actual_result())
+
+            path = store.path_for(TRACE_ID)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual("stable", record["semantic_projection"]["trend_directions"]["humidity_1h"])
+            record["semantic_projection"]["trend_directions"]["humidity_1h"] = "rising"
+            path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            self.assertEqual("rising", store.read(TRACE_ID)["semantic_projection"]["trend_directions"]["humidity_1h"])
+            baseline = store.latest_valid_call_baseline()
+            self.assertEqual(TRACE_ID, baseline["ref"]["record_id"])
+            self.assertEqual("rising", baseline["semantic_projection"]["trend_directions"]["humidity_1h"])
+
+    def test_pre_deadband_negative_trend_record_is_read_without_changing_new_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TriggerShadowStore(Path(directory))
+            context = build_decision_context(complete_state(), deny_age_seconds=18000)
+            context["trends"]["humidity_1h"] = -0.1
+            created = store.create(
+                TRACE_ID,
+                self.state_ref(),
+                evaluate_trigger(context, None, deny_age_seconds=18000),
+                context,
+                None,
+            )
+            self.assertEqual("stable", created["semantic_projection"]["trend_directions"]["humidity_1h"])
+
+            path = store.path_for(TRACE_ID)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record["semantic_projection"]["trend_directions"]["humidity_1h"] = "falling"
+            path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            self.assertEqual("falling", store.read(TRACE_ID)["semantic_projection"]["trend_directions"]["humidity_1h"])
+
+    def test_projection_compatibility_does_not_accept_unrelated_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TriggerShadowStore(Path(directory))
+            context = build_decision_context(complete_state(), deny_age_seconds=18000)
+            context["trends"]["humidity_1h"] = 0.1
+            store.create(
+                TRACE_ID,
+                self.state_ref(),
+                evaluate_trigger(context, None, deny_age_seconds=18000),
+                context,
+                None,
+            )
+
+            path = store.path_for(TRACE_ID)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record["semantic_projection"]["predictor_circuit"] = "OPEN"
+            path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(TriggerShadowError, "record_invalid"):
+                store.read(TRACE_ID)
 
 
 if __name__ == "__main__":
