@@ -176,8 +176,10 @@ def _json_values_equal(left: Any, right: Any) -> bool:
         return (
             isinstance(left, (int, float))
             and not isinstance(left, bool)
+            and (not isinstance(left, float) or math.isfinite(left))
             and isinstance(right, (int, float))
             and not isinstance(right, bool)
+            and (not isinstance(right, float) or math.isfinite(right))
             and left == right
         )
     if isinstance(left, str) or isinstance(right, str):

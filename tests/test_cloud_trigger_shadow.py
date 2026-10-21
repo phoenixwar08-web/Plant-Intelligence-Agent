@@ -674,6 +674,24 @@ class TriggerShadowStoreTests(unittest.TestCase):
                     with self.assertRaisesRegex(TriggerShadowError, "record_invalid"):
                         store.read(TRACE_ID)
 
+    def test_projection_comparison_rejects_non_finite_json_numbers(self):
+        for value in (float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as directory:
+                    store = TriggerShadowStore(Path(directory))
+                    context = build_decision_context(complete_state(), deny_age_seconds=18000)
+                    context["safety_flags"]["pump_active"] = value
+                    store.create(
+                        TRACE_ID,
+                        self.state_ref(),
+                        evaluate_trigger(context, None, deny_age_seconds=18000),
+                        context,
+                        None,
+                    )
+
+                    with self.assertRaisesRegex(TriggerShadowError, "record_invalid"):
+                        store.read(TRACE_ID)
+
 
 if __name__ == "__main__":
     unittest.main()
