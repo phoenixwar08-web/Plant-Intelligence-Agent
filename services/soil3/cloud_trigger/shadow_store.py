@@ -140,6 +140,67 @@ def _actual_valid(value: Any) -> bool:
     return all(_metric_valid(value[name]) for name in ("token_usage", "cost", "latency"))
 
 
+def _pre_deadband_semantic_projection(context: dict[str, Any]) -> dict[str, Any]:
+    """Reproduce the former zero-deadband projection for read compatibility."""
+
+    projection = semantic_projection(context)
+    trends = context.get("trends") if isinstance(context.get("trends"), dict) else {}
+    directions = projection["trend_directions"]
+    for key, direction in directions.items():
+        if direction != "stable":
+            continue
+        value = trends.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(number):
+            continue
+        if number < 0:
+            directions[key] = "falling"
+        elif number > 0:
+            directions[key] = "rising"
+    return projection
+
+
+def _json_values_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values recursively without Python bool/number coercion."""
+
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        return (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and (not isinstance(left, float) or math.isfinite(left))
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+            and (not isinstance(right, float) or math.isfinite(right))
+            and left == right
+        )
+    if isinstance(left, str) or isinstance(right, str):
+        return isinstance(left, str) and isinstance(right, str) and left == right
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+            and all(_json_values_equal(a, b) for a, b in zip(left, right))
+        )
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (
+            isinstance(left, dict)
+            and isinstance(right, dict)
+            and set(left) == set(right)
+            and all(_json_values_equal(left[key], right[key]) for key in left)
+        )
+    return False
+
+
 class TriggerShadowStore:
     """Persist one set-once Trigger observation beside each runtime Trace."""
 
@@ -277,7 +338,14 @@ class TriggerShadowStore:
         context = record.get("decision_context_snapshot")
         if not isinstance(context, dict) or context.get("schema_version") != "decision_context.v1":
             raise TriggerShadowError("record_invalid")
-        if record.get("semantic_projection") != semantic_projection(context):
+        stored_projection = record.get("semantic_projection")
+        if (
+            not _json_values_equal(stored_projection, semantic_projection(context))
+            and not _json_values_equal(
+                stored_projection,
+                _pre_deadband_semantic_projection(context),
+            )
+        ):
             raise TriggerShadowError("record_invalid")
         baseline = record.get("baseline_ref")
         if baseline is not None and not _reference_valid(baseline, schema_version=SCHEMA_VERSION):
