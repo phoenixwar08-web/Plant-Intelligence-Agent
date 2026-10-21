@@ -644,6 +644,36 @@ class TriggerShadowStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(TriggerShadowError, "record_invalid"):
                 store.read(TRACE_ID)
 
+    def test_projection_comparison_rejects_boolean_number_type_substitution(self):
+        for original, tampered in ((False, 0), (True, 1)):
+            with self.subTest(original=original, tampered=tampered):
+                with tempfile.TemporaryDirectory() as directory:
+                    store = TriggerShadowStore(Path(directory))
+                    context = build_decision_context(complete_state(), deny_age_seconds=18000)
+                    context["safety_flags"]["pump_active"] = original
+                    store.create(
+                        TRACE_ID,
+                        self.state_ref(),
+                        evaluate_trigger(context, None, deny_age_seconds=18000),
+                        context,
+                        None,
+                    )
+
+                    path = store.path_for(TRACE_ID)
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertIs(
+                        original,
+                        record["semantic_projection"]["safety_flags"]["pump_active"],
+                    )
+                    record["semantic_projection"]["safety_flags"]["pump_active"] = tampered
+                    path.write_text(
+                        json.dumps(record, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(TriggerShadowError, "record_invalid"):
+                        store.read(TRACE_ID)
+
 
 if __name__ == "__main__":
     unittest.main()

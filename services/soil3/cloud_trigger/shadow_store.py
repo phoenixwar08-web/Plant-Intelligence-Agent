@@ -165,6 +165,40 @@ def _pre_deadband_semantic_projection(context: dict[str, Any]) -> dict[str, Any]
     return projection
 
 
+def _json_values_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values recursively without Python bool/number coercion."""
+
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        return (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+            and left == right
+        )
+    if isinstance(left, str) or isinstance(right, str):
+        return isinstance(left, str) and isinstance(right, str) and left == right
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+            and all(_json_values_equal(a, b) for a, b in zip(left, right))
+        )
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (
+            isinstance(left, dict)
+            and isinstance(right, dict)
+            and set(left) == set(right)
+            and all(_json_values_equal(left[key], right[key]) for key in left)
+        )
+    return False
+
+
 class TriggerShadowStore:
     """Persist one set-once Trigger observation beside each runtime Trace."""
 
@@ -304,8 +338,11 @@ class TriggerShadowStore:
             raise TriggerShadowError("record_invalid")
         stored_projection = record.get("semantic_projection")
         if (
-            stored_projection != semantic_projection(context)
-            and stored_projection != _pre_deadband_semantic_projection(context)
+            not _json_values_equal(stored_projection, semantic_projection(context))
+            and not _json_values_equal(
+                stored_projection,
+                _pre_deadband_semantic_projection(context),
+            )
         ):
             raise TriggerShadowError("record_invalid")
         baseline = record.get("baseline_ref")
