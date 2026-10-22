@@ -47,7 +47,7 @@ sed -n '1p' /root/water/releases/plant-intelligence-release/REVISION
 | `plant-agent-soil3-state.service` | 生成一次 `state.v1` 快照 | `static` oneshot；由 State timer 管理。 |
 | `plant-agent-soil3-state.timer` | State 调度 | 已启用；每 5 分钟触发。 |
 | `plant-agent-soil3-pipeline.service` | Strategy → Gate → Runner dry-run → Episode | `static` oneshot；读取 Qwen 密钥；proposal-only。 |
-| `plant-agent-soil3-pipeline.timer` | Shadow Pipeline 调度 | 已启用；每 5 分钟触发。 |
+| `plant-agent-soil3-pipeline.timer` | Shadow Pipeline 调度 | 验收前可保持关闭；通过隔离 smoke 并完成 arming 检查后每 5 分钟触发。 |
 | `phase3_soil3.service` | 最终安全/执行权威 | 保护服务；不由本手册的 Agent 命令调用。 |
 | `mqtt_direct_gauss.service`、`mqtt_logger3.service` | 既有 MQTT 入库/日志 | 保护服务；不由本手册启动、停止或发布消息。 |
 
@@ -151,15 +151,34 @@ print('execution:', run.get('execution'))
 PY
 ```
 
-只有在 Owner 明确批准隔离 smoke 时，才临时停止 **Pipeline timer**、手动运行一次，
-检查结果后恢复 timer：
+只有在 Owner 明确批准隔离 smoke 时，才临时停止 **Pipeline timer**、手动运行一次。
+隔离 smoke 通过后，先只 enable、不启动 timer，再在同一个 systemd transaction
+中同时启动 timer 和一次 Trigger-gated oneshot。这样已经过期的
+`OnBootSec=2min` 与显式 service job 会由 systemd 合并，不会形成第二个相邻周期，
+同时为 `OnUnitActiveSec=5min` 建立新起点：
 
 ```bash
 systemctl stop plant-agent-soil3-pipeline.timer
 systemctl start plant-agent-soil3-pipeline.service
 systemctl show plant-agent-soil3-pipeline.service -p Result -p ExecMainStatus
-systemctl start plant-agent-soil3-pipeline.timer
+systemctl enable plant-agent-soil3-pipeline.timer
+systemctl start plant-agent-soil3-pipeline.timer plant-agent-soil3-pipeline.service
+systemctl show plant-agent-soil3-pipeline.timer \
+  -p ActiveState -p SubState \
+  -p NextElapseUSecMonotonic -p LastTriggerUSec
+systemctl list-timers plant-agent-soil3-pipeline.timer --all --no-pager
 ```
+
+恢复验收要求 `ActiveState=active`、`SubState=waiting`，且
+`NextElapseUSecMonotonic` 是约 5 分钟后的有限值。如果下一次触发为空、已经过去或
+显示为 `infinity`，立即判定失败并只回滚 Pipeline timer：
+
+```bash
+systemctl disable --now plant-agent-soil3-pipeline.timer
+```
+
+这个回滚不得停止或禁用 State timer、Feedback Collector timer、Phase3、MQTT 或
+遥测写入服务。
 
 Gate 产生 `deny` 是正常且有效的安全结果；此时 Runner 必须
 `skipped_due_to_gate_deny`。每次检查都应确认 run record 的

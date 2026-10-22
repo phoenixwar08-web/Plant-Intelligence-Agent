@@ -104,10 +104,12 @@ to openGauss.
 After inspecting the generated `state`, `strategy`, `gate`, `runner`, `bridge`,
 `traces`, `runs`, and `episodes` records below
 `/root/water/runtime/instances/soil3/agent_chain`,
-enable the independently reversible schedules:
+enable only the State schedule. Keep the Pipeline timer disabled until the
+isolated Qwen smoke below passes, then use the documented arming procedure:
 
 ```bash
-systemctl enable --now plant-agent-soil3-state.timer plant-agent-soil3-pipeline.timer
+systemctl enable --now plant-agent-soil3-state.timer
+systemctl disable --now plant-agent-soil3-pipeline.timer
 ```
 
 ## Qwen shadow-mode smoke after Owner merge
@@ -165,15 +167,37 @@ dry-run and its record must report both physical actions and Phase3 calls as
 false.
 
 Only after that smoke passes may the Owner re-enable the five-minute shadow
-timer:
+timer. Enable it without starting it, then start the timer and one
+Trigger-gated oneshot in the same systemd transaction. This lets systemd merge
+the elapsed `OnBootSec=2min` activation with the explicit service job instead
+of creating a second adjacent cycle, while `OnUnitActiveSec=5min` receives a
+fresh activation point:
 
 ~~~bash
-systemctl enable --now plant-agent-soil3-pipeline.timer
+systemctl enable plant-agent-soil3-pipeline.timer
+systemctl start plant-agent-soil3-pipeline.timer plant-agent-soil3-pipeline.service
+systemctl show plant-agent-soil3-pipeline.timer \
+  -p ActiveState -p SubState \
+  -p NextElapseUSecMonotonic -p LastTriggerUSec
+systemctl list-timers plant-agent-soil3-pipeline.timer --all --no-pager
 ~~~
 
+Acceptance requires `ActiveState=active`, `SubState=waiting`, and a finite
+`NextElapseUSecMonotonic` approximately five minutes after the oneshot. An
+empty, elapsed, or `infinity` next trigger is a failed activation. Immediately
+roll back only the Pipeline timer in that case:
+
+~~~bash
+systemctl disable --now plant-agent-soil3-pipeline.timer
+~~~
+
+Do not stop or disable the State or Feedback Collector timers as part of this
+Pipeline activation rollback.
+
 On a Qwen transport, schema, or validation failure, leave the pipeline timer
-disabled or explicitly restore `offline_fixture`; never allow an automatic
-fallback. Both paths remain non-physical.
+disabled with the same Pipeline-only rollback command, or explicitly restore
+`offline_fixture`; never allow an automatic fallback. Both paths remain
+non-physical.
 
 ## Disable and rollback
 
