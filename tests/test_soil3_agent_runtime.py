@@ -89,6 +89,7 @@ class StateProducerTests(unittest.TestCase):
             "exploration_requested": False,
             "vision": {"enabled": False},
             "experience": {"enabled": False, "limit_per_class": 3},
+            "trigger_min_cloud_interval_seconds": 900,
             "phase3_state_path": str(root / "phase3" / "system_state.json"),
             "phase3_parameters_path": str(root / "phase3" / "evolving_params.json"),
             "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),
@@ -263,6 +264,32 @@ class StateProducerTests(unittest.TestCase):
                     value = self.runtime_config_value(root)
                     value["experience"]["limit_per_class"] = invalid
                     with self.assertRaisesRegex(ValueError, "experience"):
+                        RuntimeConfig.from_dict(value)
+
+    def test_runtime_config_requires_positive_integer_cloud_admission_interval(self):
+        """A missing or malformed interval must never silently disable throttling."""
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid = self.runtime_config_value(root)
+            valid["trigger_min_cloud_interval_seconds"] = 900
+            try:
+                config = RuntimeConfig.from_dict(valid)
+            except ValueError as error:
+                self.fail(f"valid Trigger cloud interval was rejected: {error}")
+            self.assertEqual(900, config.trigger_min_cloud_interval_seconds)
+
+            missing = dict(valid)
+            del missing["trigger_min_cloud_interval_seconds"]
+            with self.assertRaisesRegex(ValueError, "fields"):
+                RuntimeConfig.from_dict(missing)
+
+            for invalid in (True, 0, -1, 900.0, "900"):
+                with self.subTest(interval=invalid):
+                    value = dict(valid)
+                    value["trigger_min_cloud_interval_seconds"] = invalid
+                    with self.assertRaisesRegex(ValueError, "cloud interval"):
                         RuntimeConfig.from_dict(value)
 
     def test_state_cli_requires_explicit_config_and_reports_written_snapshot(self):
@@ -726,6 +753,19 @@ class PipelineTests(StateProducerTests):
             self.assertFalse(shadow["actual_qwen_result"]["validator_accepted"])
             self.assertIsNone(shadow["actual_qwen_result"]["strategy_ref"])
 
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                return_value=failed_chain,
+            ) as cloud_retry:
+                retry = run_pipeline(RuntimeConfig.from_dict(self.qwen_runtime_config_value(root)))
+
+            self.assertEqual("SKIP_CLOUD", retry["trigger_decision"])
+            self.assertEqual(["cloud_min_interval_active"], retry["trigger_reason_codes"])
+            cloud_retry.assert_not_called()
+
     def test_call_qwen_trigger_runs_existing_shadow_chain_once(self):
         from services.soil3.agent_runtime import runtime_v1
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
@@ -761,6 +801,134 @@ class PipelineTests(StateProducerTests):
             self.assertTrue(shadow["actual_qwen_result"]["validator_accepted"])
             self.assertEqual("deny", shadow["actual_qwen_result"]["gate_decision"])
             self.assertFalse(shadow["execution"]["phase3_called"])
+
+    def test_cloud_admission_interval_blocks_adjacent_call_before_optional_stages(self):
+        """A recent durable CALL must stop the next paid path before Vision/Qwen."""
+        from services.soil3.agent_runtime import runtime_v1
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_trigger import CALL_QWEN, SKIP_CLOUD
+
+        first_at = "2026-10-23T00:00:00Z"
+        inside_interval = "2026-10-23T00:14:59Z"
+        at_boundary = "2026-10-23T00:15:00Z"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._utc_now",
+                return_value=first_at,
+            ), mock.patch(
+                "services.soil3.cloud_trigger.shadow_store.utc_now",
+                return_value=first_at,
+            ):
+                first = run_pipeline(config)
+            self.assertEqual(CALL_QWEN, first["trigger_decision"])
+            episode_count = len(list(config.episode_dir.glob("*.json")))
+
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._utc_now",
+                return_value=inside_interval,
+            ), mock.patch(
+                "services.soil3.cloud_trigger.shadow_store.utc_now",
+                return_value=inside_interval,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._collect_vision",
+                wraps=runtime_v1._collect_vision,
+            ) as vision, mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._collect_experience",
+                wraps=runtime_v1._collect_experience,
+            ) as experience, mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                wraps=runtime_v1.run_chain,
+            ) as cloud_call, mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_gate_v2",
+                wraps=runtime_v1.evaluate_gate_v2,
+            ) as gate:
+                blocked = run_pipeline(RuntimeConfig.from_dict(self.runtime_config_value(root)))
+
+            self.assertEqual(SKIP_CLOUD, blocked["trigger_decision"])
+            self.assertEqual(["cloud_min_interval_active"], blocked["trigger_reason_codes"])
+            self.assertEqual("skipped_trigger", blocked["cloud_invocation_status"])
+            vision.assert_not_called()
+            experience.assert_not_called()
+            cloud_call.assert_not_called()
+            gate.assert_not_called()
+            self.assertEqual(episode_count, len(list(config.episode_dir.glob("*.json"))))
+
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._utc_now",
+                return_value=at_boundary,
+            ), mock.patch(
+                "services.soil3.cloud_trigger.shadow_store.utc_now",
+                return_value=at_boundary,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                wraps=runtime_v1.run_chain,
+            ) as boundary_call:
+                admitted = run_pipeline(RuntimeConfig.from_dict(self.runtime_config_value(root)))
+
+            self.assertEqual(CALL_QWEN, admitted["trigger_decision"])
+            boundary_call.assert_called_once()
+
+    def test_unfinalized_call_admission_survives_restart_and_blocks_retry(self):
+        """A crash after durable admission must not cause an immediate retry storm."""
+        from services.soil3.agent_runtime import runtime_v1
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_trigger import SKIP_CLOUD, TriggerShadowStore
+
+        first_at = "2026-10-23T00:00:00Z"
+        retry_at = "2026-10-23T00:05:00Z"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._utc_now",
+                return_value=first_at,
+            ), mock.patch(
+                "services.soil3.cloud_trigger.shadow_store.utc_now",
+                return_value=first_at,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                side_effect=RuntimeError("provider interrupted after admission"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "provider interrupted"):
+                    run_pipeline(config)
+
+            persisted = TriggerShadowStore(config.trigger_shadow_dir)
+            call_record, = config.trigger_shadow_dir.glob("tr-*.json")
+            self.assertIsNone(persisted.read(call_record.stem)["actual_qwen_result"])
+
+            restarted = RuntimeConfig.from_dict(self.runtime_config_value(root))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._utc_now",
+                return_value=retry_at,
+            ), mock.patch(
+                "services.soil3.cloud_trigger.shadow_store.utc_now",
+                return_value=retry_at,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                wraps=runtime_v1.run_chain,
+            ) as cloud_call:
+                retry = run_pipeline(restarted)
+
+            self.assertEqual(SKIP_CLOUD, retry["trigger_decision"])
+            self.assertEqual(["cloud_min_interval_active"], retry["trigger_reason_codes"])
+            cloud_call.assert_not_called()
 
     def test_non_call_trigger_decisions_stop_before_cloud_and_downstream(self):
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline

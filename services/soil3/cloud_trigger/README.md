@@ -40,8 +40,11 @@ The deterministic evaluator has fixed priority:
 2. Normal `pending_soak`, cooldown, response guard, watering guard, or an
    active pump produce `SKIP_CLOUD`.
 3. No accepted Shadow CALL baseline, or a changed semantic projection,
-   produces `CALL_QWEN`.
+   produces a `CALL_QWEN` candidate.
 4. An unchanged projection produces `SKIP_CLOUD`.
+5. A CALL candidate is admitted only when the latest durable local CALL
+   admission is at least `trigger_min_cloud_interval_seconds` old. During the
+   interval it becomes `SKIP_CLOUD` with `cloud_min_interval_active`.
 
 The semantic projection compares dynamic boundary relations, trend direction,
 safety/protection state, and confirmed action/Feedback identities. It does not
@@ -50,8 +53,14 @@ Trend direction uses a fixed `+/-0.1` percentage-point deadband matching the
 canonical soil sensor resolution. Values inside that band remain `stable` so
 measurement quantization cannot repeatedly admit Qwen. This is only a cloud
 invocation noise filter; it does not change State, Gate, or Phase3 thresholds.
-Replay calibration, minimum intervals, and maximum-silence heartbeat policy
-belong to Issue #63.
+The initial ordinary cloud-admission interval is 900 seconds. It is separate
+from the semantic baseline: the baseline still advances only after Validator
+acceptance, while every durably persisted CALL admission starts the interval,
+including provider failure, Validator rejection, or interruption before
+finalization. This prevents restart/retry storms without treating a failed
+model result as a semantic baseline. Local safety decisions and normal Phase3
+protection skips keep their higher priority. Replay calibration and a future
+maximum-silence heartbeat policy remain separate work.
 
 One `trigger_shadow.v1` record is stored per Trace under
 `agent_chain/trigger_shadow`. It records the suggested decision, reasons,

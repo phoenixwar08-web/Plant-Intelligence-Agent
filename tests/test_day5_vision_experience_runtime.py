@@ -33,6 +33,7 @@ def runtime_config(root, *, vision, experience):
         "exploration_requested": False,
         "vision": {"enabled": vision},
         "experience": {"enabled": experience, "limit_per_class": 3},
+        "trigger_min_cloud_interval_seconds": 900,
         "phase3_state_path": str(root / "phase3" / "system_state.json"),
         "phase3_parameters_path": str(root / "phase3" / "evolving_params.json"),
         "sensor_log_path": str(root / "phase3" / "sensor_log.csv"),

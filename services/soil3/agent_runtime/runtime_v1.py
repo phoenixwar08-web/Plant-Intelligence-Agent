@@ -22,6 +22,7 @@ from services.soil3.cloud_trigger import (
     TriggerDecision,
     TriggerShadowStore,
     build_decision_context,
+    enforce_cloud_min_interval,
     evaluate_trigger,
 )
 from services.soil3.episode.episode_v1 import EpisodeStore
@@ -40,6 +41,7 @@ CONFIG_FIELDS = {
     "exploration_requested",
     "vision",
     "experience",
+    "trigger_min_cloud_interval_seconds",
     "phase3_state_path",
     "phase3_parameters_path",
     "sensor_log_path",
@@ -117,6 +119,7 @@ class RuntimeConfig:
     vision_enabled: bool
     experience_enabled: bool
     experience_limit_per_class: int
+    trigger_min_cloud_interval_seconds: int
     phase3_state_path: Path
     phase3_parameters_path: Path
     sensor_log_path: Path
@@ -185,6 +188,13 @@ class RuntimeConfig:
             or not 1 <= experience["limit_per_class"] <= 20
         ):
             raise ValueError("runtime config experience settings are invalid")
+        trigger_min_cloud_interval_seconds = value["trigger_min_cloud_interval_seconds"]
+        if (
+            isinstance(trigger_min_cloud_interval_seconds, bool)
+            or not isinstance(trigger_min_cloud_interval_seconds, int)
+            or trigger_min_cloud_interval_seconds <= 0
+        ):
+            raise ValueError("runtime config cloud interval must be a positive integer")
         if value["phase3_service_unit"] != "phase3_soil3.service":
             raise ValueError("runtime config phase3_service_unit must be phase3_soil3.service")
 
@@ -216,6 +226,7 @@ class RuntimeConfig:
             vision_enabled=vision["enabled"],
             experience_enabled=experience["enabled"],
             experience_limit_per_class=experience["limit_per_class"],
+            trigger_min_cloud_interval_seconds=trigger_min_cloud_interval_seconds,
             phase3_state_path=phase3_state_path,
             phase3_parameters_path=phase3_parameters_path,
             sensor_log_path=Path(value["sensor_log_path"]),
@@ -529,6 +540,7 @@ def _start_trigger_shadow(
 
     store = TriggerShadowStore(config.trigger_shadow_dir)
     baseline = store.latest_valid_call_baseline()
+    last_admission_at = store.latest_call_admission_at()
     try:
         phase3_system_state = json.loads(config.phase3_state_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -545,6 +557,12 @@ def _start_trigger_shadow(
         context,
         baseline.get("semantic_projection") if baseline else None,
         deny_age_seconds=config.gate_policy.deny_age_seconds,
+    )
+    decision = enforce_cloud_min_interval(
+        decision,
+        last_admission_at=last_admission_at,
+        evaluated_at=_utc_now(),
+        min_interval_seconds=config.trigger_min_cloud_interval_seconds,
     )
     store.create(
         trace_id,

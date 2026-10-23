@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from services.soil3.cloud_strategy.validator import normalize_timestamp
+from services.soil3.cloud_strategy.validator import normalize_timestamp, parse_timestamp
 from services.soil3.telemetry.common import atomic_write_json, load_json
 from services.soil3.trace.trace_v1 import utc_now
 
@@ -316,6 +316,25 @@ class TriggerShadowStore:
             "semantic_projection": copy.deepcopy(latest["semantic_projection"]),
             "actual_qwen_result": copy.deepcopy(latest["actual_qwen_result"]),
         }
+
+    def latest_call_admission_at(self) -> str | None:
+        """Return the newest durable local CALL admission, finalized or not."""
+
+        if not self.root.is_dir():
+            return None
+        candidates: list[tuple[Any, str, str]] = []
+        for path in sorted(self.root.glob("tr-*.json")):
+            record = self.read(path.stem)
+            if record["trigger_decision"] != CALL_QWEN:
+                continue
+            admitted_at = parse_timestamp(record["created_at"])
+            normalized = normalize_timestamp(record["created_at"])
+            if admitted_at is None or normalized is None:
+                raise TriggerShadowError("record_invalid")
+            candidates.append((admitted_at, record["trace_id"], normalized))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: (item[0], item[1]))[2]
 
     @staticmethod
     def _validate_stored(record: Any) -> None:

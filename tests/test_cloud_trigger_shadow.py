@@ -7,9 +7,11 @@ from services.soil3.cloud_trigger import (
     CALL_QWEN,
     LOCAL_SAFETY_ONLY,
     SKIP_CLOUD,
+    TriggerDecision,
     TriggerShadowError,
     TriggerShadowStore,
     build_decision_context,
+    enforce_cloud_min_interval,
     evaluate_trigger,
     semantic_projection,
 )
@@ -464,6 +466,36 @@ class TriggerEvaluatorTests(unittest.TestCase):
         self.assertEqual(CALL_QWEN, decision.decision)
         self.assertEqual(("semantic_context_changed",), decision.reason_codes)
 
+    def test_cloud_interval_throttles_only_call_candidates(self):
+        candidate = evaluate_trigger(self.context(), None, deny_age_seconds=18000)
+        blocked = enforce_cloud_min_interval(
+            candidate,
+            last_admission_at="2026-10-23T00:00:00Z",
+            evaluated_at="2026-10-23T00:14:59Z",
+            min_interval_seconds=900,
+        )
+        self.assertEqual(SKIP_CLOUD, blocked.decision)
+        self.assertEqual(("cloud_min_interval_active",), blocked.reason_codes)
+
+        boundary = enforce_cloud_min_interval(
+            candidate,
+            last_admission_at="2026-10-23T00:00:00Z",
+            evaluated_at="2026-10-23T00:15:00Z",
+            min_interval_seconds=900,
+        )
+        self.assertEqual(candidate, boundary)
+
+        local = TriggerDecision(LOCAL_SAFETY_ONLY, ("stale:soil_age_sec",))
+        self.assertEqual(
+            local,
+            enforce_cloud_min_interval(
+                local,
+                last_admission_at="2026-10-23T00:00:00Z",
+                evaluated_at="2026-10-23T00:00:01Z",
+                min_interval_seconds=900,
+            ),
+        )
+
 
 class TriggerShadowStoreTests(unittest.TestCase):
     def state_ref(self):
@@ -546,6 +578,8 @@ class TriggerShadowStoreTests(unittest.TestCase):
             store.path_for(TRACE_ID).write_text("{}", encoding="utf-8")
             with self.assertRaises(TriggerShadowError):
                 store.read(TRACE_ID)
+            with self.assertRaisesRegex(TriggerShadowError, "record_invalid"):
+                store.latest_call_admission_at()
 
     def test_baseline_advances_only_for_call_with_validator_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -576,6 +610,12 @@ class TriggerShadowStoreTests(unittest.TestCase):
             baseline = store.latest_valid_call_baseline()
             self.assertEqual(first_id, baseline["ref"]["record_id"])
             self.assertEqual(semantic_projection(context), baseline["semantic_projection"])
+
+            restarted = TriggerShadowStore(Path(directory))
+            self.assertEqual(
+                store.read(rejected_id)["created_at"],
+                restarted.latest_call_admission_at(),
+            )
 
     def test_pre_deadband_positive_trend_record_remains_a_valid_call_baseline(self):
         with tempfile.TemporaryDirectory() as directory:

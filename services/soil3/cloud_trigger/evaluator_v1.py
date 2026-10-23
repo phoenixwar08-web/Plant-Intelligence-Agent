@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from services.soil3.cloud_strategy.validator import parse_timestamp
+
 from .context_v1 import semantic_projection
 
 
@@ -34,6 +36,37 @@ PROTECTION_FLAGS = (
 class TriggerDecision:
     decision: str
     reason_codes: tuple[str, ...]
+
+
+def enforce_cloud_min_interval(
+    decision: TriggerDecision,
+    *,
+    last_admission_at: Any,
+    evaluated_at: Any,
+    min_interval_seconds: int,
+) -> TriggerDecision:
+    """Throttle only ordinary CALL admissions; preserve local safety priority."""
+
+    if not isinstance(decision, TriggerDecision) or decision.decision != CALL_QWEN:
+        return decision
+    if last_admission_at is None:
+        return decision
+    if (
+        isinstance(min_interval_seconds, bool)
+        or not isinstance(min_interval_seconds, int)
+        or min_interval_seconds <= 0
+    ):
+        raise ValueError("cloud admission interval is invalid")
+    previous = parse_timestamp(last_admission_at)
+    current = parse_timestamp(evaluated_at)
+    if previous is None or current is None:
+        raise ValueError("cloud admission timestamp is invalid")
+    elapsed_seconds = (current - previous).total_seconds()
+    if elapsed_seconds < 0:
+        raise ValueError("cloud admission timestamp is in the future")
+    if elapsed_seconds < min_interval_seconds:
+        return TriggerDecision(SKIP_CLOUD, ("cloud_min_interval_active",))
+    return decision
 
 
 def _finite_nonnegative(value: Any) -> float | None:

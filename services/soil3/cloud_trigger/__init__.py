@@ -6,6 +6,7 @@ from .evaluator_v1 import (
     LOCAL_SAFETY_ONLY,
     SKIP_CLOUD,
     TriggerDecision,
+    enforce_cloud_min_interval,
     evaluate_trigger,
 )
 from .shadow_store import TriggerShadowError, TriggerShadowStore
@@ -18,6 +19,7 @@ __all__ = [
     "TriggerShadowError",
     "TriggerShadowStore",
     "build_decision_context",
+    "enforce_cloud_min_interval",
     "evaluate_trigger",
     "semantic_projection",
 ]
