@@ -1,9 +1,10 @@
 import ast
 import json
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime as RealDatetime
 from pathlib import Path
 from unittest import mock
@@ -881,6 +882,138 @@ class PipelineTests(StateProducerTests):
             self.assertEqual(CALL_QWEN, admitted["trigger_decision"])
             boundary_call.assert_called_once()
 
+    def test_context_returned_to_baseline_skips_cloud_at_interval_boundary(self):
+        """Expiry of the interval must not override an unchanged semantic baseline."""
+        from services.soil3.agent_runtime import runtime_v1
+        from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
+        from services.soil3.cloud_trigger import CALL_QWEN, SKIP_CLOUD
+        from services.soil3.cloud_trigger.evaluator_v1 import (
+            evaluate_trigger as real_evaluate_trigger,
+        )
+
+        safe_flags = {
+            "pump_active": False,
+            "water_delivery_suspect": {"active": False},
+            "reservoir_empty_suspect": {"active": False},
+            "low_wet_recovery_suspect": {"active": False},
+            "sensor_fault": {"active": False},
+            "dynamic_cooldown": {"active": False},
+            "predictor_circuit": {"state": "CLOSED"},
+            "watering_trigger_guard": {"active": False},
+            "recent_response_guard": {"active": False},
+            "hard_safety_low_guard": {"active": False},
+        }
+        baseline_state = StateBuilder("soil3").build(
+            {
+                "observed_at": "2026-10-23T00:00:00Z",
+                "generated_at": "2026-10-23T00:00:00Z",
+                "sensor_readings": [
+                    {
+                        "timestamp": "2026-10-22T23:59:00Z",
+                        "humidity": 31.5,
+                        "temperature": 23.0,
+                    }
+                ],
+                "source_timestamps": {
+                    "phase3_state": "2026-10-22T23:59:00Z",
+                },
+                "parameters": {
+                    "FC": 40.0,
+                    "TARGET_LOW": 32.0,
+                    "HARD_SAFETY_LOW": 25.0,
+                },
+                "system_state": safe_flags,
+            }
+        )
+        baseline_state["data_quality"]["soil_age_sec"] = 60
+        baseline_state["data_quality"]["phase3_state_age_sec"] = 60
+        baseline_state["trends"] = {
+            "humidity_1h": 0.0,
+            "humidity_3h": 0.0,
+            "humidity_6h": 0.0,
+        }
+        changed_state = json.loads(json.dumps(baseline_state))
+        changed_state["trends"]["humidity_1h"] = -0.2
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = RuntimeConfig.from_dict(self.runtime_config_value(root))
+
+            def persist_state(state):
+                config.state_output.parent.mkdir(parents=True, exist_ok=True)
+                config.state_output.write_text(
+                    json.dumps(state, sort_keys=True),
+                    encoding="utf-8",
+                )
+
+            persist_state(baseline_state)
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.write_state_snapshot",
+                return_value=baseline_state,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                side_effect=real_evaluate_trigger,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._utc_now",
+                return_value="2026-10-23T00:00:00Z",
+            ), mock.patch(
+                "services.soil3.cloud_trigger.shadow_store.utc_now",
+                return_value="2026-10-23T00:00:00Z",
+            ):
+                first = run_pipeline(config)
+            self.assertEqual(CALL_QWEN, first["trigger_decision"])
+
+            persist_state(changed_state)
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.write_state_snapshot",
+                return_value=changed_state,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                side_effect=real_evaluate_trigger,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._utc_now",
+                return_value="2026-10-23T00:05:00Z",
+            ), mock.patch(
+                "services.soil3.cloud_trigger.shadow_store.utc_now",
+                return_value="2026-10-23T00:05:00Z",
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                wraps=runtime_v1.run_chain,
+            ) as interval_cloud:
+                changed = run_pipeline(config)
+            self.assertEqual(SKIP_CLOUD, changed["trigger_decision"])
+            self.assertEqual(
+                ["cloud_min_interval_active"],
+                changed["trigger_reason_codes"],
+            )
+            interval_cloud.assert_not_called()
+
+            persist_state(baseline_state)
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.write_state_snapshot",
+                return_value=baseline_state,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.evaluate_trigger",
+                side_effect=real_evaluate_trigger,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1._utc_now",
+                return_value="2026-10-23T00:15:00Z",
+            ), mock.patch(
+                "services.soil3.cloud_trigger.shadow_store.utc_now",
+                return_value="2026-10-23T00:15:00Z",
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                wraps=runtime_v1.run_chain,
+            ) as boundary_cloud:
+                returned = run_pipeline(config)
+
+            self.assertEqual(SKIP_CLOUD, returned["trigger_decision"])
+            self.assertEqual(
+                ["semantic_context_unchanged"],
+                returned["trigger_reason_codes"],
+            )
+            boundary_cloud.assert_not_called()
+
     def test_unfinalized_call_admission_survives_restart_and_blocks_retry(self):
         """A crash after durable admission must not cause an immediate retry storm."""
         from services.soil3.agent_runtime import runtime_v1
@@ -932,56 +1065,187 @@ class PipelineTests(StateProducerTests):
             self.assertEqual(["cloud_min_interval_active"], retry["trigger_reason_codes"])
             cloud_call.assert_not_called()
 
-    def test_concurrent_cycles_reserve_only_one_cloud_admission(self):
-        """Overlapping cycles must not both pass the minimum-interval check."""
-        from services.soil3.agent_runtime.runtime_v1 import (
-            RuntimeConfig,
-            run_pipeline,
-            write_state_snapshot,
-        )
-        from services.soil3.cloud_trigger import SKIP_CLOUD, TriggerShadowStore
+    def test_independent_processes_reserve_only_one_cloud_admission(self):
+        """The production admission path must require its cross-process lock."""
+        from services.soil3.cloud_trigger import CALL_QWEN, SKIP_CLOUD
 
-        original_latest = TriggerShadowStore.latest_call_admission_at
+        worker = r'''
+from contextlib import contextmanager
+import json
+import sys
+import time
+from pathlib import Path
 
-        def delayed_latest(store):
-            value = original_latest(store)
-            time.sleep(0.2)
-            return value
+import services.soil3.cloud_trigger.shadow_store as shadow_store_module
+from services.soil3.agent_runtime import runtime_v1
+from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig
+from services.soil3.cloud_trigger import CALL_QWEN, TriggerDecision, TriggerShadowStore
 
-        def run_cycle(config):
+config_path = Path(sys.argv[1])
+start_path = Path(sys.argv[2])
+launch_ready_path = Path(sys.argv[3])
+trace_id = sys.argv[4]
+mode = sys.argv[5]
+race_dir = Path(sys.argv[6])
+launch_ready_path.write_text("ready", encoding="utf-8")
+deadline = time.monotonic() + 10.0
+while not start_path.exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("start barrier timed out")
+    time.sleep(0.01)
+
+fixed_now = "2026-10-23T00:00:00Z"
+shadow_store_module.utc_now = lambda: fixed_now
+runtime_v1._utc_now = lambda: fixed_now
+runtime_v1.evaluate_trigger = lambda *args, **kwargs: TriggerDecision(
+    CALL_QWEN,
+    ("cross_process_candidate",),
+)
+
+if mode == "without_lock":
+    @contextmanager
+    def unlocked(self):
+        yield
+
+    original_latest = TriggerShadowStore.latest_call_admission_at
+
+    def synchronized_latest(self):
+        value = original_latest(self)
+        (race_dir / trace_id).write_text("read", encoding="utf-8")
+        race_deadline = time.monotonic() + 10.0
+        while len(list(race_dir.glob("tr-*"))) < 2:
+            if time.monotonic() >= race_deadline:
+                raise RuntimeError("race barrier timed out")
+            time.sleep(0.01)
+        return value
+
+    TriggerShadowStore.cloud_admission_lock = unlocked
+    TriggerShadowStore.latest_call_admission_at = synchronized_latest
+
+config = RuntimeConfig.from_dict(json.loads(config_path.read_text(encoding="utf-8")))
+admission = runtime_v1._start_trigger_shadow(
+    config,
+    trace_id,
+    {
+        "schema_version": "state.v1",
+        "device_code": "soil3",
+        "observed_at": fixed_now,
+    },
+    {
+        "schema_version": "state.v1",
+        "path": "state.json",
+        "sha256": "0" * 64,
+        "record_id": None,
+    },
+)
+print(json.dumps({
+    "decision": admission.decision.decision,
+    "reason_codes": list(admission.decision.reason_codes),
+}))
+'''
+
+        def run_pair(pair_root, mode):
+            pair_root.mkdir(parents=True)
+            config_path = pair_root / "runtime.json"
+            config_path.write_text(
+                json.dumps(self.runtime_config_value(pair_root), sort_keys=True),
+                encoding="utf-8",
+            )
+            start_path = pair_root / "start"
+            race_dir = pair_root / "race"
+            race_dir.mkdir()
+            launch_ready_paths = [
+                pair_root / "launch-ready-1",
+                pair_root / "launch-ready-2",
+            ]
+            trace_ids = [
+                "tr-000000000000000000000001",
+                "tr-000000000000000000000002",
+            ]
+            processes = []
+            reaped = set()
             try:
-                return run_pipeline(config)["trigger_decision"]
-            except RuntimeError as error:
-                if str(error) == "provider interrupted after admission":
-                    return "cloud_interrupted"
-                raise
+                for launch_ready_path, trace_id in zip(
+                    launch_ready_paths,
+                    trace_ids,
+                ):
+                    processes.append(
+                        subprocess.Popen(
+                            [
+                                sys.executable,
+                                "-c",
+                                worker,
+                                str(config_path),
+                                str(start_path),
+                                str(launch_ready_path),
+                                trace_id,
+                                mode,
+                                str(race_dir),
+                            ],
+                            cwd=str(ROOT),
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                        )
+                    )
+
+                deadline = time.monotonic() + 10.0
+                while not all(path.exists() for path in launch_ready_paths):
+                    failed = [
+                        process
+                        for process in processes
+                        if process.poll() is not None
+                    ]
+                    if failed:
+                        stdout, stderr = failed[0].communicate()
+                        reaped.add(failed[0])
+                        self.fail(
+                            f"worker exited before barrier: {stdout}\n{stderr}"
+                        )
+                    if time.monotonic() >= deadline:
+                        self.fail("workers did not reach start barrier")
+                    time.sleep(0.01)
+                start_path.write_text("start", encoding="utf-8")
+
+                results = []
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=15)
+                    reaped.add(process)
+                    self.assertEqual(0, process.returncode, stderr)
+                    results.append(json.loads(stdout))
+                return results
+            finally:
+                for process in processes:
+                    if process in reaped:
+                        continue
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            configs = [
-                RuntimeConfig.from_dict(self.runtime_config_value(root))
-                for _ in range(2)
-            ]
-            with mock.patch(
-                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
-                return_value=self.health_snapshot(),
-            ):
-                shared_state = write_state_snapshot(configs[0])
-            with mock.patch(
-                "services.soil3.agent_runtime.runtime_v1.write_state_snapshot",
-                return_value=shared_state,
-            ), mock.patch.object(
-                TriggerShadowStore,
-                "latest_call_admission_at",
-                new=delayed_latest,
-            ), mock.patch(
-                "services.soil3.agent_runtime.runtime_v1.run_chain",
-                side_effect=RuntimeError("provider interrupted after admission"),
-            ) as cloud_call, ThreadPoolExecutor(max_workers=2) as executor:
-                results = list(executor.map(run_cycle, configs))
+            unlocked_results = run_pair(root / "without-lock", "without_lock")
+            self.assertEqual(
+                [CALL_QWEN, CALL_QWEN],
+                [result["decision"] for result in unlocked_results],
+            )
 
-            self.assertCountEqual(["cloud_interrupted", SKIP_CLOUD], results)
-            cloud_call.assert_called_once()
+            results = run_pair(root / "with-lock", "with_lock")
+            self.assertCountEqual(
+                [CALL_QWEN, SKIP_CLOUD],
+                [result["decision"] for result in results],
+            )
+            skipped, = [
+                result for result in results if result["decision"] == SKIP_CLOUD
+            ]
+            self.assertEqual(
+                ["cloud_min_interval_active"],
+                skipped["reason_codes"],
+            )
 
     def test_non_call_trigger_decisions_stop_before_cloud_and_downstream(self):
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
