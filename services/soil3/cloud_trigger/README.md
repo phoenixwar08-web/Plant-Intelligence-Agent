@@ -57,8 +57,10 @@ The initial ordinary cloud-admission interval is 900 seconds. It is separate
 from the semantic baseline: the baseline still advances only after Validator
 acceptance, while every durably persisted CALL admission starts the interval,
 including provider failure, Validator rejection, or interruption before
-finalization. This prevents restart/retry storms without treating a failed
-model result as a semantic baseline. Local safety decisions and normal Phase3
+finalization. Admission check-and-persist is serialized across local threads
+and processes; the lock is released before optional context collection or Qwen
+invocation. This prevents restart/retry storms without treating a failed model
+result as a semantic baseline. Local safety decisions and normal Phase3
 protection skips keep their higher priority. Replay calibration and a future
 maximum-silence heartbeat policy remain separate work.
 

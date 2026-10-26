@@ -1,7 +1,9 @@
 import ast
 import json
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime as RealDatetime
 from pathlib import Path
 from unittest import mock
@@ -929,6 +931,57 @@ class PipelineTests(StateProducerTests):
             self.assertEqual(SKIP_CLOUD, retry["trigger_decision"])
             self.assertEqual(["cloud_min_interval_active"], retry["trigger_reason_codes"])
             cloud_call.assert_not_called()
+
+    def test_concurrent_cycles_reserve_only_one_cloud_admission(self):
+        """Overlapping cycles must not both pass the minimum-interval check."""
+        from services.soil3.agent_runtime.runtime_v1 import (
+            RuntimeConfig,
+            run_pipeline,
+            write_state_snapshot,
+        )
+        from services.soil3.cloud_trigger import SKIP_CLOUD, TriggerShadowStore
+
+        original_latest = TriggerShadowStore.latest_call_admission_at
+
+        def delayed_latest(store):
+            value = original_latest(store)
+            time.sleep(0.2)
+            return value
+
+        def run_cycle(config):
+            try:
+                return run_pipeline(config)["trigger_decision"]
+            except RuntimeError as error:
+                if str(error) == "provider interrupted after admission":
+                    return "cloud_interrupted"
+                raise
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            configs = [
+                RuntimeConfig.from_dict(self.runtime_config_value(root))
+                for _ in range(2)
+            ]
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ):
+                shared_state = write_state_snapshot(configs[0])
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.write_state_snapshot",
+                return_value=shared_state,
+            ), mock.patch.object(
+                TriggerShadowStore,
+                "latest_call_admission_at",
+                new=delayed_latest,
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                side_effect=RuntimeError("provider interrupted after admission"),
+            ) as cloud_call, ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(run_cycle, configs))
+
+            self.assertCountEqual(["cloud_interrupted", SKIP_CLOUD], results)
+            cloud_call.assert_called_once()
 
     def test_non_call_trigger_decisions_stop_before_cloud_and_downstream(self):
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
