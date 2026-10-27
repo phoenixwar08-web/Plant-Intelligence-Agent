@@ -71,11 +71,12 @@ import sys
 import time
 import logging
 import math
+import uuid
 from pathlib import Path
 from typing import Any
 
 from config_manager import ConfigManager, ensure_data_files_exist, SYSTEM_CONSTANTS
-from decision_brain import DecisionBrain, ZoneStatus
+from decision_brain import DecisionBrain, Phase2Predictor, ZoneStatus
 
 # ===========================================================================
 # 日志配置（同时输出到控制台和日志文件）
@@ -191,13 +192,14 @@ class PredictorCircuitBreaker:
     _STATE_OPEN      = "OPEN"
     _STATE_HALF_OPEN = "HALF_OPEN"
 
-    def __init__(self, cfg: "ConfigManager") -> None:
+    def __init__(self, cfg: "ConfigManager", predictor: "Phase2Predictor") -> None:
         import json, os, shutil
         self._cfg       = cfg
         self._fail_count = 0
         self._state     = self._STATE_CLOSED
         self._open_since: float = 0.0
-        self._probe_before_cycle: dict = {}
+        self._predictor = predictor
+        self._probe_id = None
         self._json_ops  = (json, os, shutil)      # 存储供 _persist 使用
         self._restore()
 
@@ -292,8 +294,9 @@ class PredictorCircuitBreaker:
         · HALF_OPEN → 每轮都确保 PREDICTOR_CIRCUIT_OPEN=False，等待下一次真实预测穿透
         · CLOSED → 确保 PREDICTOR_CIRCUIT_OPEN=False，避免重启后残留熔断标志
         """
-        # Capture existing evidence so skipped/failed cycles cannot reuse an old success.
-        self._probe_before_cycle = self._last_predictor_probe()
+        # Ownership is allocated locally, never inferred from historical disk contents.
+        self._probe_id = uuid.uuid4().hex
+        self._predictor.prepare_probe(self._probe_id)
         now = time.monotonic()
         if self._state == self._STATE_OPEN:
             if now - self._open_since >= _CB_RESET_SEC:
@@ -329,7 +332,9 @@ class PredictorCircuitBreaker:
         """
         threshold = self._timeout_threshold()
         probe = self._last_predictor_probe()
-        if probe == self._probe_before_cycle:
+        expected_probe_id = self._probe_id
+        self._probe_id = None
+        if not expected_probe_id or probe.get("probe_id") != expected_probe_id:
             probe = {}
         predictor_called = bool(probe.get("called"))
         predictor_success = bool(probe.get("success"))
@@ -579,7 +584,7 @@ def main() -> None:
     )
 
     # ── Step 4b：初始化预测模型熔断器 ─────────────────────────────────
-    circuit_breaker = PredictorCircuitBreaker(cfg)
+    circuit_breaker = PredictorCircuitBreaker(cfg, _brain.predictor)
     logger.info(
         f"[Main] 熔断器就绪 "
         f"（触发阈值: 连续 {_CB_FAIL_THRESHOLD} 次超时 "

@@ -61,11 +61,15 @@ class PredictorBreakerTests(unittest.TestCase):
             get=lambda name, default=None: self.values.get(name, default),
             update=lambda values, persist=False: self.values.update(values),
         )
-        self.breaker = self.main.PredictorCircuitBreaker(self.cfg)
+        self.predictor = self.brain.Phase2Predictor(self.cfg)
+        self.breaker = self.main.PredictorCircuitBreaker(self.cfg, self.predictor)
 
     def write_probe(self, **changes):
         state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
-        probe = {"called": True, "success": True, "timestamp": 100.0, "elapsed_seconds": 2.0}
+        probe = {
+            "called": True, "success": True, "timestamp": 100.0, "elapsed_seconds": 2.0,
+            "probe_id": self.breaker._probe_id or "unowned-legacy-probe",
+        }
         probe.update(changes)
         state["predictor_last_probe"] = probe
         self.state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -106,6 +110,48 @@ class PredictorBreakerTests(unittest.TestCase):
         self.assertEqual("HALF_OPEN", self.breaker._state)
         self.assertEqual(26, self.breaker._fail_count)
 
+    def test_failed_cycle_start_read_cannot_adopt_delayed_old_success(self):
+        with mock.patch.object(self.breaker, "_last_predictor_probe", return_value={}):
+            self.start_half_open()
+        self.write_probe(probe_id="previous-cycle-success")
+        self.breaker.after_cycle(1.0, 1)
+        self.assertEqual("HALF_OPEN", self.breaker._state)
+        self.assertEqual(26, self.breaker._fail_count)
+
+    def test_delayed_previous_cycle_success_cannot_close_next_cycle(self):
+        self.start_half_open()
+        self.run_prediction("success")
+        previous_probe = json.loads(self.state_path.read_text())["predictor_last_probe"]
+        self.write_probe(called=False, success=False, elapsed_seconds=None)
+        self.breaker.before_cycle()
+        state = json.loads(self.state_path.read_text())
+        state["predictor_last_probe"] = previous_probe
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.breaker.after_cycle(1.0, 2)
+        self.assertEqual("HALF_OPEN", self.breaker._state)
+        self.assertEqual(26, self.breaker._fail_count)
+
+    def test_legacy_success_without_probe_id_cannot_close_half_open(self):
+        self.start_half_open()
+        self.write_probe()
+        state = json.loads(self.state_path.read_text())
+        del state["predictor_last_probe"]["probe_id"]
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.breaker.after_cycle(1.0, 1)
+        self.assertEqual("HALF_OPEN", self.breaker._state)
+        self.assertEqual(26, self.breaker._fail_count)
+
+    def test_probe_ids_rotate_between_real_predictions(self):
+        self.start_half_open()
+        first = self.run_prediction("success")
+        self.breaker.after_cycle(56.0, 1)
+        self.breaker.before_cycle()
+        second = self.run_prediction("success")
+        self.assertNotEqual(first["probe_id"], second["probe_id"])
+        self.assertEqual(self.breaker._probe_id, second["probe_id"])
+        self.breaker.after_cycle(56.0, 2)
+        self.assertEqual("CLOSED", self.breaker._state)
+
     def test_no_probe_keeps_half_open_even_for_long_cycle(self):
         self.start_half_open()
         self.breaker.after_cycle(56.0, 1)
@@ -131,7 +177,7 @@ class PredictorBreakerTests(unittest.TestCase):
         self.start_half_open()
         self.write_probe()
         self.breaker._persist()
-        restored = self.main.PredictorCircuitBreaker(self.cfg)
+        restored = self.main.PredictorCircuitBreaker(self.cfg, self.predictor)
         restored.before_cycle()
         restored.after_cycle(1.0, 1)
         self.assertEqual("HALF_OPEN", restored._state)
@@ -156,9 +202,10 @@ class PredictorBreakerTests(unittest.TestCase):
 
     def run_prediction(self, outcome):
         clock = [0.0]
-        predictor = self.brain.Phase2Predictor(self.cfg)
+        predictor = self.predictor
 
         def submit(path, payload):
+            self.probe_at_submission = json.loads(self.state_path.read_text())["predictor_last_probe"]
             clock[0] += 2.0
             if outcome == "write_error":
                 raise OSError("shm unavailable")
@@ -195,7 +242,11 @@ class PredictorBreakerTests(unittest.TestCase):
 
     def test_real_predictor_persists_monotonic_duration_for_success(self):
         self.start_half_open()
+        expected_id = self.breaker._probe_id
         probe = self.run_prediction("success")
+        self.assertEqual(expected_id, self.probe_at_submission["probe_id"])
+        self.assertFalse(self.probe_at_submission["success"])
+        self.assertEqual(expected_id, probe["probe_id"])
         self.assertTrue(probe["success"])
         self.assertEqual(2.0, probe.get("elapsed_seconds"))
         self.breaker.after_cycle(56.0, 1)
