@@ -193,6 +193,14 @@ class ValidatorTests(unittest.TestCase):
         value["state_observed_at"] = "2026-01-01T00:00:00Z"
         self.assertIn("state_observed_at_mismatch", self.validator.validate(value, self.state).reason_codes)
 
+    def test_missing_strategy_id_is_rejected(self):
+        value = valid_strategy(self.state)
+        del value["strategy_id"]
+        result = self.validator.validate(value, self.state)
+        self.assertFalse(result.accepted)
+        self.assertIn("missing_field:strategy_id", result.reason_codes)
+        self.assertIn("invalid_strategy_id", result.reason_codes)
+
     def test_action_after_stop_is_rejected(self):
         value = valid_strategy(self.state)
         value["actions"] = [
@@ -1272,7 +1280,12 @@ class PromptVersionTests(unittest.TestCase):
     def test_prompt_file_states_the_one_timestamp_form(self):
         text = PROMPT_PATH.read_text(encoding="utf-8")
         self.assertIn("RFC 3339 UTC", text)
-        self.assertIn("2026-09-16T10:00:05Z", text)
+        self.assertNotRegex(text, r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+    def test_prompt_requires_strategy_id_before_response(self):
+        text = PROMPT_PATH.read_text(encoding="utf-8")
+        self.assertRegex(text, r"strategy_id:.*UUID.*required")
+        self.assertIn("Before returning", text)
 
     def test_prompt_forbids_example_timestamps_and_requires_exact_state_copies(self):
         text = PROMPT_PATH.read_text(encoding="utf-8")
