@@ -452,12 +452,17 @@ def _learning_advice_arm_name(plan: "ActionPlan") -> str:
     return label or "unknown"
 
 
-def _mark_predictor_probe(called: bool, success: bool = False) -> None:
+def _mark_predictor_probe(
+    called: bool, success: bool = False, elapsed_seconds: Optional[float] = None,
+    *, probe_id: str,
+) -> None:
     def update(state):
         state["predictor_last_probe"] = {
             "called": called,
             "success": success,
             "timestamp": time.time(),
+            "elapsed_seconds": elapsed_seconds,
+            "probe_id": probe_id,
         }
     _update_system_state(update)
 
@@ -2030,6 +2035,11 @@ class Phase2Predictor:
         self.resp_path = Path(cfg.get_constant("SHM_RESPONSE_FILE") or "/dev/shm/pred_response.json")
         self.timeout   = cfg.get_constant("SHM_TIMEOUT_SEC")         or 30
         self.horizon   = cfg.get_constant("PREDICT_HORIZON_STEPS")   or 12
+        self._next_probe_id: Optional[str] = None
+
+    def prepare_probe(self, probe_id: str) -> None:
+        """Bind the next request to the breaker's locally allocated cycle identity."""
+        self._next_probe_id = probe_id
 
     def request_prediction(
         self,
@@ -2042,9 +2052,11 @@ class Phase2Predictor:
         任务2：Payload 极简，只包含考卷和步长。
                模型后台自行读取 CSV 历史数据，主控无需传递历史序列。
         """
+        probe_id = self._next_probe_id or uuid.uuid4().hex
+        self._next_probe_id = None
         if self.cfg.get("PREDICTOR_CIRCUIT_OPEN", False):
             logger.warning("[Layer4] 预测熔断已打开，跳过 Phase2 等待，直接使用物理外推。")
-            _mark_predictor_probe(called=False, success=False)
+            _mark_predictor_probe(called=False, success=False, probe_id=probe_id)
             return self._fallback_trajectories(plans, reading)
 
         device_code = str(self.cfg.get("DEVICE_CODE", "soil3") or "soil3")
@@ -2058,13 +2070,18 @@ class Phase2Predictor:
             "horizon_steps": self.horizon,
         }
 
+        predictor_start = time.monotonic()
+        _mark_predictor_probe(called=True, success=False, probe_id=probe_id)
         self.resp_path.unlink(missing_ok=True)
-        _mark_predictor_probe(called=True, success=False)
         try:
             save_json_locked(self.req_path, payload)
             logger.info(f"[Layer4] 预演考卷已下发至 {self.req_path}，等待模型推演...")
         except OSError as e:
             logger.error(f"[Layer4] 写入 shm 失败: {e}，触发物理外推保底。")
+            _mark_predictor_probe(
+                called=True, success=False, elapsed_seconds=time.monotonic() - predictor_start,
+                probe_id=probe_id,
+            )
             return self._fallback_trajectories(plans, reading)
 
         # 轮询等待预测模型响应（monotonic：NTP 跳变不影响超时判断）
@@ -2106,14 +2123,20 @@ class Phase2Predictor:
                         plan.prediction_horizon_steps = self.horizon
                         plan.prediction_timestamp = resp.get("timestamp")
                     logger.info("[Layer4] 成功获取匹配 request_id 的预测轨迹。")
-                    _mark_predictor_probe(called=True, success=True)
+                    _mark_predictor_probe(
+                        called=True, success=True, elapsed_seconds=time.monotonic() - predictor_start,
+                        probe_id=probe_id,
+                    )
                     return trajectories
                 except (json.JSONDecodeError, OSError):
                     pass
             time.sleep(0.5)
 
         logger.warning(f"[Layer4] 预测模型超时 ({self.timeout}s)，切换至物理外推保底。")
-        _mark_predictor_probe(called=True, success=False)
+        _mark_predictor_probe(
+            called=True, success=False, elapsed_seconds=time.monotonic() - predictor_start,
+            probe_id=probe_id,
+        )
         return self._fallback_trajectories(plans, reading)
 
     def _fallback_trajectories(
