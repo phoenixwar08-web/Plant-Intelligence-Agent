@@ -6,11 +6,15 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from services.soil3.cloud_strategy.validator import normalize_timestamp
+from services.soil3.cloud_strategy.validator import normalize_timestamp, parse_timestamp
 from services.soil3.telemetry.common import atomic_write_json, load_json
 from services.soil3.trace.trace_v1 import utc_now
 
@@ -22,6 +26,8 @@ SCHEMA_VERSION = "trigger_shadow.v1"
 TRACE_ID_PATTERN = re.compile(r"^tr-[0-9a-f]{24}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 DECISIONS = frozenset({CALL_QWEN, SKIP_CLOUD, LOCAL_SAFETY_ONLY})
+_ADMISSION_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_ADMISSION_THREAD_LOCKS_GUARD = threading.Lock()
 RECORD_FIELDS = frozenset({
     "schema_version",
     "trace_id",
@@ -59,6 +65,42 @@ class TriggerShadowError(ValueError):
         self.reasons = list(reasons or [])
         detail = f": {', '.join(self.reasons)}" if self.reasons else ""
         super().__init__(f"{code}{detail}")
+
+
+def _admission_thread_lock(root: Path) -> threading.Lock:
+    key = str(root.resolve())
+    with _ADMISSION_THREAD_LOCKS_GUARD:
+        return _ADMISSION_THREAD_LOCKS.setdefault(key, threading.Lock())
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _reference_valid(value: Any, *, schema_version: str | None = None) -> bool:
@@ -212,6 +254,15 @@ class TriggerShadowStore:
             raise TriggerShadowError("invalid_trace_id")
         return self.root / f"{trace_id}.json"
 
+    @contextmanager
+    def cloud_admission_lock(self) -> Iterator[None]:
+        """Serialize the local admission reservation across threads/processes."""
+
+        with _admission_thread_lock(self.root):
+            lock_path = self.root.parent / f".{self.root.name}.cloud-admission.lock"
+            with _exclusive_file_lock(lock_path):
+                yield
+
     def create(
         self,
         trace_id: str,
@@ -316,6 +367,25 @@ class TriggerShadowStore:
             "semantic_projection": copy.deepcopy(latest["semantic_projection"]),
             "actual_qwen_result": copy.deepcopy(latest["actual_qwen_result"]),
         }
+
+    def latest_call_admission_at(self) -> str | None:
+        """Return the newest durable local CALL admission, finalized or not."""
+
+        if not self.root.is_dir():
+            return None
+        candidates: list[tuple[Any, str, str]] = []
+        for path in sorted(self.root.glob("tr-*.json")):
+            record = self.read(path.stem)
+            if record["trigger_decision"] != CALL_QWEN:
+                continue
+            admitted_at = parse_timestamp(record["created_at"])
+            normalized = normalize_timestamp(record["created_at"])
+            if admitted_at is None or normalized is None:
+                raise TriggerShadowError("record_invalid")
+            candidates.append((admitted_at, record["trace_id"], normalized))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: (item[0], item[1]))[2]
 
     @staticmethod
     def _validate_stored(record: Any) -> None:
