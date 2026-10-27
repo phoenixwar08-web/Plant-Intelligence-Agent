@@ -70,6 +70,7 @@ import signal
 import sys
 import time
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -119,7 +120,7 @@ _ZONE_LABELS = {
 #   SHM_TIMEOUT_SEC（30s）。300 秒心跳中有 30 秒是纯粹的 IO 阻塞浪费。
 #
 # 工作状态机（三态）：
-#   CLOSED（正常）  →  连续 FAIL_THRESHOLD 次心跳耗时超出阈值
+#   CLOSED（正常）  →  连续 FAIL_THRESHOLD 次预测耗时超出阈值
 #                  →  OPEN（熔断）：写 PREDICTOR_CIRCUIT_OPEN=True 到 cfg，
 #                                   Layer 4 读到后直接跳过预测，用物理外推
 #                  →  OPEN 持续 RESET_SEC 秒后进入 HALF_OPEN（半开探测）
@@ -128,9 +129,8 @@ _ZONE_LABELS = {
 #                     →  耗时超标：→ OPEN（重新熔断，重置计时器）
 #
 # 超时判定：
-#   run_cycle() 总耗时 > SHM_TIMEOUT_SEC + _CB_ELAPSED_GRACE（宽限量）
-#   之所以用总耗时而非直接 hook Layer 4，是因为 decision_brain.py 不在
-#   main.py 的直接控制内；宽限量容纳传感器读取、CSV 追加等正常开销。
+#   仅使用本轮 predictor_last_probe.elapsed_seconds（monotonic 差值）。
+#   后续决策、浇水、安全后处理与物理外推耗时不计入预测超时。
 #
 # 持久化：
 #   熔断状态写入 system_state.json，重启后自动恢复，避免重启即触发探测。
@@ -138,7 +138,7 @@ _ZONE_LABELS = {
 
 _CB_FAIL_THRESHOLD = 3       # 连续超时次数触发熔断
 _CB_RESET_SEC      = 3600    # 熔断持续时长（秒，1 小时后进入半开探测）
-_CB_ELAPSED_GRACE  = 0       # Phase2 超时时 run_cycle 约等于 SHM_TIMEOUT，不能再额外放宽
+_CB_ELAPSED_GRACE  = 0       # 不额外放宽 Phase2 超时阈值
 
 _MIN_VALID_WALL_CLOCK_TS = 1704067200.0  # 2024-01-01 00:00:00 UTC
 _WALL_CLOCK_WAIT_TIMEOUT_SEC = 180.0
@@ -197,6 +197,7 @@ class PredictorCircuitBreaker:
         self._fail_count = 0
         self._state     = self._STATE_CLOSED
         self._open_since: float = 0.0
+        self._probe_before_cycle: dict = {}
         self._json_ops  = (json, os, shutil)      # 存储供 _persist 使用
         self._restore()
 
@@ -291,6 +292,8 @@ class PredictorCircuitBreaker:
         · HALF_OPEN → 每轮都确保 PREDICTOR_CIRCUIT_OPEN=False，等待下一次真实预测穿透
         · CLOSED → 确保 PREDICTOR_CIRCUIT_OPEN=False，避免重启后残留熔断标志
         """
+        # Capture existing evidence so skipped/failed cycles cannot reuse an old success.
+        self._probe_before_cycle = self._last_predictor_probe()
         now = time.monotonic()
         if self._state == self._STATE_OPEN:
             if now - self._open_since >= _CB_RESET_SEC:
@@ -316,31 +319,40 @@ class PredictorCircuitBreaker:
 
     def after_cycle(self, elapsed: float, cycle_no: int) -> None:
         """
-        每次心跳后调用，根据实际耗时更新熔断状态机。
+        每次心跳后调用，仅根据本轮预测耗时更新熔断状态机。
+        elapsed 仍为调用方的整周期耗时，保留接口但不用于预测超时判定。
 
-        · elapsed > 阈值 → 记录失败（CLOSED 累积；HALF_OPEN 立即重新熔断）
-        · elapsed 正常：
+        · 预测耗时 >= 阈值 → 记录失败（CLOSED 累积；HALF_OPEN 立即重新熔断）
+        · 本轮预测成功且耗时正常：
           - HALF_OPEN → 确认恢复，关闭熔断器
           - CLOSED    → 重置连续失败计数
         """
         threshold = self._timeout_threshold()
         probe = self._last_predictor_probe()
+        if probe == self._probe_before_cycle:
+            probe = {}
         predictor_called = bool(probe.get("called"))
         predictor_success = bool(probe.get("success"))
-        timed_out = predictor_called and elapsed >= threshold
+        predictor_elapsed = probe.get("elapsed_seconds")
+        timing_valid = (
+            type(predictor_elapsed) in (int, float)
+            and math.isfinite(predictor_elapsed)
+            and predictor_elapsed >= 0
+        )
+        timed_out = predictor_called and timing_valid and predictor_elapsed >= threshold
 
         if timed_out:
             self._fail_count += 1
             if self._state == self._STATE_HALF_OPEN:
                 logger.warning(
-                    f"[CB] 半开探测超时（{elapsed:.1f}s > {threshold:.0f}s），"
+                    f"[CB] 半开探测超时（{predictor_elapsed:.1f}s >= {threshold:.0f}s），"
                     f"重新熔断，{_CB_RESET_SEC//60} 分钟后再次探测。"
                 )
                 self._trip(cycle_no)
             elif self._state == self._STATE_CLOSED:
                 logger.warning(
                     f"[CB] 预测请求超时 #{self._fail_count}/{_CB_FAIL_THRESHOLD} "
-                    f"（{elapsed:.1f}s > {threshold:.0f}s）[Cycle #{cycle_no:04d}]"
+                    f"（{predictor_elapsed:.1f}s >= {threshold:.0f}s）[Cycle #{cycle_no:04d}]"
                 )
                 if self._fail_count >= _CB_FAIL_THRESHOLD:
                     self._trip(cycle_no)
@@ -352,20 +364,21 @@ class PredictorCircuitBreaker:
                     logger.info("[CB] 半开探测本轮未进入 Phase2（安全区/故障保护等），保持 HALF_OPEN 等待下一次真实探测。")
                     self._persist()
                     return
-                if not predictor_success:
+                if not predictor_success or not timing_valid:
                     logger.warning("[CB] 半开探测未获得有效 Phase2 响应，重新熔断。")
                     self._trip(cycle_no)
                     return
                 logger.info(
-                    f"[CB] 半开探测成功（{elapsed:.1f}s ≤ {threshold:.0f}s），"
+                    f"[CB] 半开探测成功（{predictor_elapsed:.1f}s < {threshold:.0f}s），"
                     f"预测模型已恢复，熔断器关闭。"
                 )
                 self._state      = self._STATE_CLOSED
                 self._fail_count = 0
                 self._cfg.update({"PREDICTOR_CIRCUIT_OPEN": False}, persist=False)
                 self._persist()
-            elif self._state == self._STATE_CLOSED and self._fail_count > 0:
-                logger.debug(f"[CB] 心跳耗时恢复正常，连续失败计数清零。")
+            elif (self._state == self._STATE_CLOSED and self._fail_count > 0
+                  and predictor_called and predictor_success and timing_valid):
+                logger.debug("[CB] 预测耗时恢复正常，连续失败计数清零。")
                 self._fail_count = 0
                 self._persist()
 
@@ -616,7 +629,7 @@ def main() -> None:
                 f"等待 {max(interval_sec - elapsed, 0):.0f}s 后重试..."
             )
 
-        # 熔断器后置更新：根据本轮实际耗时更新状态机
+        # 熔断器后置更新：读取本轮 Phase2 预测耗时；整周期耗时仅用于心跳节律
         circuit_breaker.after_cycle(elapsed, cycle_no)
 
         # ── 防时间漂移的精准睡眠 ──────────────────────────────────────

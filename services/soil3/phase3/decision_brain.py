@@ -452,12 +452,15 @@ def _learning_advice_arm_name(plan: "ActionPlan") -> str:
     return label or "unknown"
 
 
-def _mark_predictor_probe(called: bool, success: bool = False) -> None:
+def _mark_predictor_probe(
+    called: bool, success: bool = False, elapsed_seconds: Optional[float] = None,
+) -> None:
     def update(state):
         state["predictor_last_probe"] = {
             "called": called,
             "success": success,
             "timestamp": time.time(),
+            "elapsed_seconds": elapsed_seconds,
         }
     _update_system_state(update)
 
@@ -2058,13 +2061,17 @@ class Phase2Predictor:
             "horizon_steps": self.horizon,
         }
 
-        self.resp_path.unlink(missing_ok=True)
+        predictor_start = time.monotonic()
         _mark_predictor_probe(called=True, success=False)
+        self.resp_path.unlink(missing_ok=True)
         try:
             save_json_locked(self.req_path, payload)
             logger.info(f"[Layer4] 预演考卷已下发至 {self.req_path}，等待模型推演...")
         except OSError as e:
             logger.error(f"[Layer4] 写入 shm 失败: {e}，触发物理外推保底。")
+            _mark_predictor_probe(
+                called=True, success=False, elapsed_seconds=time.monotonic() - predictor_start,
+            )
             return self._fallback_trajectories(plans, reading)
 
         # 轮询等待预测模型响应（monotonic：NTP 跳变不影响超时判断）
@@ -2106,14 +2113,18 @@ class Phase2Predictor:
                         plan.prediction_horizon_steps = self.horizon
                         plan.prediction_timestamp = resp.get("timestamp")
                     logger.info("[Layer4] 成功获取匹配 request_id 的预测轨迹。")
-                    _mark_predictor_probe(called=True, success=True)
+                    _mark_predictor_probe(
+                        called=True, success=True, elapsed_seconds=time.monotonic() - predictor_start,
+                    )
                     return trajectories
                 except (json.JSONDecodeError, OSError):
                     pass
             time.sleep(0.5)
 
         logger.warning(f"[Layer4] 预测模型超时 ({self.timeout}s)，切换至物理外推保底。")
-        _mark_predictor_probe(called=True, success=False)
+        _mark_predictor_probe(
+            called=True, success=False, elapsed_seconds=time.monotonic() - predictor_start,
+        )
         return self._fallback_trajectories(plans, reading)
 
     def _fallback_trajectories(
