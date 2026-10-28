@@ -3,7 +3,7 @@
 This module implements the non-executing proposal chain from Issue #13:
 
 ```text
-state.v1 -> Cloud LLM -> strategy.v1 -> Validator
+state.v1 -> Cloud LLM decision fields -> local strategy.v1 assembly -> Validator
 ```
 
 It does not publish MQTT, call `manual_water`, import Phase3, or create an
@@ -59,12 +59,15 @@ The hash is what makes the binding unambiguous: `state.v1` declares no uniquenes
 for `(device_code, observed_at)`, so two snapshots of one device carrying the
 same observation moment can only be told apart by their content.
 
-`state_sha256` is attached by this service, never by the model. The prompt tells
-the provider not to write it, and a value that arrives anyway is overwritten from
-the snapshot actually loaded before the Validator runs; the Validator recomputes
-it independently and reports `invalid_state_sha256` or `state_sha256_mismatch`. An
-attempted override stays visible in the audit copy of the raw response and in the
-hash of the complete response.
+The live provider may return only `actions`, `reason_summary`,
+`expected_outcome`, and `confidence`. The local service builds the full
+`strategy.v1`: it creates a fresh UUID and UTC creation time, copies normalized
+State timestamps, computes `state_sha256`, records actual provider/model
+metadata, and sets the non-executing permission fields. Any model-supplied
+identity, time, hash, model, execution, or other extra field rejects the entire
+response before assembly; the raw response remains in the audit. The existing
+offline fixture path continues to consume full `strategy.v1` for Replay and
+tests. Both paths pass the formal Validator before any Strategy is persisted.
 
 ### One timestamp form
 
@@ -76,14 +79,12 @@ way is a malformed record, not a binding mismatch.
 
 The state side stays lenient because `state.v1` copies `observed_at` through
 untouched and a real record can hold an ISO string with a `Z`, another offset, or
-a numeric epoch. This service therefore rewrites the notation at both boundaries:
-on the way out, in the projection sent to the provider, and on the way in, on the
-parsed reply, before the Validator sees it. Values are compared as instants after
-that rewrite, and a timestamp that cannot be parsed is left alone so the Validator
-reports it instead of the service inventing one. A state whose `observed_at` is
-missing or unparseable is rejected rather than guessed at. The chain's own audit
-record is the one place that still mirrors the snapshot as loaded, notation
-included, because it reports what the source said.
+a numeric epoch. The service normalizes State timestamps in the projection and
+uses those same values for local live-Strategy assembly. A missing or
+unparseable State time remains invalid at the formal Validator; it is never
+invented. The legacy full-Strategy fixture path still normalizes provider-style
+timestamp notation before validation. The chain audit mirrors the State as
+loaded, including its original notation.
 
 The fixtures in `tests/test_cloud_strategy.py` are built by calling
 `StateBuilder` from `services/soil3/state/state_v1.py`, so a change in the
@@ -111,12 +112,10 @@ proposal fails closed: the chain records a reason code
 `provider_disabled`, `missing_api_key`, ...) and exits non-zero without
 reaching any device path. Config defects are reason codes, never tracebacks.
 
-The prompt file is `prompts/strategy_v1.txt` for the `strategy.v1` schema family;
-its `prompt_version` label is `strategy-prompt.v2`, which is the revision of the
-text itself. Proposals carrying any other `prompt_version` are rejected, so audit
-records can tell prompt revisions apart. `strategy-prompt.v2` has no consumer and
-no released history yet, so the wording that lands with this PR is what v2 means;
-the label is bumped when a further revision has to coexist with records of this one.
+The prompt file is `prompts/strategy_v1.txt` for the `strategy.v1` schema family.
+The assembled Strategy retains the existing `strategy-prompt.v2` label pinned
+by the public schema and Validator. The deployed Git revision identifies the
+exact prompt text; this Issue does not change the public version field.
 
 Example invocation:
 

@@ -313,7 +313,7 @@ class StrategyValidator:
                 action_ids.add(action_id)
 
             action_type = action.get("type")
-            if action_type not in ALLOWED_ACTIONS:
+            if not isinstance(action_type, str) or action_type not in ALLOWED_ACTIONS:
                 reasons.append(f"{prefix}:unknown_action")
                 continue
             if stop_seen:

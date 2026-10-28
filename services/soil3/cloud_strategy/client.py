@@ -135,10 +135,13 @@ class OpenAICompatibleClient:
                 raise CloudStrategyError("invalid_model_envelope", "model response envelope is invalid") from error
             if not isinstance(content, str) or not content.strip():
                 raise CloudStrategyError("empty_model_response", "model returned empty content")
+            model = data.get("model")
+            if not isinstance(model, str) or not model.strip():
+                raise CloudStrategyError("invalid_model_envelope", "model response model is invalid")
             return CloudResponse(
                 content=content,
                 provider=str(self.config.get("provider") or "unknown"),
-                model=str(data.get("model") or self.config["model"]),
+                model=model,
                 request_id=data.get("id"),
                 usage=data.get("usage") or {},
             )

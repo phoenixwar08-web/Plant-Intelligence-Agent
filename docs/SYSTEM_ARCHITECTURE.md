@@ -7,7 +7,7 @@
 | State | Normalize current sensor, environment, irrigation, and safety facts. |
 | Cloud Invocation Trigger | Compare factual Decision Context changes and admit or suppress cloud work; it never decides irrigation or replaces Gate/Phase3. |
 | Vision | Convert a captured plant image into structured visual facts. |
-| Cloud Strategy | Propose structured, non-executing care actions. |
+| Cloud Strategy | Accept only model-authored decision fields, locally bind them to the current State, and propose structured, non-executing care actions. |
 | Validator | Reject malformed, unknown, or invalid strategy content. |
 | Gate | Apply the small set of cloud-side admission and exploration constraints. |
 | Runner | Persist and progress approved strategy steps; initially dry-run only. |
@@ -25,7 +25,7 @@
 ## Formal control chain
 
 ```text
-LLM → Strategy → Validator → Gate → Runner → Phase3 Bridge → Phase3 → ActuatorLayer → MQTT → ESP32
+LLM decision fields → local Strategy assembly → Validator → Gate → Runner → Phase3 Bridge → Phase3 → ActuatorLayer → MQTT → ESP32
 ```
 
 The Bridge-to-Phase3 transition is disabled unless the controlled-execution

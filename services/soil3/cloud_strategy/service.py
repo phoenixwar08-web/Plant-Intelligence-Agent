@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 from .client import CloudResponse, CloudStrategyError, OpenAICompatibleClient
 from .validator import (
     CANONICAL_TIMESTAMP_FIELDS,
+    PROMPT_VERSION,
     STATE_HASH_FIELD,
     StrategyValidator,
     fingerprint,
@@ -24,6 +25,7 @@ from .validator import (
 MODULE_ROOT = Path(__file__).resolve().parent
 DEFAULT_PROMPT = MODULE_ROOT / "prompts" / "strategy_v1.txt"
 AUDIT_RAW_RESPONSE_MAX_CHARS = 4000
+MODEL_DECISION_FIELDS = frozenset({"actions", "reason_summary", "expected_outcome", "confidence"})
 
 # Only what a watering proposal can reason about. state.v1 additionally carries
 # provenance maps, an extension slot, and raw source labels; forwarding those
@@ -262,24 +264,54 @@ def run_chain(
             parse_error = {"code": "invalid_model_json", "message": str(error)}
             validation = {"accepted": False, "reason_codes": ["invalid_model_json"], "strategy": None}
         else:
-            # Boundary rules, applied before any validation. strategy.v1 carries one
-            # timestamp notation however the provider wrote the instant, and
-            # state_sha256 is computed here from the snapshot actually loaded: neither
-            # the provider's formatting nor a provider-supplied hash can choose or move
-            # the binding. An override attempt stays visible in the audit copy of the
-            # raw response and in the hash of the complete response.
-            canonicalize_timestamps(parsed, CANONICAL_TIMESTAMP_FIELDS)
-            parsed[STATE_HASH_FIELD] = fingerprint(state)
-            try:
-                validator = build_validator(config)
-            except (KeyError, TypeError, ValueError, OverflowError):
-                validation = {
-                    "accepted": False,
-                    "reason_codes": ["invalid_validator_config"],
-                    "strategy": None,
-                }
-            else:
-                validation = validator.validate(parsed, state).to_dict()
+            if fixture_content is None:
+                missing = sorted(MODEL_DECISION_FIELDS - set(parsed))
+                unknown = sorted(set(parsed) - MODEL_DECISION_FIELDS)
+                reasons = []
+                if missing:
+                    reasons.append("model_decision_missing_fields:" + ",".join(missing))
+                if unknown:
+                    reasons.append("model_decision_unknown_fields:" + ",".join(unknown))
+                if reasons:
+                    validation = {"accepted": False, "reason_codes": reasons, "strategy": None}
+                    parsed = None
+                else:
+                    # The provider supplies decisions only. Identity, State binding,
+                    # provenance, and non-execution authority come from local facts.
+                    parsed = {
+                        "schema_version": "strategy.v1",
+                        "strategy_id": str(uuid.uuid4()),
+                        "device_code": state.get("device_code"),
+                        "state_observed_at": model_input.get("observed_at"),
+                        "state_generated_at": model_input.get("generated_at"),
+                        STATE_HASH_FIELD: fingerprint(state),
+                        "created_at": normalize_timestamp(utc_now()),
+                        "actions": parsed["actions"],
+                        "reason_summary": parsed["reason_summary"],
+                        "expected_outcome": parsed["expected_outcome"],
+                        "confidence": parsed["confidence"],
+                        "model": {
+                            "provider": cloud_meta["provider"],
+                            "name": cloud_meta["model"],
+                            "prompt_version": PROMPT_VERSION,
+                        },
+                        "execution": {"mode": "proposal_only", "actuator_commands_allowed": False},
+                    }
+            if parsed is not None:
+                # The legacy offline fixture path still accepts full strategy.v1.
+                # Formal validation remains the final boundary for both paths.
+                canonicalize_timestamps(parsed, CANONICAL_TIMESTAMP_FIELDS)
+                parsed[STATE_HASH_FIELD] = fingerprint(state)
+                try:
+                    validator = build_validator(config)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    validation = {
+                        "accepted": False,
+                        "reason_codes": ["invalid_validator_config"],
+                        "strategy": None,
+                    }
+                else:
+                    validation = validator.validate(parsed, state).to_dict()
     elif failure is not None:
         validation = {"accepted": False, "reason_codes": [failure["code"]], "strategy": None}
 

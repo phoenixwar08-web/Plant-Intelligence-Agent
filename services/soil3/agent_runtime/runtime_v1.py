@@ -929,20 +929,6 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         model_metrics=model_metrics,
     )
     validation = strategy_result.get("validation")
-    if (
-        config.provider_mode == "qwen_dashscope"
-        and isinstance(validation, dict)
-        and validation.get("accepted")
-        and isinstance(validation.get("strategy"), dict)
-    ):
-        strategy_model = dict(validation["strategy"]["model"])
-        strategy_model.update(
-            {
-                "provider": "qwen_dashscope",
-                "name": config.provider["model"],
-            }
-        )
-        validation["strategy"]["model"] = strategy_model
     audit_path = append_audit(config.audit_dir, strategy_result)
     if not isinstance(validation, dict) or not validation.get("accepted") or not isinstance(validation.get("strategy"), dict):
         _finalize_trigger_shadow(
