@@ -276,6 +276,8 @@ class Day5FaultSafetyTests(unittest.TestCase):
         forged_decision = {key: fixture_strategy[key] for key in decision_fields}
         forged_decision["strategy_id"] = "550e8400-e29b-41d4-a716-446655440000"
         forged_decision["state_observed_at"] = "2026-07-28T00:02:14.310876Z"
+        malformed_action_decision = {key: fixture_strategy[key] for key in decision_fields}
+        malformed_action_decision["actions"] = [{"action_id": "a1", "type": []}]
         cases = {
             "timeout": (
                 TimeoutError("provider timeout"),
@@ -300,6 +302,11 @@ class Day5FaultSafetyTests(unittest.TestCase):
             "model_binding_fields_rejected": (
                 ProviderResponse(200, json.dumps(forged_decision)),
                 ["model_decision_unknown_fields:state_observed_at,strategy_id"],
+                None,
+            ),
+            "unhashable_action_type": (
+                ProviderResponse(200, json.dumps(malformed_action_decision)),
+                ["action[0]:unknown_action"],
                 None,
             ),
         }
@@ -331,6 +338,8 @@ class Day5FaultSafetyTests(unittest.TestCase):
                 )
                 self.assertEqual(expected_reasons, audit["validation"]["reason_codes"])
                 self.assertIsNone(audit["validation"]["strategy"])
+                if label == "unhashable_action_type":
+                    self.assertEqual(json.dumps(malformed_action_decision), audit["raw_model_response"])
                 if expected_failure is None:
                     self.assertIsNone(audit["failure"])
                 elif expected_failure == "invalid_model_json":

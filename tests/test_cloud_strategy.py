@@ -182,6 +182,13 @@ class ValidatorTests(unittest.TestCase):
         value["actions"] = [{"action_id": "x", "type": "fertilize"}]
         self.assertIn("action[0]:unknown_action", self.validator.validate(value, self.state).reason_codes)
 
+    def test_unhashable_action_type_is_rejected(self):
+        value = valid_strategy(self.state)
+        value["actions"] = [{"action_id": "a1", "type": []}]
+        result = self.validator.validate(value, self.state)
+        self.assertFalse(result.accepted)
+        self.assertIn("action[0]:unknown_action", result.reason_codes)
+
     def test_negative_and_extreme_water_are_rejected(self):
         for seconds, code in ((-1, "pump_seconds_not_positive"), (121, "pump_seconds_extreme")):
             value = valid_strategy(self.state)
@@ -308,6 +315,34 @@ class ClientAndChainTests(unittest.TestCase):
         result, _ = self.live_result(state, invalid)
         self.assertFalse(result["validation"]["accepted"])
         self.assertIn("action[0]:pump_seconds_extreme", result["validation"]["reason_codes"])
+
+        unhashable = model_decision(state)
+        unhashable["actions"] = [{"action_id": "a1", "type": []}]
+        result, raw = self.live_result(state, unhashable)
+        self.assertFalse(result["validation"]["accepted"])
+        self.assertIn("action[0]:unknown_action", result["validation"]["reason_codes"])
+        self.assertEqual(raw, result["raw_model_response"])
+
+    def test_invalid_provider_model_envelope_is_rejected(self):
+        state = real_state()
+        content = json.dumps(model_decision(state))
+        missing_session = FakeSession(FakeResponse(200, {
+            "choices": [{"message": {"content": content}}],
+        }))
+        with mock.patch.dict(os.environ, {"CLOUD_STRATEGY_API_KEY": "secret"}):
+            missing_result = run_chain(state=state, config=self.config(), prompt="prompt", session=missing_session)
+        self.assertEqual("invalid_model_envelope", missing_result["failure"]["code"])
+        self.assertIsNone(missing_result["validation"]["strategy"])
+        for model in ({"unexpected": "object"}, [], "", "  ", None):
+            with self.subTest(model=model):
+                session = FakeSession(FakeResponse(200, {
+                    "model": model,
+                    "choices": [{"message": {"content": content}}],
+                }))
+                with mock.patch.dict(os.environ, {"CLOUD_STRATEGY_API_KEY": "secret"}):
+                    result = run_chain(state=state, config=self.config(), prompt="prompt", session=session)
+                self.assertEqual("invalid_model_envelope", result["failure"]["code"])
+                self.assertIsNone(result["validation"]["strategy"])
 
     def test_client_requires_key(self):
         with self.assertRaises(CloudStrategyError) as context:
@@ -1243,7 +1278,10 @@ class ProviderConfigTests(unittest.TestCase):
 
     def test_valid_config_still_reaches_the_provider(self):
         state = real_state()
-        session = FakeSession(FakeResponse(200, {"choices": [{"message": {"content": "{}"}}]}))
+        session = FakeSession(FakeResponse(200, {
+            "model": "test-model",
+            "choices": [{"message": {"content": "{}"}}],
+        }))
         client = OpenAICompatibleClient(chain_config(), "secret", session=session)
         client.complete("prompt", project_state_for_model(state))
         self.assertEqual(1, len(session.calls))
