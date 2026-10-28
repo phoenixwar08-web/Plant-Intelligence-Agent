@@ -139,6 +139,11 @@ def valid_strategy(state):
     }
 
 
+def model_decision(state):
+    strategy = valid_strategy(state)
+    return {key: strategy[key] for key in ("actions", "reason_summary", "expected_outcome", "confidence")}
+
+
 def chain_config(**overrides):
     config = {
         "enabled": True,
@@ -232,6 +237,77 @@ class ValidatorTests(unittest.TestCase):
 class ClientAndChainTests(unittest.TestCase):
     def config(self):
         return chain_config()
+
+    def live_result(self, state, payload):
+        content = json.dumps(payload)
+        session = FakeSession(
+            FakeResponse(200, {
+                "id": "request-local-binding",
+                "model": "provider-model",
+                "choices": [{"message": {"content": content}}],
+                "usage": {"total_tokens": 10},
+            })
+        )
+        with mock.patch.dict(os.environ, {"CLOUD_STRATEGY_API_KEY": "secret"}):
+            result = run_chain(state=state, config=self.config(), prompt="prompt", session=session)
+        return result, content
+
+    def test_live_decision_is_locally_bound_and_formally_validated(self):
+        state = real_state()
+        decision = model_decision(state)
+        result, raw = self.live_result(state, decision)
+        self.assertTrue(result["validation"]["accepted"], result["validation"]["reason_codes"])
+        strategy = result["validation"]["strategy"]
+        self.assertEqual(REQUIRED_FIELDS, set(strategy))
+        self.assertEqual(4, uuid.UUID(strategy["strategy_id"]).version)
+        self.assertEqual(state["device_code"], strategy["device_code"])
+        self.assertEqual(normalize_timestamp(state["observed_at"]), strategy["state_observed_at"])
+        self.assertEqual(normalize_timestamp(state["generated_at"]), strategy["state_generated_at"])
+        self.assertEqual(fingerprint(state), strategy["state_sha256"])
+        self.assertTrue(is_canonical_timestamp(strategy["created_at"]))
+        self.assertEqual({"provider": "test", "name": "provider-model", "prompt_version": PROMPT_VERSION}, strategy["model"])
+        self.assertEqual({"mode": "proposal_only", "actuator_commands_allowed": False}, strategy["execution"])
+        for key in decision:
+            self.assertEqual(decision[key], strategy[key])
+        self.assertEqual(raw, result["raw_model_response"])
+        self.assertTrue(StrategyValidator().validate(strategy, state).accepted)
+
+    def test_live_model_authority_fields_are_rejected_without_repair(self):
+        state = real_state()
+        forbidden = {
+            "strategy_id": "550e8400-e29b-41d4-a716-446655440000",
+            "state_observed_at": "2026-07-28T00:02:14.310876Z",
+            "state_generated_at": "2026-07-28T00:02:15Z",
+            "created_at": "2026-07-28T00:02:16Z",
+            "state_sha256": "0" * 64,
+            "schema_version": "strategy.v1",
+            "device_code": "soil3",
+            "model": {"provider": "fiction"},
+            "execution": {"mode": "physical"},
+        }
+        for key, value in forbidden.items():
+            with self.subTest(key=key):
+                decision = model_decision(state)
+                decision[key] = value
+                result, raw = self.live_result(state, decision)
+                self.assertFalse(result["validation"]["accepted"])
+                self.assertIsNone(result["validation"]["strategy"])
+                self.assertIn(f"model_decision_unknown_fields:{key}", result["validation"]["reason_codes"])
+                self.assertEqual(raw, result["raw_model_response"])
+
+    def test_live_model_decision_missing_or_bad_actions_fail_closed(self):
+        state = real_state()
+        missing = model_decision(state)
+        del missing["confidence"]
+        result, _ = self.live_result(state, missing)
+        self.assertFalse(result["validation"]["accepted"])
+        self.assertIn("model_decision_missing_fields:confidence", result["validation"]["reason_codes"])
+
+        invalid = model_decision(state)
+        invalid["actions"] = [{"action_id": "a1", "type": "water", "pump_seconds": 121}]
+        result, _ = self.live_result(state, invalid)
+        self.assertFalse(result["validation"]["accepted"])
+        self.assertIn("action[0]:pump_seconds_extreme", result["validation"]["reason_codes"])
 
     def test_client_requires_key(self):
         with self.assertRaises(CloudStrategyError) as context:
@@ -352,7 +428,7 @@ class ClientAndChainTests(unittest.TestCase):
 
     def test_available_optional_facts_reach_the_exact_provider_input(self):
         state = sample_state()
-        content = json.dumps(valid_strategy(state))
+        content = json.dumps(model_decision(state))
         session = FakeSession(
             FakeResponse(
                 200,
@@ -440,7 +516,8 @@ class BoundaryTests(unittest.TestCase):
         row = next(line for line in doc.splitlines() if line.startswith("| `strategy.v1`"))
         self.assertIn("implemented", row)
         self.assertIn("runtime consumes", row)
-        self.assertIn("provider configuration remains disabled", row)
+        self.assertIn("local service assembles", row)
+        self.assertIn("example configuration remains offline_fixture", row)
         for field in ("device_code", "`observed_at`", "state_sha256"):
             self.assertIn(field, row)
         self.assertIn("not a binding condition", row)
@@ -1266,9 +1343,11 @@ class PromptVersionTests(unittest.TestCase):
 
     def test_prompt_file_describes_the_binding_fields_it_requires(self):
         text = PROMPT_PATH.read_text(encoding="utf-8")
-        for field, _ in STATE_BINDINGS:
-            self.assertIn(field, text)
-        self.assertIn("device_code", text)
+        for field in ("actions", "reason_summary", "expected_outcome", "confidence"):
+            self.assertIn(f"- {field}:", text)
+        for field in ("strategy_id", "device_code", "state_observed_at", "state_generated_at", "created_at", "model", "execution"):
+            self.assertNotIn(f"- {field}:", text)
+        self.assertIn("local service", text)
         self.assertNotIn("state_id", text)
         self.assertNotIn("plant_id", text)
 
@@ -1284,14 +1363,12 @@ class PromptVersionTests(unittest.TestCase):
 
     def test_prompt_requires_strategy_id_before_response(self):
         text = PROMPT_PATH.read_text(encoding="utf-8")
-        self.assertRegex(text, r"strategy_id:.*UUID.*required")
-        self.assertIn("Before returning", text)
+        self.assertIn("Do not write strategy_id", text)
 
     def test_prompt_forbids_example_timestamps_and_requires_exact_state_copies(self):
         text = PROMPT_PATH.read_text(encoding="utf-8")
-        self.assertIn("Never use placeholder or example timestamps", text)
-        self.assertIn("copy input observed_at exactly into state_observed_at", text)
-        self.assertIn("copy input generated_at exactly into state_generated_at", text)
+        self.assertIn("Do not write state_observed_at", text)
+        self.assertIn("Do not write state_generated_at", text)
 
     def test_prompt_file_requires_bilingual_human_readable_explanations(self):
         text = PROMPT_PATH.read_text(encoding="utf-8")

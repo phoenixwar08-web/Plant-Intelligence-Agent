@@ -268,8 +268,14 @@ class Day5FaultSafetyTests(unittest.TestCase):
     def test_provider_failure_invalid_json_and_validator_rejection_stop_early(self):
         snapshot = health_snapshot()
         state = StateBuilder("soil3").build_from_health_snapshot(snapshot)
-        rejected_strategy = build_offline_fixture(state)
+        fixture_strategy = build_offline_fixture(state)
+        rejected_strategy = copy.deepcopy(fixture_strategy)
         rejected_strategy["actions"] = [{"action_id": "bad", "type": "launch"}]
+        decision_fields = ("actions", "reason_summary", "expected_outcome", "confidence")
+        rejected_decision = {key: rejected_strategy[key] for key in decision_fields}
+        forged_decision = {key: fixture_strategy[key] for key in decision_fields}
+        forged_decision["strategy_id"] = "550e8400-e29b-41d4-a716-446655440000"
+        forged_decision["state_observed_at"] = "2026-07-28T00:02:14.310876Z"
         cases = {
             "timeout": (
                 TimeoutError("provider timeout"),
@@ -287,8 +293,13 @@ class Day5FaultSafetyTests(unittest.TestCase):
                 "invalid_model_json",
             ),
             "validator_rejected": (
-                ProviderResponse(200, json.dumps(rejected_strategy)),
+                ProviderResponse(200, json.dumps(rejected_decision)),
                 ["action[0]:unknown_action"],
+                None,
+            ),
+            "model_binding_fields_rejected": (
+                ProviderResponse(200, json.dumps(forged_decision)),
+                ["model_decision_unknown_fields:state_observed_at,strategy_id"],
                 None,
             ),
         }
@@ -344,6 +355,42 @@ class Day5FaultSafetyTests(unittest.TestCase):
                 self.assertIsNone(trace["decision"]["runner_ref"])
                 self.assertIsNone(trace["decision"]["bridge_ref"])
                 self.assertIsNone(trace["decision"]["episode_ref"])
+
+    def test_valid_qwen_decision_reaches_gate_with_local_state_binding(self):
+        snapshot = health_snapshot()
+        state = StateBuilder("soil3").build_from_health_snapshot(snapshot)
+        fixture = build_offline_fixture(state)
+        decision = {
+            key: fixture[key]
+            for key in ("actions", "reason_summary", "expected_outcome", "confidence")
+        }
+        provider = ProviderHttp(ProviderResponse(200, json.dumps(decision)))
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = runtime_config(Path(directory), provider_mode="qwen_dashscope")
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=snapshot,
+            ), mock.patch(
+                "services.soil3.cloud_strategy.client.requests", new=provider,
+            ), mock.patch.dict(
+                os.environ, {"QWEN_DASHSCOPE_API_KEY": "test-only-key"},
+            ):
+                record = run_pipeline(config)
+
+            self.assertEqual(1, len(provider.calls))
+            self.assertIsNotNone(record["strategy_path"])
+            self.assertIsNotNone(record["gate_path"])
+            strategy = json.loads(config.strategy_output.read_text(encoding="utf-8"))
+            persisted_state = json.loads(config.state_output.read_text(encoding="utf-8"))
+            self.assertEqual(persisted_state["observed_at"], strategy["state_observed_at"])
+            self.assertEqual(fingerprint(persisted_state), strategy["state_sha256"])
+            self.assertEqual("qwen_dashscope", strategy["model"]["provider"])
+            self.assertEqual(NO_EXECUTION, record["execution"])
+            trace = TraceStore(config.trace_dir).read(record["trace_id"])
+            self.assertIsNotNone(trace["decision"]["strategy_ref"])
+            self.assertIsNotNone(trace["decision"]["gate_ref"])
+            self.assertEqual(NO_EXECUTION, trace["execution"])
 
     def test_gate_deny_and_strategy_hash_mismatch_do_not_reach_bridge(self):
         def mismatched_gate(state, strategy, policy, exploration_requested):

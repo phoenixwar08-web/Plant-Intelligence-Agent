@@ -8,25 +8,16 @@ Human-readable explanations in `reason_summary`, `expected_outcome.soil_moisture
 
 The `vision` and `experience` blocks are read-only supporting facts. Use a block's `facts` only when its `availability` is `available`. `unavailable` and `not_requested` mean that no facts exist: do not infer or invent them. Vision and Experience never override stale State data or active State safety facts.
 
-Required top-level fields you must write. Every object below accepts only the keys listed for it; any additional key is rejected by the local Validator.
-- schema_version: exactly "strategy.v1"
-- strategy_id: a newly generated UUID, required in every response; never omit it or use null
-- device_code: copy exactly from input device_code
-- state_observed_at: copy exactly from input observed_at
-- state_generated_at: copy exactly from input generated_at
-- created_at: the actual response creation time in RFC 3339 UTC with a trailing Z
+Return exactly these four top-level decision fields. Any missing or additional top-level field is rejected before local Strategy assembly.
 - actions: 1 to 12 ordered actions
 - reason_summary: 1 to 8 short factual Chinese and English bilingual reason codes or summaries; no chain-of-thought
 - expected_outcome: object with exactly two keys - soil_moisture (one short non-empty string) and risk_notes (array of up to 8 short non-empty strings, or empty)
 - confidence: number from 0 to 1
-- model: object with exactly provider, name, and prompt_version="strategy-prompt.v2"
-- execution: exactly {"mode":"proposal_only","actuator_commands_allowed":false}
 
-Every timestamp in the input projection is already RFC 3339 UTC with a trailing Z, and every timestamp you write must be in that one form: a value with another offset, without a timezone, or as a number is rejected by the local Validator even when it names the right instant.
-Never use placeholder or example timestamps. You must copy input observed_at exactly into state_observed_at and copy input generated_at exactly into state_generated_at.
-Before returning, verify that strategy_id is present as a UUID and that both State timestamp fields exactly match their corresponding input values. Do not substitute created_at or another timestamp for either State timestamp.
+The local service constructs the complete strategy.v1 after your decision passes this four-field boundary. It creates a fresh strategy_id, binds the exact current State, sets created_at in RFC 3339 UTC, records the actual provider/model and prompt_version="strategy-prompt.v2", and fixes execution to proposal_only with actuator_commands_allowed=false.
+Do not write strategy_id, device_code, schema_version, created_at, model, or execution. Do not write state_observed_at. Do not write state_generated_at. Input observed_at and generated_at are context facts only; never copy them into your output. Never use placeholder or example timestamps.
 
-Never write state_sha256. The local service computes a SHA-256 fingerprint of the exact state.v1 snapshot and attaches it after parsing your output, so any state_sha256 you produce is discarded and a wrong one cannot bind a proposal to a different snapshot.
+Never write state_sha256. The local service computes a SHA-256 fingerprint of the exact state.v1 snapshot. Any provider-supplied binding field is rejected, not silently corrected.
 
 Allowed actions only:
 - {"action_id":"a1","type":"water","pump_seconds":positive_number}

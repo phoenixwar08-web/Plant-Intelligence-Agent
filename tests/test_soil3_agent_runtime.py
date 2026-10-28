@@ -693,6 +693,40 @@ class PipelineTests(StateProducerTests):
             ):
                 RuntimeConfig.from_dict(legacy)
 
+    def test_qwen_runtime_preserves_validated_provider_model_metadata(self):
+        from services.soil3.agent_runtime.runtime_v1 import (
+            RuntimeConfig,
+            build_offline_fixture,
+            run_pipeline,
+        )
+
+        def validated_chain(*, state, **kwargs):
+            strategy = build_offline_fixture(state)
+            strategy["model"] = {
+                "provider": "qwen_dashscope",
+                "name": "provider-reported-model",
+                "prompt_version": strategy["model"]["prompt_version"],
+            }
+            return {
+                "cloud": {"provider": "qwen_dashscope", "model": "provider-reported-model", "usage": {}},
+                "validation": {"accepted": True, "reason_codes": [], "strategy": strategy},
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = RuntimeConfig.from_dict(self.qwen_runtime_config_value(Path(directory)))
+            with mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.build_health_snapshot",
+                return_value=self.health_snapshot(),
+            ), mock.patch(
+                "services.soil3.agent_runtime.runtime_v1.run_chain",
+                side_effect=validated_chain,
+            ):
+                record = run_pipeline(config)
+
+            strategy = json.loads(config.strategy_output.read_text(encoding="utf-8"))
+            self.assertEqual("provider-reported-model", strategy["model"]["name"])
+            self.assertEqual("provider-reported-model", record["model"])
+
     def test_qwen_failure_is_persisted_without_fixture_fallback(self):
         """A Qwen failure is traceable and cannot become an offline proposal."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
@@ -1538,6 +1572,9 @@ print(json.dumps({
             config.state_output.parent.mkdir(parents=True, exist_ok=True)
             config.state_output.write_text(json.dumps(state), encoding="utf-8")
             strategy = build_offline_fixture(state)
+            # The Cloud Strategy service now sets provider metadata before the
+            # formal Validator; runtime must preserve its validated result.
+            strategy["model"].update({"provider": "qwen_dashscope", "name": "qwen3.8-flash"})
             accepted_chain = {
                 "cloud": {
                     "provider": "qwen_dashscope",
