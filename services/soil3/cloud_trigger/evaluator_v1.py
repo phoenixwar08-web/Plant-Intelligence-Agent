@@ -9,11 +9,14 @@ from typing import Any
 from services.soil3.cloud_strategy.validator import parse_timestamp
 
 from .context_v1 import semantic_projection
+from .events_v1 import EventPolicy, choose_event, detect_events
 
 
 CALL_QWEN = "CALL_QWEN"
 SKIP_CLOUD = "SKIP_CLOUD"
 LOCAL_SAFETY_ONLY = "LOCAL_SAFETY_ONLY"
+
+TRIGGER_POLICIES = frozenset({"classification_v1", "business_event_v1"})
 
 DANGEROUS_FLAGS = frozenset({
     "water_delivery_suspect",
@@ -36,6 +39,9 @@ PROTECTION_FLAGS = (
 class TriggerDecision:
     decision: str
     reason_codes: tuple[str, ...]
+    business_event: dict[str, Any] | None = None
+    trigger_signals: dict[str, Any] | None = None
+    trigger_memory: dict[str, Any] | None = None
 
 
 def enforce_cloud_min_interval(
@@ -79,14 +85,62 @@ def _finite_nonnegative(value: Any) -> float | None:
     return number if math.isfinite(number) and number >= 0 else None
 
 
+def _evaluate_business_events(
+    context: dict[str, Any],
+    memory: Any,
+    event_policy: Any,
+) -> TriggerDecision:
+    """Admission from detectable plant-state events; trend classes are metadata only."""
+
+    observed = parse_timestamp(context.get("state_observed_at"))
+    series = context.get("humidity_series_6h")
+    if observed is None or not isinstance(series, list) or len(series) < 2:
+        return TriggerDecision(SKIP_CLOUD, ("event_input_unavailable",))
+
+    policy = event_policy
+    if not isinstance(policy, EventPolicy):
+        policy = EventPolicy.from_dict(policy if isinstance(policy, dict) else {})
+
+    assessment = detect_events(
+        series,
+        observed.timestamp(),
+        memory,
+        policy,
+        context.get("boundaries") if isinstance(context.get("boundaries"), dict) else None,
+    )
+    signals = assessment.get("signals") if isinstance(assessment.get("signals"), dict) else None
+    updated_memory = assessment.get("memory") if isinstance(assessment.get("memory"), dict) else None
+    event = choose_event(assessment.get("events") or [])
+    if event is None:
+        return TriggerDecision(
+            SKIP_CLOUD,
+            ("no_business_event",),
+            None,
+            signals,
+            updated_memory,
+        )
+    return TriggerDecision(
+        CALL_QWEN,
+        ("business_event:%s" % event["event_type"],),
+        event,
+        signals,
+        updated_memory,
+    )
+
+
 def evaluate_trigger(
     context: Any,
     baseline_context: Any,
     *,
     deny_age_seconds: float,
+    trigger_policy: str = "classification_v1",
+    event_policy: Any = None,
+    memory: Any = None,
 ) -> TriggerDecision:
     """Classify cloud invocation value while preserving local fail-closed facts."""
 
+    if trigger_policy not in TRIGGER_POLICIES:
+        raise ValueError("trigger policy is invalid")
     context = context if isinstance(context, dict) else {}
     boundaries = context.get("boundaries") if isinstance(context.get("boundaries"), dict) else {}
     quality = context.get("data_quality") if isinstance(context.get("data_quality"), dict) else {}
@@ -137,6 +191,9 @@ def evaluate_trigger(
             SKIP_CLOUD,
             tuple(f"protection_active:{name}" for name in protections),
         )
+
+    if trigger_policy == "business_event_v1":
+        return _evaluate_business_events(context, memory, event_policy)
 
     if baseline_context is None:
         return TriggerDecision(CALL_QWEN, ("no_valid_call_baseline",))

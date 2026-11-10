@@ -33,6 +33,21 @@
     },
     "decision_context_snapshot": {"type": "object"},
     "semantic_projection": {"type": "object"},
+    "business_event": {
+      "type": ["object", "null"],
+      "required": ["event_type", "event_id", "anchor_at", "severity", "task_type", "allowed_scope", "evidence"],
+      "properties": {
+        "event_type": {"type": "string", "minLength": 1},
+        "event_id": {"type": "string", "minLength": 1},
+        "anchor_at": {"type": ["string", "null"]},
+        "severity": {"enum": ["low", "medium", "high"]},
+        "task_type": {"type": "string", "minLength": 1},
+        "allowed_scope": {"enum": ["diagnose_only", "propose_dose"]},
+        "evidence": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "trigger_signals": {"type": ["object", "null"]},
     "baseline_ref": {"type": ["object", "null"]},
     "actual_qwen_result": {"type": ["object", "null"]},
     "execution": {

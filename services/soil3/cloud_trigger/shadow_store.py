@@ -42,6 +42,9 @@ RECORD_FIELDS = frozenset({
     "actual_qwen_result",
     "execution",
 })
+# Optional additions are only written when a business-event policy produced
+# them; records written before that feature remain byte-identical.
+OPTIONAL_FIELDS = frozenset({"business_event", "trigger_signals"})
 ACTUAL_FIELDS = frozenset({
     "provider",
     "model",
@@ -243,6 +246,33 @@ def _json_values_equal(left: Any, right: Any) -> bool:
     return False
 
 
+def _business_event_valid(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required = {"event_type", "event_id", "anchor_at", "severity", "task_type", "allowed_scope", "evidence"}
+    if set(value) != required:
+        return False
+    for name in ("event_type", "event_id", "task_type", "allowed_scope", "severity"):
+        if not isinstance(value.get(name), str) or not value[name]:
+            return False
+    if value["allowed_scope"] not in {"diagnose_only", "propose_dose"}:
+        return False
+    anchor = value.get("anchor_at")
+    if anchor is not None and normalize_timestamp(anchor) is None:
+        return False
+    return isinstance(value.get("evidence"), dict)
+
+
+def _iso_from_epoch(seconds: float) -> str:
+    from datetime import datetime, timezone
+
+    return (
+        datetime.fromtimestamp(float(seconds), timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 class TriggerShadowStore:
     """Persist one set-once Trigger observation beside each runtime Trace."""
 
@@ -301,6 +331,10 @@ class TriggerShadowStore:
             "actual_qwen_result": None,
             "execution": {"phase3_called": False, "physical_actions_performed": False},
         }
+        for name in OPTIONAL_FIELDS:
+            value = getattr(decision, name, None)
+            if value is not None:
+                record[name] = copy.deepcopy(value)
         path = self.path_for(trace_id)
         if path.exists():
             existing = self.read(trace_id)
@@ -344,6 +378,56 @@ class TriggerShadowStore:
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             "record_id": trace_id,
         }
+
+    def recent_humidity_series(
+        self,
+        *,
+        now: Any,
+        window_seconds: float,
+        max_points: int = 512,
+    ) -> list[dict[str, Any]]:
+        """Rebuild an ordered (observed_at, humidity) series from stored snapshots.
+
+        Uses only facts that were known at each past decision time; records
+        without a usable humidity or timestamp are skipped, and a corrupt
+        record fails closed by raising (the caller must not admit cloud work).
+        """
+
+        current = parse_timestamp(now)
+        try:
+            window = float(window_seconds)
+            limit = int(max_points)
+        except (TypeError, ValueError, OverflowError):
+            raise TriggerShadowError("validation_failed", ["series_parameters_invalid"])
+        if current is None or not math.isfinite(window) or window <= 0 or limit < 2:
+            raise TriggerShadowError("validation_failed", ["series_parameters_invalid"])
+        if not self.root.is_dir():
+            return []
+        lower = current.timestamp() - window
+        upper = current.timestamp()
+        points: dict[float, float] = {}
+        for path in sorted(self.root.glob("tr-*.json")):
+            record = self.read(path.stem)
+            context = record["decision_context_snapshot"]
+            stamp = parse_timestamp(context.get("state_observed_at"))
+            humidity = context.get("humidity")
+            if (
+                stamp is None
+                or isinstance(humidity, bool)
+                or not isinstance(humidity, (int, float))
+                or not math.isfinite(float(humidity))
+                or not (0.0 < float(humidity) <= 100.0)
+            ):
+                continue
+            seconds = stamp.timestamp()
+            if lower <= seconds <= upper:
+                points[seconds] = round(float(humidity), 3)
+        ordered = sorted(points.items())[-limit:]
+        return [
+            {"observed_at": _iso_from_epoch(seconds), "humidity_percent": value}
+            for seconds, value in ordered
+        ]
+
 
     def latest_valid_call_baseline(self) -> dict[str, Any] | None:
         if not self.root.is_dir():
@@ -389,7 +473,15 @@ class TriggerShadowStore:
 
     @staticmethod
     def _validate_stored(record: Any) -> None:
-        if not isinstance(record, dict) or set(record) != RECORD_FIELDS:
+        if (
+            not isinstance(record, dict)
+            or not RECORD_FIELDS <= set(record)
+            or set(record) - RECORD_FIELDS - OPTIONAL_FIELDS
+        ):
+            raise TriggerShadowError("record_invalid")
+        if "business_event" in record and not _business_event_valid(record["business_event"]):
+            raise TriggerShadowError("record_invalid")
+        if "trigger_signals" in record and not isinstance(record["trigger_signals"], dict):
             raise TriggerShadowError("record_invalid")
         if record.get("schema_version") != SCHEMA_VERSION:
             raise TriggerShadowError("record_invalid")

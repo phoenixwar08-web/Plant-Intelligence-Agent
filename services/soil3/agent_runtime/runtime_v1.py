@@ -25,6 +25,7 @@ from services.soil3.cloud_trigger import (
     enforce_cloud_min_interval,
     evaluate_trigger,
 )
+from services.soil3.cloud_trigger.events_v1 import EventPolicy
 from services.soil3.episode.episode_v1 import EpisodeStore
 from services.soil3.phase3_bridge import Phase3Bridge
 from services.soil3.runner.runner_v1 import DryRunRunner, RunnerStore
@@ -52,7 +53,12 @@ CONFIG_FIELDS = {
     "prompt_path",
     "strategy_validator",
     "gate_policy",
+    "trigger_policy",
+    "trigger_event_policy",
 }
+# Optional additions keep existing config files deployable unchanged.
+OPTIONAL_CONFIG_FIELDS = frozenset({"trigger_policy", "trigger_event_policy"})
+REQUIRED_CONFIG_FIELDS = CONFIG_FIELDS - OPTIONAL_CONFIG_FIELDS
 GATE_V2_FIELDS = frozenset({
     "schema_version",
     "gate_id",
@@ -130,10 +136,16 @@ class RuntimeConfig:
     prompt_path: Path
     strategy_validator: dict[str, Any]
     gate_policy: GatePolicy
+    trigger_policy: str = "classification_v1"
+    trigger_event_policy: dict[str, Any] = None  # type: ignore[assignment]
 
     @classmethod
     def from_dict(cls, value: Any) -> "RuntimeConfig":
-        if not isinstance(value, dict) or set(value) != CONFIG_FIELDS:
+        if (
+            not isinstance(value, dict)
+            or not REQUIRED_CONFIG_FIELDS <= set(value)
+            or set(value) - CONFIG_FIELDS
+        ):
             raise ValueError("runtime config fields are invalid")
         if value["device_code"] != "soil3":
             raise ValueError("runtime config device_code must be soil3")
@@ -195,6 +207,16 @@ class RuntimeConfig:
             or trigger_min_cloud_interval_seconds <= 0
         ):
             raise ValueError("runtime config cloud interval must be a positive integer")
+        trigger_policy = value.get("trigger_policy", "classification_v1")
+        if trigger_policy not in {"classification_v1", "business_event_v1"}:
+            raise ValueError("runtime config trigger policy is invalid")
+        raw_event_policy = value.get("trigger_event_policy")
+        try:
+            event_policy = EventPolicy.from_dict(
+                raw_event_policy if raw_event_policy is not None else {}
+            )
+        except (TypeError, ValueError):
+            raise ValueError("runtime config trigger event policy is invalid") from None
         if value["phase3_service_unit"] != "phase3_soil3.service":
             raise ValueError("runtime config phase3_service_unit must be phase3_soil3.service")
 
@@ -237,6 +259,8 @@ class RuntimeConfig:
             prompt_path=Path(value["prompt_path"]),
             strategy_validator=dict(strategy_validator),
             gate_policy=GatePolicy.from_dict(value["gate_policy"]),
+            trigger_policy=trigger_policy,
+            trigger_event_policy=event_policy.to_dict(),
         )
 
     def strategy_config(self) -> dict[str, Any]:
@@ -546,6 +570,22 @@ def _start_trigger_shadow(
             phase3_system_state = json.loads(config.phase3_state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             phase3_system_state = None
+        business_mode = config.trigger_policy == "business_event_v1"
+        memory_path = config.runtime_root / "trigger_state" / "trigger_memory.json"
+        memory = None
+        if business_mode and memory_path.exists():
+            try:
+                memory = json.loads(memory_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                raise RuntimeError("trigger memory unavailable") from None
+        series = (
+            store.recent_humidity_series(
+                now=state.get("observed_at"),
+                window_seconds=STATE_TREND_HISTORY_SECONDS,
+            )
+            if business_mode
+            else None
+        )
         context = build_decision_context(
             state,
             deny_age_seconds=config.gate_policy.deny_age_seconds,
@@ -553,11 +593,15 @@ def _start_trigger_shadow(
             receipt_dir=config.feedback_action_receipt_dir,
             feedback_dir=config.feedback_dir,
             phase3_system_state=phase3_system_state,
+            humidity_series=series,
         )
         decision = evaluate_trigger(
             context,
             baseline.get("semantic_projection") if baseline else None,
             deny_age_seconds=config.gate_policy.deny_age_seconds,
+            trigger_policy=config.trigger_policy,
+            event_policy=config.trigger_event_policy,
+            memory=memory,
         )
         decision = enforce_cloud_min_interval(
             decision,
@@ -572,6 +616,8 @@ def _start_trigger_shadow(
             context,
             baseline.get("ref") if baseline else None,
         )
+        if decision.trigger_memory is not None:
+            atomic_write_json(memory_path, decision.trigger_memory)
     return _TriggerAdmission(
         store=store,
         path=str(store.path_for(trace_id)),

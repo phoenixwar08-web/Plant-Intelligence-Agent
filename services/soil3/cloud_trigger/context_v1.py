@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -241,6 +242,7 @@ def build_decision_context(
     receipt_dir: str | Path | None = None,
     feedback_dir: str | Path | None = None,
     phase3_system_state: Any = None,
+    humidity_series: Any = None,
 ) -> dict[str, Any]:
     """Project State and durable local records; unknown never becomes safe."""
 
@@ -299,6 +301,10 @@ def build_decision_context(
             key: _finite(trends.get(key))
             for key in ("humidity_1h", "humidity_3h", "humidity_6h")
         },
+        # Ordered (observed_at, humidity) points for business-event detection.
+        # Rebuilt from previously persisted Trigger snapshots by the caller; it
+        # is diagnostic input only and never an irrigation fact.
+        "humidity_series_6h": _humidity_series(humidity_series),
         "data_quality": {
             "soil_age_sec": _finite(quality.get("soil_age_sec")),
             "phase3_state_age_sec": _finite(quality.get("phase3_state_age_sec")),
@@ -309,6 +315,41 @@ def build_decision_context(
         "last_real_action": action,
         "feedback_status": _feedback_summary(action, feedback_dir),
     }
+
+
+SERIES_MAX_POINTS = 512
+
+
+def _humidity_series(value: Any) -> list[dict[str, Any]]:
+    """Normalize recent humidity points; unparseable rows are dropped, not guessed."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    points: dict[float, float] = {}
+    for item in value:
+        if isinstance(item, dict):
+            stamp = item.get("observed_at")
+            raw_value = item.get("humidity_percent", item.get("humidity"))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            stamp, raw_value = item[0], item[1]
+        else:
+            continue
+        seconds = _timestamp_seconds(stamp)
+        number = _finite(raw_value)
+        if seconds is None or number is None or not (0.0 < number <= 100.0):
+            continue
+        points[seconds] = round(number, 3)
+    ordered = sorted(points.items())[-SERIES_MAX_POINTS:]
+    return [
+        {
+            "observed_at": (
+                datetime.fromtimestamp(seconds, timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            ),
+            "humidity_percent": number,
+        }
+        for seconds, number in ordered
+    ]
 
 
 def _relation(value: Any) -> str:
