@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "watering_decision_input.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision_context",
+    "current_observation",
+    "recent_history",
+    "current_episode",
+    "script_reference",
+    "historical_reference",
+    "execution_constraints"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "watering_decision_input.v1"
+    },
+    "decision_context": {
+      "type": "object",
+      "required": [
+        "decision_id",
+        "care_process_id",
+        "device_code",
+        "observed_at",
+        "deadline_at",
+        "evidence_fields",
+        "input_rules"
+      ],
+      "properties": {
+        "evidence_fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)*$"
+          }
+        },
+        "input_rules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_catalog_truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "current_observation": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "recent_history": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "current_episode": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "script_reference": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "historical_reference": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "execution_constraints": {
+      "type": "object",
+      "required": [
+        "min_seconds",
+        "max_seconds",
+        "min_check_seconds",
+        "max_check_seconds"
+      ],
+      "properties": {
+        "min_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "min_check_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_check_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  }
+}

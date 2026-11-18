@@ -480,7 +480,9 @@ def _interruptible_sleep(seconds: float) -> None:
     # monotonic：不受 NTP 跳变影响，睡眠窗口计算永远正确。
     end = time.monotonic() + seconds
     while _RUNNING and time.monotonic() < end:
-        time.sleep(min(1.0, end - time.monotonic()))
+        if _brain is not None and _brain.should_wake_for_ai():
+            return
+        time.sleep(max(0.0, min(1.0, end - time.monotonic())))
 
 
 # ===========================================================================

@@ -8,8 +8,20 @@ from typing import Any
 from .runtime_v1 import RuntimeConfig, run_pipeline, write_state_snapshot
 
 
-def load_config(path: Path) -> RuntimeConfig:
+def load_config(path: Path, *, watering_mode: bool = False) -> RuntimeConfig:
     value: Any = json.loads(path.read_text(encoding="utf-8"))
+    if watering_mode and isinstance(value, dict):
+        # Observed production compatibility: these configure the retired
+        # semantic Trigger, not the explicit Phase3 request worker. Adapt only
+        # this command; pipeline/default loading remains strict and unchanged.
+        value = dict(value)
+        for key in ("trigger_policy", "trigger_event_policy"):
+            if key in value:
+                if key == "trigger_policy" and value[key] != "business_event_v1":
+                    raise ValueError("unsupported legacy trigger policy")
+                if key == "trigger_event_policy" and not isinstance(value[key], dict):
+                    raise ValueError("legacy trigger event policy must be an object")
+                del value[key]
     return RuntimeConfig.from_dict(value)
 
 
@@ -26,10 +38,16 @@ def state_summary(config: RuntimeConfig) -> dict[str, Any]:
 
 def run(argv: list[str] | None = None) -> dict[str, Any]:
     parser = argparse.ArgumentParser(description="soil3 proposal-only agent runtime")
-    parser.add_argument("command", choices=("state", "pipeline"))
+    parser.add_argument("command", choices=("state", "pipeline", "watering"))
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--request-dir", type=Path)
     args = parser.parse_args(argv)
-    config = load_config(args.config)
+    config = load_config(args.config, watering_mode=args.command == "watering")
+    if args.command == "watering":
+        if args.request_dir is None:
+            parser.error("watering requires --request-dir")
+        from .watering_worker import process_request
+        return process_request(config, args.request_dir)
     if args.command == "pipeline":
         return run_pipeline(config)
     return state_summary(config)

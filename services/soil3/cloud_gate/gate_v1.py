@@ -50,11 +50,14 @@ class GatePolicy:
     deny_age_seconds: float
     window_seconds: float
     max_exploration_water_seconds: float
+    native_preferences_advisory: bool = False
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "GatePolicy":
-        if not isinstance(value, dict) or set(value) != POLICY_FIELDS:
+        if not isinstance(value, dict) or set(value) - {"native_preferences_advisory"} != POLICY_FIELDS:
             raise ValueError("gate policy fields are invalid")
+        if not isinstance(value.get("native_preferences_advisory", False), bool):
+            raise ValueError("native_preferences_advisory must be boolean")
         warning_age_seconds = _finite_nonnegative(
             value["warning_age_seconds"], "warning_age_seconds"
         )
@@ -72,6 +75,7 @@ class GatePolicy:
             deny_age_seconds=deny_age_seconds,
             window_seconds=window_seconds,
             max_exploration_water_seconds=max_exploration_water_seconds,
+            native_preferences_advisory=value.get("native_preferences_advisory", False),
         )
 
 
@@ -167,6 +171,8 @@ def evaluate_gate(
     policy: GatePolicy,
     exploration_requested: bool,
     ledger: Any = None,
+    *,
+    phase3_system_state: Any = None,
 ) -> dict[str, Any]:
     """Return a non-executing gate.v1 decision for one state-bound strategy."""
     reasons: list[str] = []
@@ -220,9 +226,22 @@ def evaluate_gate(
             continue
         if name == "predictor_circuit":
             continue
-        active = _flag_active(flags[name])
+        if policy.native_preferences_advisory or name in {
+            "dynamic_cooldown", "hard_safety_low_guard", "recent_response_guard"
+        }:
+            # Reuse the existing typed/time-aware Phase3 fact interpretation.
+            # Parsing cannot depend on whether ordinary preferences are advisory.
+            # This does not rewrite the frozen State or its binding hash.
+            from services.soil3.cloud_trigger.context_v1 import _active_state
+            status = _active_state(name, flags[name], observed_at=state.get("observed_at"),
+                                   phase3_system_state=phase3_system_state)
+            active = {"active":True,"inactive":False}.get(status)
+        else:
+            active = _flag_active(flags[name])
         if active is None:
             reasons.append(f"safety_flag_invalid:{name}")
+        elif active and policy.native_preferences_advisory and name in {"dynamic_cooldown", "watering_trigger_guard"}:
+            warnings.append(f"native_preference_advisory:{name}")
         elif active:
             reasons.append(f"safety_flag_active:{name}")
 

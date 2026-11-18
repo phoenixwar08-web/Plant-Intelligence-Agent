@@ -96,6 +96,18 @@ FILE_PATHS = {
 #             战区/Layer1 天花板仍受 WATER_SEC_MAX_HARD 约束。
 # ===========================================================================
 SYSTEM_CONSTANTS = {
+    # Opt-in policy, not an evolvable gene. Missing source/budget fails closed.
+    "SCRIPT_AI_ENABLED": False,
+    "SCRIPT_AI_REQUEST_DIR": None,
+    "SCRIPT_AI_MIN_CHECK_SEC": None,
+    "SCRIPT_AI_MAX_CHECK_SEC": None,
+    "MODEL_PROPOSAL_ENABLED": False,
+    "MODEL_PROPOSAL_PATH": None,
+    # Owner-confirmed mandatory rolling all-Phase3 command budget.
+    # Verified ledger bootstrap is required before ANY positive command.
+    "MODEL_PROPOSAL_BUDGET_24H_SEC": 30.0,
+    "MODEL_PROPOSAL_MAX_AGE_SEC": 300.0,
+    "MODEL_PROPOSAL_MAX_HUMIDITY_DRIFT": 1.0,
     # A 类：架构级
     "MAIN_LOOP_INTERVAL_SEC":    180,       #主循环心跳间隔；缩短观察周期，但不等于更频繁开泵
     "PREDICT_HORIZON_STEPS":     12,        # Upgrade-1：Phase2 预测步长（步）

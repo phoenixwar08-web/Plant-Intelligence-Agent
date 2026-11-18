@@ -84,9 +84,12 @@ def evaluate_trigger(
     baseline_context: Any,
     *,
     deny_age_seconds: float,
+    semantic_filter_enabled: bool = True,
 ) -> TriggerDecision:
     """Classify cloud invocation value while preserving local fail-closed facts."""
 
+    if not isinstance(semantic_filter_enabled, bool):
+        raise ValueError("semantic_filter_enabled must be boolean")
     context = context if isinstance(context, dict) else {}
     boundaries = context.get("boundaries") if isinstance(context.get("boundaries"), dict) else {}
     quality = context.get("data_quality") if isinstance(context.get("data_quality"), dict) else {}
@@ -130,6 +133,11 @@ def evaluate_trigger(
         reasons.append("predictor_circuit_open")
     if reasons:
         return TriggerDecision(LOCAL_SAFETY_ONLY, tuple(reasons))
+
+    if not semantic_filter_enabled:
+        # Analysis admission is not permission to actuate. Execution protections
+        # remain Phase3's responsibility; retain the independent danger checks.
+        return TriggerDecision(CALL_QWEN, ("semantic_filter_disabled",))
 
     protections = [name for name in PROTECTION_FLAGS if flags.get(name) == "active"]
     if protections:

@@ -130,11 +130,14 @@ class RuntimeConfig:
     prompt_path: Path
     strategy_validator: dict[str, Any]
     gate_policy: GatePolicy
+    trigger_enabled: bool = True
 
     @classmethod
     def from_dict(cls, value: Any) -> "RuntimeConfig":
-        if not isinstance(value, dict) or set(value) != CONFIG_FIELDS:
+        if not isinstance(value, dict) or set(value) - {"trigger_enabled"} != CONFIG_FIELDS:
             raise ValueError("runtime config fields are invalid")
+        if not isinstance(value.get("trigger_enabled", True), bool):
+            raise ValueError("trigger_enabled must be boolean")
         if value["device_code"] != "soil3":
             raise ValueError("runtime config device_code must be soil3")
         provider_mode = value["provider_mode"]
@@ -237,6 +240,7 @@ class RuntimeConfig:
             prompt_path=Path(value["prompt_path"]),
             strategy_validator=dict(strategy_validator),
             gate_policy=GatePolicy.from_dict(value["gate_policy"]),
+            trigger_enabled=value.get("trigger_enabled", True),
         )
 
     def strategy_config(self) -> dict[str, Any]:
@@ -303,7 +307,7 @@ class RuntimeConfig:
         return self.runtime_root / "runs"
 
 
-def write_state_snapshot(config: RuntimeConfig) -> dict[str, Any]:
+def write_state_snapshot(config: RuntimeConfig, *, history_output=None) -> dict[str, Any]:
     snapshot = build_health_snapshot(
         config.device_code,
         str(config.phase3_state_path),
@@ -321,6 +325,17 @@ def write_state_snapshot(config: RuntimeConfig) -> dict[str, Any]:
         snapshot,
         parameters,
     )
+    if history_output is not None:
+        # Same canonical snapshot as State; no extra DB query or raw payload.
+        sensor_fields = ('timestamp', 'humidity', 'temperature', 'ec_raw', 'lux', 'water_sec')
+        rows = [{key: row[key] for key in sensor_fields if key in row}
+                for row in snapshot.get('sensor_readings', []) if isinstance(row, dict)]
+        history_output.update(sensor_series=rows[:256], trend_summary=state.get('trends'),
+            watering_windows=[{'timestamp': row.get('timestamp'), 'seconds': row['water_sec'],
+                               'record_type': 'sampling_window_total'}
+                              for row in rows[:256] if row.get('water_sec') is not None],
+            source='same_canonical_health_snapshot',
+            missing_facts=([] if rows else ['sensor_series']) + ([] if any('water_sec' in row for row in rows) else ['watering_windows']))
     atomic_write_json(config.state_output, state)
     return state
 
@@ -558,6 +573,7 @@ def _start_trigger_shadow(
             context,
             baseline.get("semantic_projection") if baseline else None,
             deny_age_seconds=config.gate_policy.deny_age_seconds,
+            semantic_filter_enabled=config.trigger_enabled,
         )
         decision = enforce_cloud_min_interval(
             decision,
@@ -981,11 +997,17 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
         trace_id,
         strategy_ref=strategy_ref,
     )
+    gate_context = {}
+    try:
+        gate_context["phase3_system_state"] = json.loads(config.phase3_state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        gate_context["phase3_system_state"] = None
     gate = evaluate_gate_v2(
         state=state,
         strategy=strategy,
         policy=config.gate_policy,
         exploration_requested=False,
+        **gate_context,
     )
     atomic_write_json(config.gate_output, gate)
     gate_ref = _artifact_ref(
@@ -1128,4 +1150,12 @@ def run_pipeline(config: RuntimeConfig) -> dict[str, Any]:
     atomic_write_json(config.runs_dir / f"{run_id}.json", record)
     if bridge_status == "rejected":
         raise RuntimeError("phase3 bridge verification was rejected")
+    if bridge_status == "verified" and config.provider_mode == "qwen_dashscope":
+        # Non-executing publication; no Trace or Bridge record gains actuator
+        # authority. Phase3 must be independently opted in and reverify facts.
+        atomic_write_json(
+            config.runtime_root / "model_proposals" / "latest.json",
+            dict(schema_version="phase3_model_proposal.v1", state=state,
+                 strategy=strategy, gate=gate, runner=runner_result),
+        )
     return record
