@@ -75,17 +75,24 @@ def resolve_field(context, path):
     return value
 
 
+MAX_EVIDENCE_FIELDS = 192
+
+
 def prepare_input(context):
     """Publish a bounded reference vocabulary after all context is assembled."""
     context = copy.deepcopy(context)
     paths = []
     prefixes = [
-        'current_observation.sensor', 'current_observation.air', 'current_observation.vision',
+        'current_observation.sensor', 'current_observation.air',
+        'script_reference', 'recent_history.trend_summary', 'current_episode.response_so_far',
         'current_observation.data_quality', 'current_observation.observed_at',
-        'execution_constraints.control_reference', 'execution_constraints.safety_state',
-        'recent_history.trend_summary', 'recent_history.controller_command_state',
-        'current_episode.baseline', 'current_episode.response_so_far', 'current_episode.executed_actions',
-        'script_reference', 'historical_reference',
+        'execution_constraints.control_reference',
+        'execution_constraints.safety_state.flags.recent_response_guard',
+        'current_observation.vision.facts.0.overall_visual_state',
+        'current_observation.vision.facts.0.change_vs_previous',
+        'execution_constraints.safety_state', 'current_observation.vision',
+        'recent_history.controller_command_state',
+        'current_episode.baseline', 'current_episode.executed_actions', 'historical_reference',
         'recent_history.sensor_series', 'recent_history.watering_windows']
     truncated = False
 
@@ -93,7 +100,9 @@ def prepare_input(context):
         nonlocal truncated
         if value is None or value == [] or value == {}:
             return
-        if len(paths) >= 128:
+        if path in paths:
+            return
+        if len(paths) >= MAX_EVIDENCE_FIELDS:
             truncated = True
             return
         paths.append(path)
@@ -148,7 +157,7 @@ def validate_input(context):
     if not isinstance(decision, dict):
         raise ValueError('watering_input_decision_context')
     fields = decision.get('evidence_fields')
-    if not isinstance(fields, list) or not 1 <= len(fields) <= 128:
+    if not isinstance(fields, list) or not 1 <= len(fields) <= MAX_EVIDENCE_FIELDS:
         raise ValueError('watering_input_evidence_catalog')
     for field in fields:
         resolve_field(context, field)

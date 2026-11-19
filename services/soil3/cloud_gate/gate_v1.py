@@ -192,6 +192,11 @@ def evaluate_gate(
 
     validation = StrategyValidator().validate(strategy, state)
     reasons.extend(f"strategy_invalid:{code}" for code in validation.reason_codes)
+    actions = strategy.get("actions")
+    observe_only = (
+        not validation.reason_codes and isinstance(actions, list) and bool(actions)
+        and all(isinstance(action, dict) and action.get("type") == "observe" for action in actions)
+    )
 
     soil = state.get("soil")
     if not isinstance(soil, dict) or _finite_nonnegative_or_none(soil.get("humidity_percent")) is None:
@@ -240,6 +245,8 @@ def evaluate_gate(
             active = _flag_active(flags[name])
         if active is None:
             reasons.append(f"safety_flag_invalid:{name}")
+        elif active and observe_only and name == "recent_response_guard":
+            warnings.append(f"safety_flag_active:{name}")
         elif active and policy.native_preferences_advisory and name in {"dynamic_cooldown", "watering_trigger_guard"}:
             warnings.append(f"native_preference_advisory:{name}")
         elif active:

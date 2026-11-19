@@ -47,7 +47,12 @@ def process_request(config, request_dir, *, session=None):
         if admission.decision == 'LOCAL_SAFETY_ONLY':
             store.cancel('local_safety_only', decision_id)
             return {'status': 'local_safety_only', 'decision_id': decision_id}
-        _, vision_context = _collect_vision(config)
+        vision_diagnostics = {}
+        vision_association, vision_context = _collect_vision(config, diagnostics=vision_diagnostics)
+        atomic_write_json(artifact_dir / 'vision_status.json', {
+            'availability': vision_association.get('availability', 'unavailable'),
+            **vision_diagnostics,
+        })
         _, experience_context = _collect_experience(config, state, decision_id)
         vision = project_optional_context(vision_context, kind='vision')
         if vision.get('availability') == 'available':
@@ -83,10 +88,7 @@ def process_request(config, request_dir, *, session=None):
         validation = chain['validation']
         if not validation['accepted']:
             failure = chain.get('failure')
-            # Explicit provider failure falls back immediately. Malformed output
-            # waits until the original deadline; never executes or fabricates a fix.
-            if failure:
-                store.fail(decision_id, failure['code'])
+            store.fail(decision_id, failure['code'] if failure else 'invalid_output')
             return {'status': 'model_failed' if failure else 'invalid_output', 'decision_id': decision_id}
         strategy = validation['strategy']
         try:

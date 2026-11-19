@@ -373,9 +373,11 @@ def _unavailable_optional_context(availability: str) -> tuple[dict[str, Any], di
     )
 
 
-def _collect_vision(config: RuntimeConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+def _collect_vision(config: RuntimeConfig, *, diagnostics=None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Collect public Vision facts without knowing Vision's private storage layout."""
     if not config.vision_enabled:
+        if diagnostics is not None:
+            diagnostics["reason"] = "disabled"
         return _unavailable_optional_context("not_requested")
     try:
         from services.soil3.vision import (
@@ -387,8 +389,16 @@ def _collect_vision(config: RuntimeConfig) -> tuple[dict[str, Any], dict[str, An
 
         result = capture_and_analyze_once()
     except (ImportError, VisionConfigurationError):
+        if diagnostics is not None:
+            diagnostics["reason"] = "vision_setup_failed"
         return _unavailable_optional_context("unavailable")
 
+    if diagnostics is not None:
+        diagnostics["capture_status"] = result.status
+        diagnostics["outcomes"] = [
+            {"status": outcome.status, "error_code": outcome.error_code}
+            for outcome in result.outcomes
+        ]
     reference = getattr(result, "manifest_ref", None)
     if reference is None:
         return _unavailable_optional_context("unavailable")
