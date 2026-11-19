@@ -220,12 +220,17 @@ def run_chain(
     session: Any = None,
     vision_context: Optional[Dict[str, Any]] = None,
     experience_context: Optional[Dict[str, Any]] = None,
+    watering_input: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     run_id = str(uuid.uuid4())
     started_at = utc_now()
     model_input = project_state_for_model(state)
     model_input["vision"] = project_optional_context(vision_context, kind="vision")
     model_input["experience"] = project_optional_context(experience_context, kind="experience")
+    binding_input = copy.deepcopy(model_input)
+    watering_output = None
+    if watering_input is not None:
+        model_input = copy.deepcopy(watering_input)
     raw_content = fixture_content
     cloud_meta: Dict[str, Any] = {
         "provider": "fixture" if fixture_content is not None else config.get("provider"),
@@ -265,12 +270,23 @@ def run_chain(
             validation = {"accepted": False, "reason_codes": ["invalid_model_json"], "strategy": None}
         else:
             if fixture_content is None:
+                watering_format_error = None
+                if watering_input is not None:
+                    from .watering_decision import validate_output, adapt_output
+                    try:
+                        watering_output = validate_output(parsed, watering_input)
+                        parsed = adapt_output(watering_output)
+                    except (ValueError, TypeError, KeyError) as error:
+                        watering_format_error = str(error)
+                        parsed = {}
                 missing = sorted(MODEL_DECISION_FIELDS - set(parsed))
                 unknown = sorted(set(parsed) - MODEL_DECISION_FIELDS)
                 reasons = []
-                if missing:
+                if watering_format_error:
+                    reasons.append("invalid_watering_output:" + watering_format_error)
+                if missing and not watering_format_error:
                     reasons.append("model_decision_missing_fields:" + ",".join(missing))
-                if unknown:
+                if unknown and not watering_format_error:
                     reasons.append("model_decision_unknown_fields:" + ",".join(unknown))
                 if reasons:
                     validation = {"accepted": False, "reason_codes": reasons, "strategy": None}
@@ -282,8 +298,8 @@ def run_chain(
                         "schema_version": "strategy.v1",
                         "strategy_id": str(uuid.uuid4()),
                         "device_code": state.get("device_code"),
-                        "state_observed_at": model_input.get("observed_at"),
-                        "state_generated_at": model_input.get("generated_at"),
+                        "state_observed_at": binding_input.get("observed_at"),
+                        "state_generated_at": binding_input.get("generated_at"),
                         STATE_HASH_FIELD: fingerprint(state),
                         "created_at": normalize_timestamp(utc_now()),
                         "actions": parsed["actions"],
@@ -293,7 +309,7 @@ def run_chain(
                         "model": {
                             "provider": cloud_meta["provider"],
                             "name": cloud_meta["model"],
-                            "prompt_version": PROMPT_VERSION,
+                            "prompt_version": ("watering-decision-prompt.v1" if watering_input is not None else PROMPT_VERSION),
                         },
                         "execution": {"mode": "proposal_only", "actuator_commands_allowed": False},
                     }
@@ -325,6 +341,7 @@ def run_chain(
         "state_generated_at": state.get("generated_at"),
         "state_sha256": fingerprint(state),
         "model_input": model_input,
+        "watering_output": watering_output,
         "mode": "proposal_only",
         "actuator_commands_allowed": False,
         "cloud": cloud_meta,

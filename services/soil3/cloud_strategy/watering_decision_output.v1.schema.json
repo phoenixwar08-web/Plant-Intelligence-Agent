@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "watering_decision_output.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "watering_seconds",
+    "reason_summary",
+    "evidence",
+    "uncertainties",
+    "next_check_after_seconds"
+  ],
+  "properties": {
+    "action": {
+      "enum": [
+        "water",
+        "observe"
+      ]
+    },
+    "watering_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "reason_summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 600
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "field",
+          "finding"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)*$"
+          },
+          "finding": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "uncertainties": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "next_check_after_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "observe"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "watering_seconds": {
+            "const": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "watering_seconds": {
+            "exclusiveMinimum": 0
+          }
+        }
+      }
+    }
+  ]
+}

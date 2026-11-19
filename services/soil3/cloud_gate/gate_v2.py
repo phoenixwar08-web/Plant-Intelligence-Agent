@@ -14,6 +14,8 @@ def evaluate_gate_v2(
     policy: GatePolicy,
     exploration_requested: Any,
     ledger: Any = None,
+    *,
+    phase3_system_state: Any = None,
 ) -> dict[str, Any]:
     """Return a gate.v2 record with a formal Strategy content binding.
 
@@ -30,6 +32,7 @@ def evaluate_gate_v2(
         policy,
         exploration_requested,
         ledger,
+        phase3_system_state=phase3_system_state,
     )
     record["schema_version"] = "gate.v2"
     record["strategy_sha256"] = (

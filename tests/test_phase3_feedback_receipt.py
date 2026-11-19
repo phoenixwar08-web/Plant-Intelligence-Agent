@@ -48,6 +48,16 @@ class NativePhase3ReceiptTests(unittest.TestCase):
         else:
             sys.modules["fcntl"] = cls.previous_fcntl
 
+    def test_action_snapshot_reads_effective_safety_line(self):
+        actuator = object.__new__(self.decision_brain.ActuatorLayer)
+        actuator.cfg = SimpleNamespace(FC=45.0, TARGET_LOW=32.0, K_P=1.5)
+        state = {"hard_safety_low_guard": {"effective_low": 27.179}}
+        with mock.patch.object(self.decision_brain, "_load_system_state", return_value=state), mock.patch.object(
+            self.decision_brain, "build_health_snapshot", return_value={}
+        ):
+            result = actuator._capture_action_state()
+        self.assertEqual(result["safety"]["hard_safety_low"], 27.179)
+
     def test_receipt_is_durable_before_native_pump_activation(self):
         """Removing pre-activation persistence would expose an untraceable watering command."""
         with tempfile.TemporaryDirectory() as directory:

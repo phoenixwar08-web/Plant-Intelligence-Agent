@@ -239,6 +239,7 @@ class StrategyValidator:
         elif len(summary) > PROTOCOL_MAX_REASON_SUMMARY_ITEMS:
             reasons.append("reason_summary_too_long")
 
+        watering_format = isinstance(value.get("model"), dict) and value["model"].get("prompt_version") == "watering-decision-prompt.v1"
         outcome = value.get("expected_outcome")
         if not isinstance(outcome, dict):
             reasons.append("invalid_expected_outcome")
@@ -250,7 +251,7 @@ class StrategyValidator:
             if missing_outcome:
                 reasons.append("expected_outcome_missing_fields:" + ",".join(missing_outcome))
             if "soil_moisture" in outcome and (
-                not isinstance(outcome["soil_moisture"], str) or not outcome["soil_moisture"].strip()
+                (not isinstance(outcome["soil_moisture"], str) or not outcome["soil_moisture"].strip()) and not (watering_format and outcome["soil_moisture"] is None)
             ):
                 reasons.append("expected_outcome_invalid_field:soil_moisture")
             risk_notes = outcome.get("risk_notes")
@@ -263,7 +264,7 @@ class StrategyValidator:
                     reasons.append("expected_outcome_risk_notes_too_long")
 
         confidence = value.get("confidence")
-        if not _is_number(confidence) or not 0 <= float(confidence) <= 1:
+        if not (watering_format and confidence is None) and (not _is_number(confidence) or not 0 <= float(confidence) <= 1):
             reasons.append("invalid_confidence")
 
         model = value.get("model")
@@ -273,7 +274,7 @@ class StrategyValidator:
             for field in ("provider", "name"):
                 if not isinstance(model.get(field), str) or not model[field].strip():
                     reasons.append(f"invalid_model_field:{field}")
-            if model.get("prompt_version") != PROMPT_VERSION:
+            if model.get("prompt_version") not in {PROMPT_VERSION, "watering-decision-prompt.v1"}:
                 reasons.append("invalid_model_field:prompt_version")
             unknown_model = sorted(set(model) - ALLOWED_MODEL_FIELDS)
             if unknown_model:

@@ -83,19 +83,19 @@
       "type": "object",
       "required": ["soil_moisture", "risk_notes"],
       "properties": {
-        "soil_moisture": {"type": "string", "minLength": 1},
+        "soil_moisture": {"type": ["string", "null"], "minLength": 1},
         "risk_notes": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1}}
       },
       "additionalProperties": false
     },
-    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
     "model": {
       "type": "object",
       "required": ["provider", "name", "prompt_version"],
       "properties": {
         "provider": {"type": "string", "minLength": 1},
         "name": {"type": "string", "minLength": 1},
-        "prompt_version": {"const": "strategy-prompt.v2"}
+        "prompt_version": {"enum": ["strategy-prompt.v2", "watering-decision-prompt.v1"]}
       },
       "additionalProperties": false
     },
@@ -109,6 +109,13 @@
       "additionalProperties": false
     }
   },
+  "allOf": [{
+    "if": {"properties": {"model": {"properties": {"prompt_version": {"const": "strategy-prompt.v2"}}}}},
+    "then": {"properties": {
+      "confidence": {"type": "number"},
+      "expected_outcome": {"properties": {"soil_moisture": {"type": "string"}}}
+    }}
+  }],
   "$defs": {
     "rfc3339_utc": {
       "type": "string",

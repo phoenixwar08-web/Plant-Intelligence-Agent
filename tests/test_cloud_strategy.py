@@ -1372,7 +1372,7 @@ class PromptVersionTests(unittest.TestCase):
 
     def test_schema_pin_matches_the_validator_constant(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(PROMPT_VERSION, schema["properties"]["model"]["properties"]["prompt_version"]["const"])
+        self.assertIn(PROMPT_VERSION, schema["properties"]["model"]["properties"]["prompt_version"]["enum"])
 
     def test_prompt_file_declares_its_own_version(self):
         text = PROMPT_PATH.read_text(encoding="utf-8")

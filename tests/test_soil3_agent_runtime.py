@@ -632,12 +632,13 @@ class PipelineTests(StateProducerTests):
         self.addCleanup(self._trigger_call_patcher.stop)
 
     @staticmethod
-    def admitted_gate(state, strategy, policy, exploration_requested):
+    def admitted_gate(state, strategy, policy, exploration_requested, *, phase3_system_state=None):
         gate = evaluate_gate_v2(
             state,
             strategy,
             policy,
             exploration_requested,
+            phase3_system_state=phase3_system_state,
         )
         gate["decision"] = "allow"
         gate["reason_codes"] = []
@@ -1731,7 +1732,7 @@ print(json.dumps({
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
         from services.soil3.cloud_gate.gate_v1 import evaluate_gate
 
-        def legacy_gate(state, strategy, policy, exploration_requested):
+        def legacy_gate(state, strategy, policy, exploration_requested, **gate_context):
             gate = evaluate_gate(state, strategy, policy, exploration_requested)
             gate["decision"] = "allow"
             gate["reason_codes"] = []
@@ -1761,7 +1762,7 @@ print(json.dumps({
         """A Gate v2 bound to different Strategy content fails closed."""
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
 
-        def mismatched_gate(state, strategy, policy, exploration_requested):
+        def mismatched_gate(state, strategy, policy, exploration_requested, **gate_context):
             gate = self.admitted_gate(
                 state, strategy, policy, exploration_requested
             )
@@ -1844,7 +1845,7 @@ print(json.dumps({
                 ]
                 return strategy
 
-            def exhausted_gate(state, strategy, policy, exploration_requested):
+            def exhausted_gate(state, strategy, policy, exploration_requested, **gate_context):
                 nonlocal actual_gate
                 actual_gate = evaluate_gate_v2(
                     state,
@@ -1898,7 +1899,7 @@ print(json.dumps({
         from services.soil3.agent_runtime.runtime_v1 import RuntimeConfig, run_pipeline
 
         def corrupt_gate(updates):
-            def evaluate(state, strategy, policy, exploration_requested):
+            def evaluate(state, strategy, policy, exploration_requested, **gate_context):
                 gate = self.admitted_gate(
                     state, strategy, policy, exploration_requested
                 )

@@ -126,6 +126,7 @@ from config_manager import (
 )
 
 from runtime_io import (
+    file_lock,
     append_csv_row_locked,
     load_json_locked,
     read_csv_dicts_locked,
@@ -2408,10 +2409,11 @@ class ActuatorLayer:
             irrigation_trials_path=str(FILE_PATHS["IRRIGATION_TRIALS"]),
             service_unit="phase3_soil3.service",
         )
+        safety_guard = _load_system_state().get("hard_safety_low_guard")
         parameters = {
             "FC": self.cfg.FC,
             "TARGET_LOW": self.cfg.TARGET_LOW,
-            "HARD_SAFETY_LOW": self.cfg.HARD_SAFETY_LOW,
+            "HARD_SAFETY_LOW": safety_guard.get("effective_low") if isinstance(safety_guard, dict) else None,
             "K_P": self.cfg.K_P,
         }
         return StateBuilder(DEVICE_CODE_DEFAULT).build_from_health_snapshot(
@@ -2469,6 +2471,7 @@ class ActuatorLayer:
         返回：
           PendingSoak  : 挂载到 DecisionBrain._pending_soak 的哨兵对象
         """
+        self._last_feedback_action_id = None
         receipt = None
         receipt_store = self._receipt_store
         command_evidence = None
@@ -2490,6 +2493,7 @@ class ActuatorLayer:
                     water_sec,
                     _utc_timestamp(),
                 )
+        self._last_feedback_action_id = receipt['action_id'] if receipt is not None else None
         try:
             command_evidence = self._activate_pump(water_sec)
         except Exception as error:
@@ -2907,7 +2911,15 @@ class ActuatorLayer:
 
     def _activate_pump(self, water_sec: float) -> Optional[dict[str, str]]:
         """对齐 phase1 send_mqtt_cmd：publish on → sleep → publish off。"""
-        sec = max(0.0, float(water_sec))
+        hard_cap = self.cfg.get_constant("WATER_SEC_MAX_HARD")
+        if (
+            isinstance(water_sec, bool) or not isinstance(water_sec, (int, float))
+            or not math.isfinite(water_sec) or water_sec < 0
+            or isinstance(hard_cap, bool) or not isinstance(hard_cap, (int, float))
+            or not math.isfinite(hard_cap) or hard_cap <= 0 or water_sec > hard_cap
+        ):
+            raise PumpExecutionError("invalid or over-limit pump duration")
+        sec = float(water_sec)
 
         if sec <= 0:
             logger.info("  >>> [物理执行] 决议为 0s，水泵保持静默。")
@@ -2916,9 +2928,17 @@ class ActuatorLayer:
         logger.info(f"  >>> [物理执行] 准备下发灌溉指令，时长: {sec}s")
         pump_was_started = False
         try:
+            # One final admission point for native, fallback, controlled and
+            # model commands. A missing/corrupt ledger is never an empty day.
+            from services.soil3.phase3.model_proposal import PumpBudget
+            budget = PumpBudget(Path(FILE_PATHS["SYSTEM_STATE"]).parent / "watering_budget.sqlite")
+            budget_key = budget.reserve("phase3", sec,
+                self.cfg.get_constant("MODEL_PROPOSAL_BUDGET_24H_SEC"), time.time())
+            # A publish can reach the device before acknowledgement fails.
+            # Treat every ON attempt as uncertain until OFF is attempted.
+            pump_was_started = True
             self._publish_pump("on")
             on_published_at = _utc_timestamp()
-            pump_was_started = True
             def mark_active(state):
                 state["pump_active"] = True
                 state["pump_active_since"] = time.time()
@@ -2927,6 +2947,7 @@ class ActuatorLayer:
             time.sleep(sec)
             self._force_pump_off()
             off_published_at = _utc_timestamp()
+            budget.complete(budget_key, time.time())
             logger.info(f"  >>> [物理执行] {sec}s 灌溉顺利结束，等待水分渗透。")
             return {
                 "mqtt_on_published_at": on_published_at,
@@ -2952,6 +2973,11 @@ class ActuatorLayer:
         rc = getattr(info, "rc", 0)
         if rc != 0:
             raise PumpExecutionError(f"MQTT publish {payload!r} failed rc={rc}")
+        # rc=0 only means the publish was accepted locally. A timed-out QoS1
+        # wait must not turn an uncertain OFF into a completed budget record.
+        published = getattr(info, "is_published", None)
+        if not callable(published) or published() is not True:
+            raise PumpExecutionError(f"MQTT publish {payload!r} completion unknown")
 
     def _force_pump_off(self) -> None:
         retry_count = int(self.cfg.get_constant("PUMP_OFF_RETRY_COUNT") or 3)
@@ -4779,6 +4805,23 @@ class DecisionBrain:
         chosen_plan: Optional[ActionPlan] = None,
         notes: str = "",
     ) -> DecisionResult:
+        request_id = getattr(self, '_script_ai_claim', None)
+        fallback_id = getattr(self, '_script_ai_fallback_waiting', None)
+        if request_id or fallback_id:
+            store = self._script_ai_store()
+            if not request_id and store.claim(fallback_id, 'script'):
+                request_id = fallback_id
+            if request_id:
+                store.finish(request_id, dict(action_sec=action_sec, notes=notes,
+                    plan_label=getattr(chosen_plan, 'label', None),
+                    humidity_percent=reading.humidity,
+                    model_proposal_accepted=(getattr(self, '_script_ai_proposal_accepted', False)
+                                             if getattr(self, '_script_ai_claim', None) else False),
+                    feedback_action_id=(getattr(self.actuator, '_last_feedback_action_id', None)
+                                        if action_sec > 0 else None),
+                    physical_flow_confirmed=False))
+            self._script_ai_claim = None
+            self._script_ai_fallback_waiting = None
         if chosen_plan is not None:
             _record_phase2_selected_prediction(chosen_plan, reading)
         _append_sensor_log(
@@ -6323,14 +6366,209 @@ class DecisionBrain:
             f"water={water_sec:.1f}s reason={reason}"
         )
 
+    def _script_ai_store(self):
+        from services.soil3.agent_runtime.watering_request import RequestStore
+        enabled = self.cfg.get_constant("SCRIPT_AI_ENABLED") is True
+        root = self.cfg.get_constant("SCRIPT_AI_REQUEST_DIR")
+        if not enabled:
+            return None
+        if not isinstance(root, str) or not root:
+            raise ValueError("SCRIPT_AI_REQUEST_DIR must be configured")
+        return RequestStore(Path(root))
+
+    def should_wake_for_ai(self):
+        """Cheap request-only polling; no extra sensor read while sleeping."""
+        try:
+            store = self._script_ai_store()
+            if store is None:
+                return False
+            item = store.poll()
+            return bool(item and (item['status'] in {'ai_ready', 'fallback_ready'}
+                                  or store.due_for_review()))
+        except (OSError, ValueError, KeyError) as error:
+            logger.error('request_poll_failed:%s', type(error).__name__)
+            return False  # Normal cycle will fail closed on the corrupt record.
+
+    def _resume_script_ai(self, reading, zone):
+        """Nonblocking: an in-flight request never blocks local monitoring."""
+        store = self._script_ai_store()
+        if store is None:
+            return None
+        item = store.poll()
+        if not item:
+            return None
+        status = item['status']
+        if status == 'fallback_ready':
+            self._script_ai_fallback_waiting = item['decision_id']
+            return None  # Native rules recompute against THIS cycle's reading.
+        if status == 'finished' and store.due_for_review():
+            seed = dict(item['input'])
+            seed['trigger_reason'] = 'scheduled_review'
+            seed['script_reference'] = dict(suggested_action='observe',
+                suggested_seconds=0, reasons=['scheduled_review_before_native_recompute'])
+            store.create(seed, model_key=item['model_key'], process_id=item['care_process_id'])
+            return self._finish_result(zone=zone, reading=reading,
+                notes='script_ai_waiting_review')
+        if status == 'ai_ready' and store.claim(item['decision_id'], 'ai'):
+            self._script_ai_claim = item['decision_id']
+            self._script_ai_proposal_accepted = False
+            return self._run_model_cycle(reading, zone,
+                bundle_override=item['result']['bundle'])
+        if status in {'waiting', 'ai_ready', 'claimed'}:
+            # Never finalize an uncertain previous actuation as a zero action.
+            self._script_ai_claim = None
+            self._script_ai_fallback_waiting = None
+            return self._finish_result(zone=zone, reading=reading,
+                notes='script_ai_' + status)
+        return None
+
+    def _offer_script_ai(self, reading, zone, plan):
+        """Intercept a legal native positive candidate BEFORE actuation."""
+        import uuid
+        store = self._script_ai_store()
+        if store is None:
+            return None
+        if getattr(self.actuator, '_bound_feedback_receipt', None) is not None:
+            return self._finish_result(zone=zone, reading=reading,
+                notes='controlled_v1_cannot_start_script_ai_request')
+        item = store.poll()
+        if item and item['status'] == 'fallback_ready':
+            if store.claim(item['decision_id'], 'script'):
+                self._script_ai_claim = item['decision_id']
+                return None  # Continue this newly computed native plan exactly once.
+        elif not item or item['status'] in {'finished', 'cancelled'}:
+            delay = store.review_delay()
+            if delay is not None and delay > 0:
+                return self._finish_result(zone=zone, reading=reading,
+                    notes='script_ai_wait_until_review')
+            # Same care-process identity across decisions; process ending is not
+            # fabricated from a wetness threshold or an arbitrary duration.
+            process_id = item['care_process_id'] if item else str(uuid.uuid4())
+            item = store.create(dict(
+                trigger_reason='script_watering_need',
+                script_reference=dict(suggested_action='water',
+                    suggested_seconds=plan.water_sec, reasons=[plan.label]),
+                candidate_observation=dict(humidity_percent=reading.humidity,
+                    observed_at=str(getattr(reading, 'timestamp', 'unknown'))),
+                execution_constraints=dict(
+                    min_seconds=self.cfg.get_constant('WATER_SEC_MIN'),
+                    max_seconds=self.cfg.get_constant('WATER_SEC_MAX_HARD'),
+                    min_check_seconds=self.cfg.get_constant('SCRIPT_AI_MIN_CHECK_SEC'),
+                    max_check_seconds=self.cfg.get_constant('SCRIPT_AI_MAX_CHECK_SEC'))),
+                model_key='cloud', process_id=process_id)
+        return self._finish_result(zone=zone, reading=reading,
+            notes='script_ai_' + (item['status'] if item else 'unavailable'))
+
+    def _run_model_cycle(self, reading: SensorReading, zone: ZoneStatus, *, bundle_override=None) -> DecisionResult:
+        """Phase3-owned model proposal intake; never fall through to native policy.
+
+        Style, Kp dose preference and CostCourt do not choose this action. Native
+        emergency and PendingSoak run before this entry; actuator hard limits,
+        fresh safety, a durable claim and an explicit aggregate budget remain.
+        """
+        from services.soil3.phase3.model_proposal import (
+            ProposalPolicy, ProposalClaims, check_proposal,
+        )
+        self._script_ai_proposal_accepted = False
+
+        claims = ProposalClaims(Path(FILE_PATHS["SYSTEM_STATE"]).parent / "model_proposal_claims")
+        def observe(reason):
+            logger.info("[ModelProposal] observe: %s", reason)
+            return self._finish_result(zone=zone, reading=reading,
+                chosen_plan=ActionPlan("model_observe", 0.0), notes=reason)
+
+        # V1 controlled approvals authorize their own zero-argument native
+        # cycle, not whichever independent model proposal is currently latest.
+        if getattr(self.actuator, "_bound_feedback_receipt", None) is not None:
+            return observe("controlled_v1_cannot_consume_model_proposal")
+
+        # Serialize reservation + execution independently of system_state's lock.
+        with file_lock(claims.directory / "admission"):
+            try:
+                source = self.cfg.get_constant("MODEL_PROPOSAL_PATH")
+                if bundle_override is None and (not isinstance(source, str) or not source):
+                    return observe("model_proposal_source_not_configured")
+                policy = ProposalPolicy(
+                    min_seconds=self.cfg.get_constant("WATER_SEC_MIN"),
+                    max_seconds=self.cfg.get_constant("WATER_SEC_MAX_HARD"),
+                    max_seconds_24h=self.cfg.get_constant("MODEL_PROPOSAL_BUDGET_24H_SEC"),
+                    max_age_seconds=self.cfg.get_constant("MODEL_PROPOSAL_MAX_AGE_SEC"),
+                    max_humidity_drift=self.cfg.get_constant("MODEL_PROPOSAL_MAX_HUMIDITY_DRIFT"),
+                    min_interval_seconds=self.cfg.get_constant("SOAK_WAIT_SEC"),
+                )
+                bundle = (bundle_override if bundle_override is not None else
+                          json.loads(Path(source).read_text(encoding="utf-8")))
+                # A queued proposal must be checked against a fresh reading.
+                reading = self.sensor.read(require_fresh=True)
+                state = _load_system_state()
+                def active(name):
+                    value = state.get(name)
+                    if isinstance(value, bool):return value
+                    if isinstance(value, dict) and isinstance(value.get("active"), bool):
+                        return value["active"]
+                    return None
+                from services.soil3.cloud_trigger.context_v1 import _active_state
+                now = datetime.now(timezone.utc)
+                def timed_guard(name):
+                    value = state.get(name, False)
+                    status = _active_state(name, value, observed_at=now.isoformat(),
+                                           phase3_system_state=state)
+                    return {"active":True,"inactive":False}.get(status)
+                predictor = state.get("predictor_circuit")
+                predictor_state = predictor.get("state") if isinstance(predictor, dict) else None
+                current = dict(
+                    humidity=reading.humidity, field_capacity=self.cfg.FC,
+                    sensor_stale=reading.sensor_stale_hard,
+                    pump_active=active("pump_active"),
+                    pending_soak=bool(self._pending_soak or state.get("pending_soak")),
+                    last_water_at=state.get("pump_last_off_at") or state.get("last_normal_irrigation_timestamp"),
+                    predictor_circuit_open=(predictor_state == "OPEN" if predictor_state in {"CLOSED","HALF_OPEN","OPEN"} else None),
+                    cloud_protection=timed_guard("cloud_protection"),
+                    recent_response_guard=timed_guard("recent_response_guard"),
+                    **{name:active(name) for name in ("sensor_fault", "water_delivery_suspect",
+                        "reservoir_empty_suspect", "low_wet_recovery_suspect")},
+                )
+                result = check_proposal(bundle, policy, current, now, claims.history())
+                if not result.accepted:return observe(";".join(result.reasons))
+                # Consume before any command, including an observation. Never
+                # retry an uncertain physical outcome after a crash.
+                claim_path = claims.claim(result, now)
+                self._script_ai_proposal_accepted = True
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                return observe("model_proposal_unavailable:" + type(error).__name__)
+
+            plan = ActionPlan("model_proposal", result.seconds)
+            if result.seconds <= 0:
+                return observe("model_selected_observation:" + result.strategy_id)
+            # Execution errors propagate to the existing daemon handler; the
+            # reservation remains consumed and is NOT represented as no action.
+            self._pending_soak = self.actuator.execute_pump(
+                result.seconds, reading.humidity, is_emergency=False,
+                plan_label="model_proposal", prediction_plan=plan,
+            )
+            save_json_locked(claim_path, dict(strategy_id=result.strategy_id,
+                strategy_sha256=result.strategy_sha256, claimed_at=now.timestamp(),
+                seconds=result.seconds, status="command_completed",
+                physical_flow_confirmed=False))
+            return self._finish_result(zone=zone, reading=reading, action_sec=result.seconds,
+                chosen_plan=plan, notes="model_proposal:" + result.strategy_id)
+
     def run_cycle(self) -> DecisionResult:
         """执行一次完整决策循环，返回 DecisionResult 供主进程记录与休眠。"""
+
+        # These are cycle-local handles. Durable claimed records survive an
+        # execution exception, and must not be finalized by a later emergency.
+        self._script_ai_claim = None
+        self._script_ai_fallback_waiting = None
+        self._script_ai_proposal_accepted = False
 
         # 任务1：current_reading 用于复用 settle() 的传感器数据，跳过重复读取
         current_reading: Optional[SensorReading] = None
 
         # ── Fix-A / Fix-3：渗透等待期优先检查紧急状态 ───────────────
         if self._pending_soak is not None:
+            if self.cfg.get_constant("SCRIPT_AI_ENABLED") is True:
+                self._script_ai_store().cancel('pending_soak_or_emergency')
             soak = self._pending_soak
 
             # Fix-3：无论渗透是否完成，都先读传感器判断紧急态势
@@ -6466,6 +6704,22 @@ class DecisionBrain:
                 reading=reading,
                 notes="土壤传感器有效读数超过硬阈值，禁止自动浇水。",
             )
+
+        script_ai = self.cfg.get_constant("SCRIPT_AI_ENABLED") is True
+        if script_ai:
+            self._script_ai_store()  # Validate explicit root before any ordinary action.
+        if script_ai:
+            if zone == ZoneStatus.EMERGENCY:
+                self._script_ai_store().cancel('native_emergency')
+            else:
+                resumed = self._resume_script_ai(reading, zone)
+                if resumed is not None:
+                    return resumed
+
+        # Proposal mode is explicit and bypasses native style/candidate/cost
+        # preferences, not emergency, stale-data or PendingSoak handling.
+        if not script_ai and self.cfg.get_constant("MODEL_PROPOSAL_ENABLED") is True and zone != ZoneStatus.EMERGENCY:
+            return self._run_model_cycle(reading, zone)
 
         # ── 安全区：直接放行 ──────────────────────────────────────────
         if zone == ZoneStatus.SAFE_SLEEP:
@@ -6605,6 +6859,10 @@ class DecisionBrain:
                         f"reason={recovery_window.get('reason')}。"
                     ),
                 )
+            if script_ai:
+                offered = self._offer_script_ai(reading, zone, recovery_plan)
+                if offered is not None:
+                    return offered
             expected_delta = max(0.0, (recovery_plan.predicted_peak or reading.humidity) - reading.humidity)
             self._mark_style_arm(
                 "drydown_recovery",
@@ -6774,6 +7032,10 @@ class DecisionBrain:
                 ),
             )
 
+        if script_ai:
+            offered = self._offer_script_ai(reading, zone, best_plan)
+            if offered is not None:
+                return offered
         self._consume_exploration_budget(best_plan)
         self._record_watering_trigger(best_plan, reading, trigger_reason)
         if style_arm == "micro_pulse":

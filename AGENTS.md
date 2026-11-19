@@ -47,7 +47,17 @@ When sources conflict, use this order: explicit Issue scope → local `AGENTS.md
 
 For each Issue, create one independent branch from the latest `main` (for example, `issue-<number>-<short-name>`). Agents may commit and push their own Issue branch, create or update its PR to `main`, and respond to Review feedback. They must not merge it.
 
-Task completion means **PR Ready for Review**. The Owner checks each Review batch for integration concerns and manually merges approved PRs into `main`. Task order, ownership, and acceptance timing are defined only by the current GitHub Issues.
+An implementation task reaches **PR Ready for Review** after its own tests and Review handoff. An Issue is accepted only after the Owner has approved and manually merged its PR into `main`. Task order, ownership, and acceptance timing are defined only by the current GitHub Issues.
+
+## Deployment cadence
+
+Every production version change, including a hotfix, must be recorded on GitHub before deployment. Deploy from a GitHub commit merged into `main` through the Owner-approved PR workflow. Record the exact commit SHA and PR in the deployment record so the running version can be traced to GitHub.
+
+Use **Issue-level local acceptance and Day-level unified deployment**. A single Issue requires implementation, focused tests, full regression when the environment permits, Review, and an Owner-merged PR; it must not trigger an openEuler deployment or standalone production demonstration.
+
+After every Issue in the same Day has merged, start from the latest `main` and perform one Day-level integration test, unified openEuler deployment, real-environment demonstration, and cross-module data-chain/boundary verification. The Day is complete only after that verification succeeds.
+
+An Issue may receive a separate real camera, provider, or hardware smoke test only when the Owner explicitly approves it because that dependency is necessary to validate its core assumption. Such a smoke test is not the Day deployment and must not modify other production modules. Do not ask to deploy after each Issue.
 
 ## Review handoff
 

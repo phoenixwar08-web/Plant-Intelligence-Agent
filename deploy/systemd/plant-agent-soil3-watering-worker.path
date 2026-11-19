@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch explicit Phase3 soil3 watering requests
+Wants=plant-agent-soil3-watering-worker.service
+
+[Path]
+PathChanged=/root/water/runtime/instances/soil3/agent_chain/watering_requests/active.json
+Unit=plant-agent-soil3-watering-worker.service
+
+[Install]
+WantedBy=multi-user.target

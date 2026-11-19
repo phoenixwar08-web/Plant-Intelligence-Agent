@@ -67,7 +67,7 @@ class VisionSettings:
             base_url=required["base_url"],
             data_root=Path(required["data_root"]),
             zones_path=Path(required["zones_path"]),
-            model=os.environ.get("QWEN_MODEL", "qwen3-vl-flash"),
+            model=os.environ.get("SOIL3_VISION_MODEL") or os.environ.get("QWEN_MODEL", "qwen3-vl-flash"),
         )
 
     def load_zones(self) -> tuple[PlantZone, ...]:
