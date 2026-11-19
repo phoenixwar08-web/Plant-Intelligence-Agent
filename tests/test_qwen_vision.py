@@ -114,6 +114,7 @@ class QwenVisionTests(unittest.TestCase):
 
         self.assertEqual(result["image_quality"], "unusable")
         request = session.requests[0]
+        self.assertEqual((8.0, 60.0), request["timeout"])
         self.assertEqual(request["url"], "https://provider.example/compatible-mode/v1/chat/completions")
         self.assertEqual(request["json"]["model"], "qwen3-vl-flash")
         content = request["json"]["messages"][0]["content"]
