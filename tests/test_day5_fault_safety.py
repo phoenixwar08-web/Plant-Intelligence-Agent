@@ -141,7 +141,7 @@ class ProviderHttp:
         return self.response
 
 
-def admitted_gate(state, strategy, policy, exploration_requested):
+def admitted_gate(state, strategy, policy, exploration_requested, **gate_context):
     gate = evaluate_gate_v2(state, strategy, policy, exploration_requested)
     gate["decision"] = "allow"
     gate["reason_codes"] = []
@@ -402,7 +402,7 @@ class Day5FaultSafetyTests(unittest.TestCase):
             self.assertEqual(NO_EXECUTION, trace["execution"])
 
     def test_gate_deny_and_strategy_hash_mismatch_do_not_reach_bridge(self):
-        def mismatched_gate(state, strategy, policy, exploration_requested):
+        def mismatched_gate(state, strategy, policy, exploration_requested, **gate_context):
             gate = admitted_gate(state, strategy, policy, exploration_requested)
             gate["strategy_sha256"] = "0" * 64
             return gate

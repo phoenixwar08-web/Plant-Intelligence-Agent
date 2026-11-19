@@ -87,7 +87,7 @@ def health_snapshot():
     }
 
 
-def admitted_gate(state, strategy, policy, exploration_requested):
+def admitted_gate(state, strategy, policy, exploration_requested, **gate_context):
     gate = evaluate_gate_v2(state, strategy, policy, exploration_requested)
     gate["decision"] = "allow"
     gate["reason_codes"] = []
