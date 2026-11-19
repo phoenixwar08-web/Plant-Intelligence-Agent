@@ -107,7 +107,7 @@ class QwenVisionAnalyzer:
         api_key: str,
         image_root: Path,
         model: str = "qwen3-vl-flash",
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 60.0,
         session: requests.Session | None = None,
     ) -> None:
         self._url = f"{base_url.rstrip('/')}/chat/completions"
@@ -132,7 +132,7 @@ class QwenVisionAnalyzer:
                 self._url,
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 json=payload,
-                timeout=self._timeout_seconds,
+                timeout=(8.0, self._timeout_seconds),
             )
         except requests.Timeout:
             # Raised without chaining: a requests error string carries the endpoint URL.
